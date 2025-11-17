@@ -1,0 +1,35 @@
+# SKEIN CLI Dockerfile
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy requirements first for better caching
+COPY requirements.txt .
+
+# Install Python dependencies
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy application code
+COPY skein/ ./skein/
+COPY client/ ./client/
+
+# Create skein home directory for registry
+RUN mkdir -p /root/.skein
+
+# Set environment variables
+ENV PYTHONUNBUFFERED=1
+ENV SKEIN_SERVER_URL=http://skein-server:8001
+
+# Create entrypoint script that wraps the CLI
+RUN echo '#!/bin/bash\npython -m client.cli "$@"' > /usr/local/bin/skein && \
+    chmod +x /usr/local/bin/skein
+
+# Default to showing help
+ENTRYPOINT ["skein"]
+CMD ["--help"]

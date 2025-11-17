@@ -1,0 +1,71 @@
+version: '3.8'
+
+services:
+  skein:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: skein-server
+    ports:
+      - "8001:8001"
+    environment:
+      - SKEIN_HOST=0.0.0.0
+      - SKEIN_PORT=8001
+      - SKEIN_LOG_LEVEL=info
+    volumes:
+      # Mount local data directory for persistence
+      - ./data:/app/.skein/data
+      # Mount config for customization
+      - ./config:/app/config:ro
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  # Development service with hot reload
+  skein-dev:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: skein-dev
+    ports:
+      - "8001:8001"
+    environment:
+      - SKEIN_HOST=0.0.0.0
+      - SKEIN_PORT=8001
+      - SKEIN_LOG_LEVEL=debug
+    volumes:
+      # Mount source code for hot reload
+      - ./skein:/app/skein
+      - ./client:/app/client
+      - ./skein_server.py:/app/skein_server.py
+      - ./data:/app/.skein/data
+      - ./config:/app/config:ro
+    command: ["uvicorn", "skein_server:app", "--host", "0.0.0.0", "--port", "8001", "--reload"]
+    profiles:
+      - dev
+
+  # SKEIN CLI
+  cli:
+    build:
+      context: .
+      dockerfile: Dockerfile.cli
+    container_name: skein-cli
+    environment:
+      - SKEIN_SERVER_URL=http://skein:8001
+    volumes:
+      # Mount project directory for CLI to detect .skein
+      - .:/project
+      # Persist CLI config
+      - skein-cli-config:/root/.skein
+    working_dir: /project
+    depends_on:
+      - skein
+    profiles:
+      - cli
+
+volumes:
+  skein-cli-config:

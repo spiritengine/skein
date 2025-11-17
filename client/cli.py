@@ -1,0 +1,3211 @@
+#!/usr/bin/env python3
+"""
+SKEIN CLI - Command-line interface for SKEIN collaboration system.
+
+Usage:
+    export SKEIN_AGENT_ID=agent-007
+    skein log stream-name "Error message" --level ERROR
+    skein brief create site-id "Handoff content"
+    skein brief brief-20251106-x9k2
+"""
+
+import os
+import sys
+import json
+import click
+import requests
+from pathlib import Path
+from datetime import datetime
+from typing import Optional, List, Dict, Any
+
+
+def find_project_root() -> Optional[Path]:
+    """
+    Walk up directory tree to find .skein/ directory (like git).
+    Returns project root path or None if not found.
+    """
+    current = Path.cwd()
+    while current != current.parent:
+        skein_dir = current / '.skein'
+        if skein_dir.exists() and skein_dir.is_dir():
+            return current
+        current = current.parent
+    return None
+
+
+def get_project_config() -> Optional[Dict[str, Any]]:
+    """Get project config from .skein/config.json if in a project."""
+    project_root = find_project_root()
+    if not project_root:
+        return None
+
+    config_file = project_root / '.skein' / 'config.json'
+    if not config_file.exists():
+        return None
+
+    try:
+        with open(config_file) as f:
+            return json.load(f)
+    except:
+        return None
+
+
+def get_global_config() -> Dict[str, Any]:
+    """Get global SKEIN config from ~/.skein/config.json."""
+    config_file = Path.home() / '.skein' / 'config.json'
+    if not config_file.exists():
+        return {"server_url": "http://localhost:8001"}
+
+    try:
+        with open(config_file) as f:
+            return json.load(f)
+    except:
+        return {"server_url": "http://localhost:8001"}
+
+
+def get_agent_id(ctx_agent: Optional[str] = None, base_url: Optional[str] = None) -> str:
+    """
+    Get agent ID from sources in priority order:
+    1. --agent flag (explicit override)
+    2. SKEIN_AGENT_ID env var
+    3. "unknown" fallback
+    """
+    if ctx_agent:
+        return ctx_agent
+    return os.getenv("SKEIN_AGENT_ID", "unknown")
+
+
+def get_base_url(ctx_url: Optional[str] = None) -> str:
+    """
+    Get SKEIN base URL in priority order:
+    1. --url flag
+    2. SKEIN_URL env var
+    3. Project config (.skein/config.json)
+    4. Global config (~/.skein/config.json)
+    5. Default localhost:8001
+    """
+    if ctx_url:
+        return ctx_url.rstrip("/")
+
+    # Check environment variable
+    env_url = os.getenv("SKEIN_URL")
+    if env_url:
+        return env_url.rstrip("/")
+
+    # Check project config
+    project_config = get_project_config()
+    if project_config and project_config.get("server_url"):
+        return project_config["server_url"].rstrip("/")
+
+    # Check global config
+    global_config = get_global_config()
+    if global_config.get("server_url"):
+        return global_config["server_url"].rstrip("/")
+
+    return "http://localhost:8001"
+
+
+def validate_positional_args(*args, command_name: str):
+    """
+    Validate positional arguments to detect common syntax mistakes.
+    Raises ClickException with helpful error if name=value pattern detected.
+    """
+    for arg in args:
+        if isinstance(arg, str) and '=' in arg and not arg.startswith('-'):
+            # Check if it looks like name=value syntax
+            parts = arg.split('=', 1)
+            if len(parts) == 2 and parts[0].isidentifier():
+                param_name = parts[0]
+                raise click.ClickException(
+                    f"Incorrect syntax: '{arg}'\n\n"
+                    f"It looks like you're using '{param_name}=\"...\"' syntax.\n"
+                    f"The SKEIN CLI uses positional arguments, not named parameters.\n\n"
+                    f"Correct syntax: skein {command_name} SITE_ID \"description\"\n"
+                    f"See: skein {command_name} --help"
+                )
+
+
+def make_request(method: str, endpoint: str, base_url: str, agent_id: str, **kwargs):
+    """Make HTTP request to SKEIN API."""
+    url = f"{base_url}/skein{endpoint}"
+    headers = kwargs.pop("headers", {})
+
+    if agent_id != "unknown":
+        headers["X-Agent-Id"] = agent_id
+
+    # Add project ID from project config if available
+    project_config = get_project_config()
+    if project_config and "project_id" in project_config:
+        headers["X-Project-Id"] = project_config["project_id"]
+
+    try:
+        resp = requests.request(method, url, headers=headers, **kwargs)
+        resp.raise_for_status()
+        return resp.json() if resp.text else {}
+    except requests.exceptions.RequestException as e:
+        if hasattr(e, "response") and e.response is not None:
+            try:
+                error = e.response.json()
+                raise click.ClickException(f"API error: {error.get('detail', str(e))}")
+            except:
+                raise click.ClickException(f"API error: {e.response.text or str(e)}")
+        raise click.ClickException(f"Connection error: {str(e)}")
+
+
+@click.group()
+@click.option("--agent", envvar="SKEIN_AGENT_ID", help="Agent ID (or set SKEIN_AGENT_ID)")
+@click.option("--url", envvar="SKEIN_URL", help="SKEIN server URL (default: localhost:8001)")
+@click.pass_context
+def cli(ctx, agent, url):
+    """SKEIN CLI - Agent collaboration system.
+
+    Getting started: skein info quickstart
+    Full guide: skein info guide
+    """
+    ctx.ensure_object(dict)
+    ctx.obj["agent"] = agent
+    ctx.obj["url"] = url
+
+
+# ============================================================================
+# Project Management Commands
+# ============================================================================
+
+@cli.command()
+@click.option("--project", required=True, help="Project ID (e.g., 'myproject')")
+@click.option("--name", help="Project display name")
+def init(project, name):
+    """
+    Initialize SKEIN in current directory (like git init).
+
+    Creates .skein/ directory with config and data.
+    Registers project in ~/.skein/projects.json.
+    """
+    project_root = Path.cwd()
+    skein_dir = project_root / '.skein'
+
+    # Check if already initialized
+    if skein_dir.exists():
+        raise click.ClickException(f"SKEIN already initialized in {project_root}")
+
+    # Create .skein directory structure
+    skein_dir.mkdir()
+    data_dir = skein_dir / 'data'
+    data_dir.mkdir()
+    (data_dir / 'sites').mkdir()
+    (data_dir / 'roster').mkdir()
+    (data_dir / 'threads').mkdir()
+    (data_dir / 'screenshots').mkdir()
+
+    # Create project config
+    project_config = {
+        "project_id": project,
+        "name": name or project,
+        "created_at": datetime.now().isoformat(),
+        "server_url": "http://localhost:8001"
+    }
+
+    config_file = skein_dir / 'config.json'
+    with open(config_file, 'w') as f:
+        json.dump(project_config, f, indent=2)
+
+    # Register in global projects.json
+    global_dir = Path.home() / '.skein'
+    global_dir.mkdir(exist_ok=True)
+
+    projects_file = global_dir / 'projects.json'
+    if projects_file.exists():
+        with open(projects_file) as f:
+            projects_data = json.load(f)
+    else:
+        projects_data = {"projects": {}}
+
+    projects_data["projects"][project] = {
+        "path": str(project_root),
+        "data_dir": str(data_dir),
+        "name": name or project,
+        "registered_at": datetime.now().isoformat()
+    }
+
+    with open(projects_file, 'w') as f:
+        json.dump(projects_data, f, indent=2)
+
+    click.echo(f"✓ Initialized SKEIN project '{project}' in {project_root}")
+    click.echo(f"✓ Created .skein/ directory")
+    click.echo(f"✓ Registered in ~/.skein/projects.json")
+    click.echo(f"\nProject data: {data_dir}")
+    click.echo(f"Server URL: {project_config['server_url']}")
+
+
+@cli.command()
+@click.option("--verbose", "-v", is_flag=True, help="Show detailed information")
+def projects(verbose):
+    """
+    List all registered SKEIN projects.
+
+    Shows all projects registered in ~/.skein/projects.json.
+    Use -v for detailed information including paths and registration dates.
+
+    Examples:
+        skein projects
+        skein projects -v
+    """
+    global_dir = Path.home() / '.skein'
+    projects_file = global_dir / 'projects.json'
+
+    if not projects_file.exists():
+        click.echo("No projects registered yet.")
+        click.echo("\nTo initialize a project, run:")
+        click.echo("  skein init --project PROJECT_NAME")
+        return
+
+    with open(projects_file) as f:
+        projects_data = json.load(f)
+
+    all_projects = projects_data.get("projects", {})
+
+    if not all_projects:
+        click.echo("No projects registered yet.")
+        return
+
+    # Determine current project if we're in one
+    current_project_id = None
+    try:
+        current_config = get_project_config()
+        if current_config:
+            current_project_id = current_config.get("project_id")
+    except:
+        pass
+
+    click.echo(f"Found {len(all_projects)} project(s):\n")
+
+    for project_id, project_info in sorted(all_projects.items()):
+        # Check if this is the current project
+        marker = " *" if project_id == current_project_id else ""
+
+        # Check if project path still exists
+        path = project_info.get("path", "")
+        exists = Path(path).exists() if path else False
+        status = "✓" if exists else "✗"
+
+        click.echo(f"  {status} {project_id}{marker}")
+
+        if verbose:
+            name = project_info.get("name", project_id)
+            registered = project_info.get("registered_at", "unknown")
+
+            click.echo(f"      Name: {name}")
+            click.echo(f"      Path: {path}")
+            click.echo(f"      Registered: {registered}")
+            click.echo()
+        else:
+            click.echo(f"      {path}")
+
+    if not verbose and current_project_id:
+        click.echo(f"\n  * = current project")
+
+    if not verbose:
+        click.echo(f"\nUse 'skein projects -v' for detailed information")
+
+
+# ============================================================================
+# Logging Commands
+# ============================================================================
+
+@cli.command()
+@click.argument("stream_id")
+@click.argument("messages", nargs=-1, required=True)
+@click.option("--level", default="INFO", help="Log level (INFO, ERROR, DEBUG, WARN)")
+@click.pass_context
+def log(ctx, stream_id, messages, level):
+    """Stream log lines to SKEIN."""
+    base_url = get_base_url(ctx.obj.get("url"))
+    agent_id = get_agent_id(ctx.obj.get("agent"), base_url)
+
+    lines = [{"level": level, "message": msg, "metadata": {}} for msg in messages]
+
+    data = {
+        "stream_id": stream_id,
+        "source": agent_id,
+        "lines": lines
+    }
+
+    result = make_request("POST", "/logs", base_url, agent_id, json=data)
+    click.echo(f"Logged {result.get('count', len(lines))} line(s) to {stream_id}")
+
+
+@cli.command()
+@click.argument("stream_id", required=False)
+@click.option("--level", help="Filter by level (ERROR, WARN, INFO, DEBUG)")
+@click.option("--since", help="Time filter (1hour, 2days, or ISO timestamp)")
+@click.option("--search", help="Full-text search in messages")
+@click.option("--tail", type=int, help="Show last N lines")
+@click.option("--list", "list_streams", is_flag=True, help="List all log streams")
+@click.option("--json", "output_json", is_flag=True, help="Output as JSON")
+@click.pass_context
+def logs(ctx, stream_id, level, since, search, tail, list_streams, output_json):
+    """Retrieve logs from SKEIN."""
+    base_url = get_base_url(ctx.obj.get("url"))
+    agent_id = get_agent_id(ctx.obj.get("agent"), base_url)
+
+    if list_streams:
+        result = make_request("GET", "/logs/streams", base_url, agent_id)
+        if output_json:
+            click.echo(json.dumps(result, indent=2))
+        else:
+            streams = result.get("streams", [])
+            if not streams:
+                click.echo("No log streams found")
+            else:
+                click.echo(f"Found {len(streams)} stream(s):\n")
+                for s in streams:
+                    click.echo(f"  {s['stream_id']}")
+                    click.echo(f"    Lines: {s['line_count']}")
+                    click.echo(f"    Last: {s['last_log']}")
+                    click.echo()
+        return
+
+    if not stream_id:
+        raise click.ClickException("stream_id required (or use --list)")
+
+    params = {}
+    if level:
+        params["level"] = level
+    if since:
+        params["since"] = since
+    if search:
+        params["search"] = search
+    if tail:
+        params["limit"] = tail
+
+    log_lines = make_request("GET", f"/logs/{stream_id}", base_url, agent_id, params=params)
+
+    if output_json:
+        click.echo(json.dumps(log_lines, indent=2))
+    else:
+        if not log_lines:
+            click.echo(f"No logs found in {stream_id}")
+        else:
+            for line in log_lines[:50]:  # Limit display to 50
+                timestamp = line.get("timestamp", "")[:19]
+                level_str = line.get("level", "INFO")
+                message = line.get("message", "")
+                click.echo(f"[{timestamp}] {level_str}: {message}")
+
+            if len(log_lines) > 50:
+                click.echo(f"\n... and {len(log_lines) - 50} more lines (use --json to see all)")
+
+
+# ============================================================================
+# Sites Commands
+# ============================================================================
+
+@cli.group()
+def site():
+    """Manage SKEIN sites (workspaces)."""
+    pass
+
+
+@site.command("create")
+@click.argument("site_id")
+@click.argument("purpose")
+@click.option("--tags", help="Comma-separated tags")
+@click.pass_context
+def site_create(ctx, site_id, purpose, tags):
+    """Create a new site."""
+    base_url = get_base_url(ctx.obj.get("url"))
+    agent_id = get_agent_id(ctx.obj.get("agent"), base_url)
+
+    tag_list = [t.strip() for t in tags.split(",")] if tags else []
+
+    data = {
+        "site_id": site_id,
+        "purpose": purpose,
+        "metadata": {"tags": tag_list}
+    }
+
+    result = make_request("POST", "/sites", base_url, agent_id, json=data)
+    click.echo(f"Created site: {site_id}")
+
+
+@site.command("get")
+@click.argument("site_id")
+@click.option("--json", "output_json", is_flag=True)
+@click.pass_context
+def site_get(ctx, site_id, output_json):
+    """Get site details."""
+    base_url = get_base_url(ctx.obj.get("url"))
+    agent_id = get_agent_id(ctx.obj.get("agent"), base_url)
+
+    site_data = make_request("GET", f"/sites/{site_id}", base_url, agent_id)
+
+    if output_json:
+        click.echo(json.dumps(site_data, indent=2))
+    else:
+        click.echo(f"Site: {site_data['site_id']}")
+        click.echo(f"Purpose: {site_data['purpose']}")
+        click.echo(f"Created: {site_data['created_at']}")
+        click.echo(f"By: {site_data['created_by']}")
+        if site_data.get("metadata", {}).get("tags"):
+            click.echo(f"Tags: {', '.join(site_data['metadata']['tags'])}")
+
+
+@cli.command()
+@click.option("--tag", help="Filter by tag")
+@click.option("--json", "output_json", is_flag=True)
+@click.pass_context
+def sites(ctx, tag, output_json):
+    """List all sites."""
+    base_url = get_base_url(ctx.obj.get("url"))
+    agent_id = get_agent_id(ctx.obj.get("agent"), base_url)
+
+    params = {}
+    if tag:
+        params["tag"] = tag
+
+    sites_list = make_request("GET", "/sites", base_url, agent_id, params=params)
+
+    if output_json:
+        click.echo(json.dumps(sites_list, indent=2))
+    else:
+        if not sites_list:
+            click.echo("No sites found")
+        else:
+            click.echo(f"Found {len(sites_list)} site(s):\n")
+            for s in sites_list:
+                click.echo(f"  {s['site_id']}")
+                click.echo(f"    {s['purpose']}")
+                click.echo()
+
+
+# ============================================================================
+# Issues Commands
+# ============================================================================
+
+@cli.command()
+@click.argument("site_id")
+@click.argument("title")
+@click.option("--content", help="Issue description")
+@click.option("--assign", help="Assign to agent")
+@click.pass_context
+def issue(ctx, site_id, title, content, assign):
+    """File an issue."""
+    validate_positional_args(site_id, title, command_name="issue")
+    base_url = get_base_url(ctx.obj.get("url"))
+    agent_id = get_agent_id(ctx.obj.get("agent"), base_url)
+
+    data = {
+        "type": "issue",
+        "site_id": site_id,
+        "title": title,
+        "content": content or title,
+        "assigned_to": assign,
+        "metadata": {}
+    }
+
+    result = make_request("POST", "/folios", base_url, agent_id, json=data)
+    click.echo(f"Created issue: {result['folio_id']}")
+
+
+@cli.command()
+@click.argument("site_id", required=False)
+@click.option("--assigned-to", help="Filter by assignee")
+@click.option("--status", default="open", help="Filter by status")
+@click.option("--json", "output_json", is_flag=True)
+@click.pass_context
+def issues(ctx, site_id, assigned_to, status, output_json):
+    """List issues."""
+    base_url = get_base_url(ctx.obj.get("url"))
+    agent_id = get_agent_id(ctx.obj.get("agent"), base_url)
+
+    params = {"type": "issue"}
+    if site_id:
+        params["site_id"] = site_id
+    if assigned_to:
+        if assigned_to == "me":
+            assigned_to = agent_id
+        params["assigned_to"] = assigned_to
+    if status:
+        params["status"] = status
+
+    issues_list = make_request("GET", "/folios", base_url, agent_id, params=params)
+
+    if output_json:
+        click.echo(json.dumps(issues_list, indent=2))
+    else:
+        if not issues_list:
+            click.echo("No issues found")
+        else:
+            click.echo(f"Found {len(issues_list)} issue(s):\n")
+
+            # OPTIMIZATION: Batch fetch all threads once (1 API call vs N*2)
+            try:
+                all_threads = make_request("GET", "/threads", base_url, agent_id)
+                # Build lookup dict: resource_id -> [threads]
+                threads_by_resource = {}
+                for thread in all_threads:
+                    # Index by both from_id and to_id
+                    if thread['from_id'] not in threads_by_resource:
+                        threads_by_resource[thread['from_id']] = []
+                    threads_by_resource[thread['from_id']].append(thread)
+
+                    if thread['to_id'] not in threads_by_resource:
+                        threads_by_resource[thread['to_id']] = []
+                    threads_by_resource[thread['to_id']].append(thread)
+            except:
+                # Fall back to no threads if batch fetch fails
+                threads_by_resource = {}
+
+            for i in issues_list:
+                click.echo(f"  {i['folio_id']}")
+                click.echo(f"    {i['title']}")
+
+                # Get threads from batch-fetched data
+                try:
+                    resource_threads = threads_by_resource.get(i['folio_id'], [])
+
+                    # Dedupe threads (same thread appears in from_id and to_id indexes)
+                    thread_ids = set()
+                    unique_threads = []
+                    for t in resource_threads:
+                        if t['thread_id'] not in thread_ids:
+                            thread_ids.add(t['thread_id'])
+                            unique_threads.append(t)
+
+                    # Extract tags (self-referential threads with type tag)
+                    tags = [t['content'] for t in unique_threads
+                           if t['type'] == 'tag' and t['from_id'] == t['to_id']]
+
+                    # Build breadcrumb
+                    breadcrumb_parts = []
+                    breadcrumb_parts.append(f"Site: {i['site_id']}")
+                    breadcrumb_parts.append(f"Status: {i['status']}")
+                    if len(unique_threads) > 0:
+                        breadcrumb_parts.append(f"{len(unique_threads)} threads")
+                    if tags:
+                        breadcrumb_parts.append(f"Tags: {', '.join(tags)}")
+
+                    click.echo(f"    {' | '.join(breadcrumb_parts)}")
+                except:
+                    # Fall back to simple display if thread processing fails
+                    click.echo(f"    Site: {i['site_id']} | Status: {i['status']}")
+
+                if i.get("assigned_to"):
+                    click.echo(f"    Assigned: {i['assigned_to']}")
+                click.echo()
+
+
+# ============================================================================
+# Briefs (Handoffs) Commands
+# ============================================================================
+
+@cli.group()
+def brief():
+    """Manage handoff briefs."""
+    pass
+
+
+@brief.command("create")
+@click.argument("site_id")
+@click.argument("content")
+@click.option("--target", help="Target agent")
+@click.option("--title", help="Brief title")
+@click.option("--successor-name", help="Suggested name for successor agent")
+@click.pass_context
+def brief_create(ctx, site_id, content, target, title, successor_name):
+    """Create a handoff brief."""
+    validate_positional_args(site_id, content, command_name="brief create")
+    base_url = get_base_url(ctx.obj.get("url"))
+    agent_id = get_agent_id(ctx.obj.get("agent"), base_url)
+
+    data = {
+        "type": "brief",
+        "site_id": site_id,
+        "title": title or "Handoff Brief",
+        "content": content,
+        "target_agent": target,
+        "metadata": {"questions_enabled": True}
+    }
+
+    if successor_name:
+        data["successor_name"] = successor_name
+
+    result = make_request("POST", "/folios", base_url, agent_id, json=data)
+    brief_id = result["folio_id"]
+
+    click.echo(f"Created brief: {brief_id}")
+    if successor_name:
+        click.echo(f"Successor name: {successor_name}")
+    click.echo(f"\nHANDOFF: {brief_id}")
+
+
+@brief.command("get")
+@click.argument("brief_id")
+@click.option("--json", "output_json", is_flag=True)
+@click.pass_context
+def brief_get(ctx, brief_id, output_json):
+    """Retrieve a handoff brief."""
+    base_url = get_base_url(ctx.obj.get("url"))
+    agent_id = get_agent_id(ctx.obj.get("agent"), base_url)
+
+    brief_data = make_request("GET", f"/folios/{brief_id}", base_url, agent_id)
+
+    if output_json:
+        click.echo(json.dumps(brief_data, indent=2))
+    else:
+        click.echo(f"\nBrief: {brief_data['folio_id']}")
+        click.echo(f"Site: {brief_data['site_id']}")
+        click.echo(f"Created: {brief_data['created_at']}")
+        click.echo(f"From: {brief_data['created_by']}")
+        if brief_data.get("target_agent"):
+            click.echo(f"Target: {brief_data['target_agent']}")
+        click.echo(f"\nTitle: {brief_data['title']}")
+        click.echo(f"\nContent:")
+        click.echo(brief_data['content'])
+
+        if brief_data.get("references"):
+            click.echo(f"\nReferences: {', '.join(brief_data['references'])}")
+
+
+# Allow `skein brief <id>` as shortcut for `skein brief get <id>`
+@cli.command(hidden=True)
+@click.argument("brief_id")
+@click.option("--json", "output_json", is_flag=True)
+@click.pass_context
+def brief_shortcut(ctx, brief_id, output_json):
+    """Retrieve a brief (shortcut)."""
+    ctx.invoke(brief_get, brief_id=brief_id, output_json=output_json)
+
+
+@cli.command()
+@click.argument("brief_id")
+@click.pass_context
+def ignite(ctx, brief_id):
+    """Ignite work from a handoff brief.
+
+    This command:
+    1. Retrieves the brief
+    2. Auto-registers with suggested successor name (if provided)
+    3. Creates succession thread to predecessor
+    4. Shows threaded issues/findings
+    5. Guides you on next steps
+    """
+    base_url = get_base_url(ctx.obj.get("url"))
+    agent_id = get_agent_id(ctx.obj.get("agent"), base_url)
+
+    if agent_id == "unknown":
+        raise click.ClickException("Must set SKEIN_AGENT_ID or use --agent flag to ignite work")
+
+    # Get the brief
+    brief_data = make_request("GET", f"/folios/{brief_id}", base_url, agent_id)
+
+    if brief_data.get("type") != "brief":
+        raise click.ClickException(f"Resource {brief_id} is not a brief")
+
+    predecessor = brief_data.get("created_by")
+    site_id = brief_data.get("site_id")
+    successor_name = brief_data.get("successor_name")
+
+    # Auto-register with suggested name if provided
+    if successor_name:
+        try:
+            reg_data = {
+                "agent_id": agent_id,
+                "name": successor_name,
+                "capabilities": [],
+                "metadata": {}
+            }
+            make_request("POST", "/roster/register", base_url, agent_id, json=reg_data)
+            click.echo(f"✓ Registered as: {successor_name}\n")
+        except:
+            # Registration might fail if already registered, that's ok
+            pass
+
+    # Create succession thread
+    succession_data = {
+        "from_id": agent_id,
+        "to_id": predecessor,
+        "type": "succession",
+        "content": f"Resuming work from {brief_id}"
+    }
+    thread_result = make_request("POST", "/threads", base_url, agent_id, json=succession_data)
+
+    # Display brief
+    click.echo(f"{'='*60}")
+    click.echo(f"RESUMING: {brief_id}")
+    click.echo(f"Predecessor: {predecessor}")
+    click.echo(f"Site: {site_id}")
+    click.echo(f"{'='*60}\n")
+    click.echo(brief_data.get("content", ""))
+    click.echo(f"\n{'='*60}")
+
+    # Show threaded issues
+    threads_data = make_request("GET", "/threads", base_url, agent_id, params={"from_id": brief_id})
+
+    if threads_data:
+        click.echo(f"\nThreaded work ({len(threads_data)} item(s)):")
+        for t in threads_data:
+            click.echo(f"  [{t['type'].upper()}] -> {t['to_id']}")
+
+    click.echo(f"\n{'='*60}")
+    click.echo("⚠️  BEFORE STARTING - Read Required Docs:")
+    click.echo("  See CLAUDE.md for required reading list.")
+    click.echo("  Common docs: PROJECT_CONTEXT.md, ARCHITECTURE.md, PRINCIPLES.md")
+    click.echo("  Previous agents who skipped this produced incorrect work.")
+    click.echo(f"\n{'='*60}")
+    click.echo("Next steps:")
+    click.echo(f"  1. Read required docs listed in CLAUDE.md")
+    click.echo(f"  2. Review the brief above")
+    click.echo(f"  3. Check site: skein --agent {agent_id} issues {site_id}")
+    click.echo(f"  4. Check recent activity: skein --agent {agent_id} activity")
+    click.echo(f"  5. Continue work from 'Remaining' section")
+    click.echo(f"{'='*60}")
+
+
+@cli.command(hidden=True)
+@click.argument("brief_id")
+@click.pass_context
+def resume(ctx, brief_id):
+    """Deprecated: Use 'ignite' instead."""
+    ctx.invoke(ignite, brief_id=brief_id)
+
+
+# ============================================================================
+# Search & Discovery Commands
+# ============================================================================
+
+@cli.command()
+@click.argument("query")
+@click.option("--resources", help="Resource types to search (comma-separated: folios, threads, agents, sites). Default: folios")
+@click.option("--type", help="Filter by type (issue, brief, summary, etc.)")
+@click.option("--site", help="Filter by specific site (exact match)")
+@click.option("--sites", multiple=True, help="Filter by site pattern(s) - supports wildcards (can be used multiple times)")
+@click.option("--all-sites", is_flag=True, help="Search across all sites (default if no --site/--sites specified)")
+@click.option("--status", help="Filter by status (open, closed)")
+@click.option("--sort", help="Sort by: created (default), created_asc, relevance")
+@click.option("--limit", type=int, help="Limit results per resource type (default: 50, max: 500)")
+@click.option("--json", "output_json", is_flag=True)
+@click.pass_context
+def search(ctx, query, resources, type, site, sites, all_sites, status, sort, limit, output_json):
+    """
+    Search for work across SKEIN.
+
+    By default, searches folios across all sites in the current project.
+    Use --resources to search other resource types.
+
+    Examples:
+        skein search "authentication bug"
+        skein search "token" --type issue
+        skein search "refactor" --site my-site
+        skein search "security" --status open
+        skein search "planning" --sites "opus-*"
+        skein search "test" --sites "opus-*" --sites "test-*"
+        skein search "bug" --resources folios,threads
+        skein search "security" --resources agents --capabilities testing
+    """
+    base_url = get_base_url(ctx.obj.get("url"))
+    agent_id = get_agent_id(ctx.obj.get("agent"), base_url)
+
+    params = {"q": query}
+
+    if resources:
+        params["resources"] = resources
+
+    if type:
+        params["type"] = type
+
+    if site:
+        params["site"] = site
+    elif sites:
+        # Pass multiple site patterns to API
+        for s in sites:
+            if "sites" not in params:
+                params["sites"] = []
+            params["sites"].append(s)
+
+    if status:
+        params["status"] = status
+
+    if sort:
+        params["sort"] = sort
+
+    if limit:
+        params["limit"] = limit
+
+    response = make_request("GET", "/search", base_url, agent_id, params=params)
+
+    if output_json:
+        click.echo(json.dumps(response, indent=2))
+    else:
+        total = response.get("total", 0)
+        results_data = response.get("results", {})
+
+        if total == 0:
+            click.echo(f"No results found for '{query}'")
+            if site:
+                click.echo(f"  (searched in site: {site})")
+            elif sites:
+                click.echo(f"  (searched in sites matching: {', '.join(sites)})")
+            else:
+                click.echo(f"  (searched across all sites)")
+        else:
+            click.echo(f"Found {total} result(s):\n")
+
+            # Display folios grouped by site
+            if "folios" in results_data:
+                folios_data = results_data["folios"]
+                folios = folios_data.get("items", [])
+                folios_total = folios_data.get("total", 0)
+
+                if folios:
+                    # Group by site for better readability
+                    by_site = {}
+                    for r in folios:
+                        site_id = r.get("site_id", "unknown")
+                        if site_id not in by_site:
+                            by_site[site_id] = []
+                        by_site[site_id].append(r)
+
+                    sites_count = len(by_site)
+                    click.echo(f"📑 Folios ({folios_total} total, showing {len(folios)}):\n")
+
+                    for site_id in sorted(by_site.keys()):
+                        site_results = by_site[site_id]
+                        click.echo(f"  📁 {site_id} ({len(site_results)} result(s)):")
+
+                        for r in site_results[:10]:  # Limit per site
+                            status_icon = "✓" if r.get("status") == "closed" else "○"
+                            click.echo(f"    {status_icon} {r['type'].upper()}: {r.get('title', 'No title')[:60]}")
+                            click.echo(f"       ID: {r['folio_id']}")
+
+                        if len(site_results) > 10:
+                            click.echo(f"       ... and {len(site_results) - 10} more in this site")
+
+                        click.echo()
+
+            # Display threads
+            if "threads" in results_data:
+                threads_data = results_data["threads"]
+                threads = threads_data.get("items", [])
+                threads_total = threads_data.get("total", 0)
+
+                if threads:
+                    click.echo(f"🧵 Threads ({threads_total} total, showing {len(threads)}):\n")
+                    for t in threads[:20]:  # Show first 20 threads
+                        click.echo(f"  {t['type']}: {t.get('content', 'No content')[:80]}")
+                        click.echo(f"    {t['from_id']} → {t['to_id']}")
+                        click.echo(f"    ID: {t['thread_id']}\n")
+
+                    if threads_total > 20:
+                        click.echo(f"  ... and {threads_total - 20} more threads\n")
+
+            # Display agents
+            if "agents" in results_data:
+                agents_data = results_data["agents"]
+                agents = agents_data.get("items", [])
+                agents_total = agents_data.get("total", 0)
+
+                if agents:
+                    click.echo(f"👤 Agents ({agents_total} total, showing {len(agents)}):\n")
+                    for a in agents[:20]:  # Show first 20 agents
+                        status_icon = "✓" if a.get("status") == "active" else "○"
+                        caps = ", ".join(a.get("capabilities", [])) if a.get("capabilities") else "none"
+                        click.echo(f"  {status_icon} {a['agent_id']}: {a.get('name', 'No name')}")
+                        click.echo(f"    Type: {a.get('agent_type', 'unknown')} | Capabilities: {caps}\n")
+
+                    if agents_total > 20:
+                        click.echo(f"  ... and {agents_total - 20} more agents\n")
+
+            # Display sites
+            if "sites" in results_data:
+                sites_data = results_data["sites"]
+                sites_list = sites_data.get("items", [])
+                sites_total = sites_data.get("total", 0)
+
+                if sites_list:
+                    click.echo(f"📍 Sites ({sites_total} total, showing {len(sites_list)}):\n")
+                    for s in sites_list[:20]:  # Show first 20 sites
+                        status_icon = "✓" if s.get("status") == "active" else "○"
+                        click.echo(f"  {status_icon} {s['site_id']}")
+                        if s.get("purpose"):
+                            click.echo(f"    {s['purpose'][:80]}\n")
+                        else:
+                            click.echo()
+
+                    if sites_total > 20:
+                        click.echo(f"  ... and {sites_total - 20} more sites\n")
+
+            exec_time = response.get("execution_time_ms", 0)
+            click.echo(f"(Search completed in {exec_time}ms)")
+
+
+@cli.command()
+@click.option("--since", help="Time filter (1hour, 2days, or ISO timestamp)")
+@click.option("--json", "output_json", is_flag=True)
+@click.pass_context
+def activity(ctx, since, output_json):
+    """Get recent activity."""
+    base_url = get_base_url(ctx.obj.get("url"))
+    agent_id = get_agent_id(ctx.obj.get("agent"), base_url)
+
+    params = {}
+    if since:
+        params["since"] = since
+
+    activity_data = make_request("GET", "/activity", base_url, agent_id, params=params)
+
+    if output_json:
+        click.echo(json.dumps(activity_data, indent=2))
+    else:
+        click.echo(f"Recent activity:\n")
+        click.echo(f"New folios: {len(activity_data.get('new_folios', []))}")
+        click.echo(f"Active agents: {len(activity_data.get('active_agents', []))}")
+
+        if activity_data.get("new_folios"):
+            click.echo("\nRecent folios:")
+            for f in activity_data["new_folios"][:10]:
+                click.echo(f"  {f['type'].upper()}: {f['title']} ({f['folio_id']})")
+
+
+# ============================================================================
+# Frictions Commands
+# ============================================================================
+
+@cli.command()
+@click.argument("site_id")
+@click.argument("description")
+@click.pass_context
+def friction(ctx, site_id, description):
+    """Log a friction (problem/blocker)."""
+    validate_positional_args(site_id, description, command_name="friction")
+    base_url = get_base_url(ctx.obj.get("url"))
+    agent_id = get_agent_id(ctx.obj.get("agent"), base_url)
+
+    data = {
+        "type": "friction",
+        "site_id": site_id,
+        "title": description[:100],  # First 100 chars as title
+        "content": description,
+        "metadata": {}
+    }
+
+    result = make_request("POST", "/folios", base_url, agent_id, json=data)
+    click.echo(f"Logged friction: {result['folio_id']}")
+
+
+@cli.command()
+@click.argument("site_id")
+@click.argument("description")
+@click.pass_context
+def notion(ctx, site_id, description):
+    """Post a notion (rough idea not fully formed)."""
+    validate_positional_args(site_id, description, command_name="notion")
+    base_url = get_base_url(ctx.obj.get("url"))
+    agent_id = get_agent_id(ctx.obj.get("agent"), base_url)
+
+    data = {
+        "type": "notion",
+        "site_id": site_id,
+        "title": description[:100],  # First 100 chars as title
+        "content": description,
+        "metadata": {}
+    }
+
+    result = make_request("POST", "/folios", base_url, agent_id, json=data)
+    click.echo(f"Posted notion: {result['folio_id']}")
+
+
+@cli.command()
+@click.argument("site_id")
+@click.argument("description")
+@click.pass_context
+def finding(ctx, site_id, description):
+    """Post a finding (discovery during investigation)."""
+    validate_positional_args(site_id, description, command_name="finding")
+    base_url = get_base_url(ctx.obj.get("url"))
+    agent_id = get_agent_id(ctx.obj.get("agent"), base_url)
+
+    data = {
+        "type": "finding",
+        "site_id": site_id,
+        "title": description[:100],  # First 100 chars as title
+        "content": description,
+        "metadata": {}
+    }
+
+    result = make_request("POST", "/folios", base_url, agent_id, json=data)
+    click.echo(f"Posted finding: {result['folio_id']}")
+
+
+@cli.command()
+@click.argument("site_id")
+@click.argument("description")
+@click.pass_context
+def plan(ctx, site_id, description):
+    """Post a plan (declared approach for solving something)."""
+    validate_positional_args(site_id, description, command_name="plan")
+    base_url = get_base_url(ctx.obj.get("url"))
+    agent_id = get_agent_id(ctx.obj.get("agent"), base_url)
+
+    data = {
+        "type": "plan",
+        "site_id": site_id,
+        "title": description[:100],  # First 100 chars as title
+        "content": description,
+        "metadata": {}
+    }
+
+    result = make_request("POST", "/folios", base_url, agent_id, json=data)
+    click.echo(f"Posted plan: {result['folio_id']}")
+
+
+@cli.command()
+@click.argument("site_id")
+@click.argument("description")
+@click.pass_context
+def summary(ctx, site_id, description):
+    """Post a summary (completed work findings)."""
+    validate_positional_args(site_id, description, command_name="summary")
+    base_url = get_base_url(ctx.obj.get("url"))
+    agent_id = get_agent_id(ctx.obj.get("agent"), base_url)
+
+    data = {
+        "type": "summary",
+        "site_id": site_id,
+        "title": description[:100],  # First 100 chars as title
+        "content": description,
+        "metadata": {}
+    }
+
+    result = make_request("POST", "/folios", base_url, agent_id, json=data)
+    click.echo(f"Posted summary: {result['folio_id']}")
+
+
+@cli.command()
+@click.argument("site_id", required=False)
+@click.option("--json", "output_json", is_flag=True)
+@click.pass_context
+def frictions(ctx, site_id, output_json):
+    """List frictions."""
+    base_url = get_base_url(ctx.obj.get("url"))
+    agent_id = get_agent_id(ctx.obj.get("agent"), base_url)
+
+    params = {"type": "friction"}
+    if site_id:
+        params["site_id"] = site_id
+
+    frictions_list = make_request("GET", "/folios", base_url, agent_id, params=params)
+
+    if output_json:
+        click.echo(json.dumps(frictions_list, indent=2))
+    else:
+        if not frictions_list:
+            click.echo("No frictions found")
+        else:
+            click.echo(f"Found {len(frictions_list)} friction(s):\n")
+            for f in frictions_list:
+                click.echo(f"  {f['title']}")
+                click.echo(f"    Site: {f['site_id']} | ID: {f['folio_id']}")
+                click.echo()
+
+
+@cli.command()
+@click.argument("site_id")
+@click.option("--type", help="Filter by folio type")
+@click.option("--status", help="Filter by status")
+@click.option("--json", "output_json", is_flag=True)
+@click.pass_context
+def folios(ctx, site_id, type, status, output_json):
+    """List all folios in a site."""
+    # Validate site_id is not empty
+    if not site_id or site_id.strip() == "":
+        raise click.ClickException("site_id cannot be empty. Usage: skein folios SITE_ID")
+
+    base_url = get_base_url(ctx.obj.get("url"))
+    agent_id = get_agent_id(ctx.obj.get("agent"), base_url)
+
+    params = {"site_id": site_id}
+    if type:
+        params["type"] = type
+    if status:
+        params["status"] = status
+
+    folios_list = make_request("GET", "/folios", base_url, agent_id, params=params)
+
+    if output_json:
+        click.echo(json.dumps(folios_list, indent=2))
+    else:
+        if not folios_list:
+            click.echo(f"No folios found in site {site_id}")
+        else:
+            click.echo(f"Found {len(folios_list)} folio(s) in site {site_id}:\n")
+
+            # Group by type for better readability
+            by_type = {}
+            for f in folios_list:
+                folio_type = f['type']
+                if folio_type not in by_type:
+                    by_type[folio_type] = []
+                by_type[folio_type].append(f)
+
+            # OPTIMIZATION: Batch fetch all threads once (1 API call vs N*2)
+            try:
+                all_threads = make_request("GET", "/threads", base_url, agent_id)
+                # Build lookup dict: resource_id -> [threads]
+                threads_by_resource = {}
+                for thread in all_threads:
+                    # Index by both from_id and to_id
+                    if thread['from_id'] not in threads_by_resource:
+                        threads_by_resource[thread['from_id']] = []
+                    threads_by_resource[thread['from_id']].append(thread)
+
+                    if thread['to_id'] not in threads_by_resource:
+                        threads_by_resource[thread['to_id']] = []
+                    threads_by_resource[thread['to_id']].append(thread)
+            except:
+                # Fall back to no threads if batch fetch fails
+                threads_by_resource = {}
+
+            for folio_type in sorted(by_type.keys()):
+                click.echo(f"  {folio_type.upper()} ({len(by_type[folio_type])} item(s)):")
+                for f in by_type[folio_type]:
+                    status_str = f"[{f['status']}]" if f.get('status') else ""
+                    click.echo(f"    {f['folio_id']} {status_str}")
+                    click.echo(f"      {f['title']}")
+
+                    # Get threads from batch-fetched data
+                    try:
+                        resource_threads = threads_by_resource.get(f['folio_id'], [])
+
+                        # Dedupe threads (same thread appears in from_id and to_id indexes)
+                        thread_ids = set()
+                        unique_threads = []
+                        for t in resource_threads:
+                            if t['thread_id'] not in thread_ids:
+                                thread_ids.add(t['thread_id'])
+                                unique_threads.append(t)
+
+                        # Extract tags (self-referential threads with type tag)
+                        tags = [t['content'] for t in unique_threads
+                               if t['type'] == 'tag' and t['from_id'] == t['to_id']]
+
+                        # Build breadcrumb
+                        breadcrumb_parts = []
+                        if len(unique_threads) > 0:
+                            breadcrumb_parts.append(f"{len(unique_threads)} threads")
+                        if tags:
+                            breadcrumb_parts.append(f"Tags: {', '.join(tags)}")
+
+                        if breadcrumb_parts:
+                            click.echo(f"      {' | '.join(breadcrumb_parts)}")
+                    except:
+                        # Silently skip if thread processing fails
+                        pass
+
+                    if f.get('assigned_to'):
+                        click.echo(f"      Assigned: {f['assigned_to']}")
+                click.echo()
+
+
+@cli.command()
+@click.argument("site_ids", nargs=-1, required=True)
+@click.option("--type", help="Filter by folio type")
+@click.option("--status", help="Filter by status")
+@click.option("--json", "output_json", is_flag=True)
+@click.pass_context
+def survey(ctx, site_ids, type, status, output_json):
+    """Survey folios across multiple sites.
+
+    Example:
+        skein survey opus-coding-assistant opus-security-architect
+        skein survey opus-* --type issue
+    """
+    base_url = get_base_url(ctx.obj.get("url"))
+    agent_id = get_agent_id(ctx.obj.get("agent"), base_url)
+
+    # Validate all site_ids are non-empty
+    for site_id in site_ids:
+        if not site_id or site_id.strip() == "":
+            raise click.ClickException("site_id cannot be empty. Usage: skein survey SITE_ID [SITE_ID...]")
+
+    all_results = {}
+    total_folios = 0
+    errors = []
+
+    # Query each site
+    for site_id in site_ids:
+        try:
+            params = {"site_id": site_id}
+            if type:
+                params["type"] = type
+            if status:
+                params["status"] = status
+
+            folios_list = make_request("GET", "/folios", base_url, agent_id, params=params)
+            all_results[site_id] = folios_list
+            total_folios += len(folios_list)
+        except Exception as e:
+            errors.append((site_id, str(e)))
+            all_results[site_id] = []
+
+    # Output results
+    if output_json:
+        output = {
+            "sites": all_results,
+            "total_folios": total_folios,
+            "errors": [{"site_id": s, "error": e} for s, e in errors]
+        }
+        click.echo(json.dumps(output, indent=2))
+    else:
+        # Human-readable output
+        click.echo(f"Surveying {len(site_ids)} site(s)...\n")
+
+        for site_id in site_ids:
+            folios = all_results[site_id]
+
+            click.echo(f"{'='*60}")
+            click.echo(f"Site: {site_id}")
+            click.echo(f"{'='*60}")
+
+            if site_id in [s for s, _ in errors]:
+                error_msg = next(e for s, e in errors if s == site_id)
+                click.echo(f"  ❌ Error: {error_msg}\n")
+                continue
+
+            if not folios:
+                click.echo(f"  No folios found\n")
+                continue
+
+            click.echo(f"  Found {len(folios)} folio(s)\n")
+
+            # Group by type
+            by_type = {}
+            for f in folios:
+                folio_type = f['type']
+                if folio_type not in by_type:
+                    by_type[folio_type] = []
+                by_type[folio_type].append(f)
+
+            for folio_type in sorted(by_type.keys()):
+                click.echo(f"  {folio_type.upper()} ({len(by_type[folio_type])} item(s)):")
+                for f in by_type[folio_type]:
+                    status_str = f"[{f['status']}]" if f.get('status') else ""
+                    click.echo(f"    {f['folio_id']} {status_str}")
+                    click.echo(f"      {f['title'][:80]}{'...' if len(f['title']) > 80 else ''}")
+                click.echo()
+
+        click.echo(f"{'='*60}")
+        click.echo(f"Total: {total_folios} folio(s) across {len(site_ids)} site(s)")
+        if errors:
+            click.echo(f"Errors: {len(errors)} site(s) failed")
+        click.echo(f"{'='*60}")
+
+
+# ============================================================================
+# Signals & Roster Commands
+# ============================================================================
+
+@cli.command()
+@click.argument("to_id")
+@click.argument("message")
+@click.pass_context
+def message(ctx, to_id, message):
+    """Send a message to an agent (creates thread)."""
+    base_url = get_base_url(ctx.obj.get("url"))
+    agent_id = get_agent_id(ctx.obj.get("agent"), base_url)
+
+    data = {
+        "from_id": agent_id,
+        "to_id": to_id,
+        "type": "message",
+        "content": message
+    }
+
+    result = make_request("POST", "/threads", base_url, agent_id, json=data)
+    click.echo(f"Sent message: {result['thread_id']}")
+
+
+@cli.command()
+@click.argument("resource_id", required=False)
+@click.option("--from-id", "from_filter", help="Filter threads from this resource")
+@click.option("--to-id", "to_filter", help="Filter threads to this resource")
+@click.option("--type", "type_filter", help="Filter by thread type")
+@click.option("--weaver", help="Filter by agent who created the thread")
+@click.option("--search", help="Full-text search in thread content")
+@click.option("--since", help="Time filter (e.g., '1hour', '2days', or ISO timestamp)")
+@click.option("--json", "output_json", is_flag=True)
+@click.pass_context
+def threads(ctx, resource_id, from_filter, to_filter, type_filter, weaver, search, since, output_json):
+    """Get threads from/to a resource.
+
+    Examples:
+        skein threads RESOURCE_ID              # All threads for a resource
+        skein threads --weaver agent-007       # All threads created by agent-007
+        skein threads --type status            # All status threads
+        skein threads --search "bug fix"       # Full-text search in content
+        skein threads --since 1hour            # Threads from last hour
+        skein threads --weaver me --type status --since 1day  # My recent status changes
+    """
+    base_url = get_base_url(ctx.obj.get("url"))
+    agent_id = get_agent_id(ctx.obj.get("agent"), base_url)
+
+    params = {}
+    if resource_id:
+        # If resource_id provided, show threads from OR to that resource
+        # We'll make two requests and combine
+        from_threads = make_request("GET", "/threads", base_url, agent_id, params={"from_id": resource_id})
+        to_threads = make_request("GET", "/threads", base_url, agent_id, params={"to_id": resource_id})
+        all_threads = from_threads + to_threads
+        # Dedupe by thread_id
+        seen = set()
+        threads_list = []
+        for t in all_threads:
+            if t["thread_id"] not in seen:
+                seen.add(t["thread_id"])
+                threads_list.append(t)
+    else:
+        if from_filter:
+            params["from_id"] = from_filter
+        if to_filter:
+            params["to_id"] = to_filter
+        if type_filter:
+            params["type"] = type_filter
+        if weaver:
+            # Support "me" as alias for current agent
+            params["weaver"] = agent_id if weaver == "me" else weaver
+        if search:
+            params["search"] = search
+        if since:
+            params["since"] = since
+        threads_list = make_request("GET", "/threads", base_url, agent_id, params=params)
+
+    if output_json:
+        click.echo(json.dumps(threads_list, indent=2))
+    else:
+        if not threads_list:
+            click.echo("No threads found")
+        else:
+            click.echo(f"Found {len(threads_list)} thread(s):\n")
+            for t in threads_list:
+                click.echo(f"  [{t['type'].upper()}] {t['from_id']} -> {t['to_id']}")
+                if t.get("content"):
+                    click.echo(f"    {t['content'][:100]}")
+                click.echo(f"    ID: {t['thread_id']}")
+                click.echo()
+
+
+@cli.command("thread-tree")
+@click.argument("resource_id")
+@click.option("--depth", type=int, default=3, help="Maximum depth to traverse (default: 3)")
+@click.option("--json", "output_json", is_flag=True)
+@click.pass_context
+def thread_tree(ctx, resource_id, depth, output_json):
+    """Visualize thread conversations as a tree.
+
+    Shows all threads connected to a resource in a tree structure,
+    following reply chains and related conversations.
+
+    Examples:
+        skein thread-tree issue-123
+        skein thread-tree brief-456 --depth 5
+    """
+    base_url = get_base_url(ctx.obj.get("url"))
+    agent_id = get_agent_id(ctx.obj.get("agent"), base_url)
+
+    def get_threads_for_resource(res_id):
+        """Get all threads from/to a resource."""
+        from_threads = make_request("GET", "/threads", base_url, agent_id,
+                                    params={"from_id": res_id})
+        to_threads = make_request("GET", "/threads", base_url, agent_id,
+                                  params={"to_id": res_id})
+
+        # Combine and dedupe
+        all_threads = from_threads + to_threads
+        seen = set()
+        unique = []
+        for t in all_threads:
+            if t['thread_id'] not in seen:
+                seen.add(t['thread_id'])
+                unique.append(t)
+        return unique
+
+    def build_tree(res_id, current_depth=0, visited=None):
+        """Recursively build thread tree."""
+        if visited is None:
+            visited = set()
+
+        if current_depth >= depth or res_id in visited:
+            return None
+
+        visited.add(res_id)
+        threads = get_threads_for_resource(res_id)
+
+        node = {
+            "id": res_id,
+            "threads": [],
+            "children": []
+        }
+
+        for thread in threads:
+            thread_info = {
+                "thread_id": thread["thread_id"],
+                "type": thread["type"],
+                "from_id": thread["from_id"],
+                "to_id": thread["to_id"],
+                "content": thread.get("content", "")[:100]
+            }
+            node["threads"].append(thread_info)
+
+            # Follow outbound replies to build conversation tree
+            if thread["type"] == "reply" and thread["from_id"] == res_id:
+                child = build_tree(thread["to_id"], current_depth + 1, visited)
+                if child:
+                    node["children"].append(child)
+
+        return node
+
+    tree = build_tree(resource_id)
+
+    if output_json:
+        click.echo(json.dumps(tree, indent=2))
+    else:
+        def print_tree(node, prefix="", is_last=True):
+            """Pretty print the tree."""
+            if not node:
+                return
+
+            # Print current node
+            connector = "└── " if is_last else "├── "
+            click.echo(f"{prefix}{connector}{node['id']}")
+
+            # Print threads
+            thread_prefix = prefix + ("    " if is_last else "│   ")
+            for i, thread in enumerate(node["threads"]):
+                is_last_thread = (i == len(node["threads"]) - 1) and not node["children"]
+                thread_connector = "└── " if is_last_thread else "├── "
+
+                direction = "→" if thread["from_id"] == node["id"] else "←"
+                other_id = thread["to_id"] if thread["from_id"] == node["id"] else thread["from_id"]
+
+                click.echo(f"{thread_prefix}{thread_connector}[{thread['type'].upper()}] {direction} {other_id}")
+                if thread.get("content"):
+                    content_prefix = thread_prefix + ("    " if is_last_thread else "│   ")
+                    click.echo(f"{content_prefix}  \"{thread['content']}\"")
+
+            # Print children
+            for i, child in enumerate(node["children"]):
+                is_last_child = (i == len(node["children"]) - 1)
+                child_prefix = prefix + ("    " if is_last else "│   ")
+                print_tree(child, child_prefix, is_last_child)
+
+        click.echo(f"\nThread tree for {resource_id}:\n")
+        print_tree(tree)
+        click.echo()
+
+
+@cli.command()
+@click.option("--unread", is_flag=True, help="Only show unread items")
+@click.option("--json", "output_json", is_flag=True)
+@click.pass_context
+def inbox(ctx, unread, output_json):
+    """Check your inbox (threads to you)."""
+    base_url = get_base_url(ctx.obj.get("url"))
+    agent_id = get_agent_id(ctx.obj.get("agent"), base_url)
+
+    if agent_id == "unknown":
+        raise click.ClickException("Must set SKEIN_AGENT_ID or use --agent flag to check inbox")
+
+    params = {}
+    if unread:
+        params["unread"] = "true"
+
+    threads_list = make_request("GET", "/inbox", base_url, agent_id, params=params)
+
+    if output_json:
+        click.echo(json.dumps(threads_list, indent=2))
+    else:
+        if not threads_list:
+            click.echo("Inbox empty")
+        else:
+            click.echo(f"Inbox ({len(threads_list)} item(s)):\n")
+            for t in threads_list:
+                status = "[UNREAD]" if not t.get("read_at") else "[read]"
+                click.echo(f"  {status} [{t['type'].upper()}] From {t['from_id']}")
+                if t.get("content"):
+                    click.echo(f"    {t['content'][:200]}")
+                click.echo(f"    ID: {t['thread_id']}")
+                click.echo()
+
+
+@cli.command("mark-read")
+@click.argument("thread_id")
+@click.pass_context
+def mark_read(ctx, thread_id):
+    """Mark a thread as read."""
+    base_url = get_base_url(ctx.obj.get("url"))
+    agent_id = get_agent_id(ctx.obj.get("agent"), base_url)
+
+    result = make_request("PATCH", f"/threads/{thread_id}/read", base_url, agent_id)
+    if result.get("success"):
+        click.echo(f"Marked thread {thread_id} as read")
+    else:
+        click.echo(f"Failed to mark thread {thread_id} as read")
+
+
+@cli.command()
+@click.argument("from_id", required=False)
+@click.argument("to_id")
+@click.argument("thread_type")
+@click.argument("content")
+@click.pass_context
+def thread(ctx, from_id, to_id, thread_type, content):
+    """Create a thread between any two resources.
+
+    If FROM_ID is omitted, defaults to current agent.
+
+    Examples:
+        skein thread issue-123 issue-123 tag bug
+        skein thread agent-1 issue-456 comment "Found the problem"
+        skein thread thread-abc reply "Good point"
+    """
+    base_url = get_base_url(ctx.obj.get("url"))
+    agent_id = get_agent_id(ctx.obj.get("agent"), base_url)
+
+    # Handle the case where FROM_ID is omitted
+    if content is None:
+        # Arguments shifted: from_id is actually to_id, to_id is type, thread_type is content
+        content = thread_type
+        thread_type = to_id
+        to_id = from_id
+        from_id = agent_id
+        if from_id == "unknown":
+            raise click.ClickException("Must set agent ID to use default FROM_ID")
+
+    data = {
+        "from_id": from_id,
+        "to_id": to_id,
+        "type": thread_type,
+        "content": content
+    }
+
+    result = make_request("POST", "/threads", base_url, agent_id, json=data)
+    click.echo(f"Created thread: {result['thread_id']}")
+
+
+@cli.command()
+@click.argument("to_id")
+@click.argument("message")
+@click.pass_context
+def reply(ctx, to_id, message):
+    """Reply to or comment on any resource.
+
+    Creates a thread from current agent to the resource with type:reply.
+    Works on issues, briefs, findings, threads, or any resource ID.
+
+    Examples:
+        skein reply issue-123 "I'll investigate this bug"
+        skein reply brief-456 "The approach looks good"
+        skein reply finding-789 "This explains the performance issue"
+        skein reply thread-abc "Good point, let me check"
+        skein reply notion-xyz "Interesting idea, we should explore this"
+    """
+    base_url = get_base_url(ctx.obj.get("url"))
+    agent_id = get_agent_id(ctx.obj.get("agent"), base_url)
+
+    if agent_id == "unknown":
+        raise click.ClickException("Must set SKEIN_AGENT_ID or use --agent flag to reply")
+
+    data = {
+        "from_id": agent_id,
+        "to_id": to_id,
+        "type": "reply",
+        "content": message
+    }
+
+    result = make_request("POST", "/threads", base_url, agent_id, json=data)
+    click.echo(f"Posted reply: {result['thread_id']}")
+
+
+@cli.command()
+@click.argument("resource_id")
+@click.argument("tag_name")
+@click.pass_context
+def tag(ctx, resource_id, tag_name):
+    """Tag a resource (self-referential thread).
+
+    Creates a thread from resource to itself with type:tag.
+
+    Examples:
+        skein tag issue-123 bug
+        skein tag issue-123 critical
+        skein tag brief-456 needs-review
+    """
+    base_url = get_base_url(ctx.obj.get("url"))
+    agent_id = get_agent_id(ctx.obj.get("agent"), base_url)
+
+    data = {
+        "from_id": resource_id,
+        "to_id": resource_id,
+        "type": "tag",
+        "content": tag_name
+    }
+
+    result = make_request("POST", "/threads", base_url, agent_id, json=data)
+    click.echo(f"Tagged {resource_id} as '{tag_name}'")
+
+
+@cli.command()
+@click.argument("resource_id")
+@click.argument("status_value", type=click.Choice(["open", "closed", "investigating", "resolved", "blocked", "in-progress"]))
+@click.pass_context
+def status(ctx, resource_id, status_value):
+    """Set status on a resource.
+
+    Creates a thread from current agent to resource with type:status.
+
+    Examples:
+        skein status issue-123 investigating
+        skein status issue-123 closed
+        skein status issue-456 open
+    """
+    base_url = get_base_url(ctx.obj.get("url"))
+    agent_id = get_agent_id(ctx.obj.get("agent"), base_url)
+
+    if agent_id == "unknown":
+        raise click.ClickException("Must set SKEIN_AGENT_ID or use --agent flag to set status")
+
+    data = {
+        "from_id": agent_id,
+        "to_id": resource_id,
+        "type": "status",
+        "content": status_value
+    }
+
+    result = make_request("POST", "/threads", base_url, agent_id, json=data)
+    click.echo(f"Set status of {resource_id} to '{status_value}'")
+
+
+@cli.command()
+@click.argument("resource_id")
+@click.option("--link", help="Link to solution (folio ID)")
+@click.option("--note", help="Note about the fix")
+@click.pass_context
+def close(ctx, resource_id, link, note):
+    """Close an issue/friction (sets status to closed).
+
+    Examples:
+        skein close issue-123
+        skein close issue-123 --link summary-456
+        skein close friction-789 --link summary-456 --note "Fixed by adding validation"
+    """
+    base_url = get_base_url(ctx.obj.get("url"))
+    agent_id = get_agent_id(ctx.obj.get("agent"), base_url)
+
+    if agent_id == "unknown":
+        raise click.ClickException("Must set SKEIN_AGENT_ID or use --agent flag to close")
+
+    # Create status thread (closed)
+    status_data = {
+        "from_id": resource_id,
+        "to_id": resource_id,
+        "type": "status",
+        "content": "closed"
+    }
+    make_request("POST", "/threads", base_url, agent_id, json=status_data)
+    click.echo(f"Closed {resource_id}")
+
+    # Create reference thread if --link provided
+    if link:
+        ref_content = note if note else "Resolved"
+        ref_data = {
+            "from_id": resource_id,
+            "to_id": link,
+            "type": "reference",
+            "content": ref_content
+        }
+        make_request("POST", "/threads", base_url, agent_id, json=ref_data)
+        click.echo(f"Linked to {link}: {ref_content}")
+
+
+@cli.command()
+@click.option("--capabilities", help="Comma-separated capabilities")
+@click.option("--name", help="Human-readable name (e.g., 'Front End Developer', 'Race Condition Fixer')")
+@click.option("--type", "agent_type", type=click.Choice(["claude-code", "patbot", "horizon", "human", "system"]), help="Agent type")
+@click.option("--description", help="Longer description of work and focus")
+@click.pass_context
+def register(ctx, capabilities, name, agent_type, description):
+    """Register in the roster."""
+    base_url = get_base_url(ctx.obj.get("url"))
+    agent_id = get_agent_id(ctx.obj.get("agent"), base_url)
+
+    if agent_id == "unknown":
+        raise click.ClickException("Must set SKEIN_AGENT_ID or use --agent flag to register")
+
+    caps_list = [c.strip() for c in capabilities.split(",")] if capabilities else []
+
+    data = {
+        "agent_id": agent_id,
+        "capabilities": caps_list,
+        "metadata": {}
+    }
+
+    if name:
+        data["name"] = name
+    if agent_type:
+        data["agent_type"] = agent_type
+    if description:
+        data["description"] = description
+
+    result = make_request("POST", "/roster/register", base_url, agent_id, json=data)
+    click.echo(f"Registered: {agent_id}")
+    if name:
+        click.echo(f"Name: {name}")
+    if agent_type:
+        click.echo(f"Type: {agent_type}")
+    if caps_list:
+        click.echo(f"Capabilities: {', '.join(caps_list)}")
+    if description:
+        click.echo(f"Description: {description}")
+
+
+@cli.command()
+@click.option("--json", "output_json", is_flag=True)
+@click.pass_context
+def roster(ctx, output_json):
+    """List registered agents."""
+    base_url = get_base_url(ctx.obj.get("url"))
+    agent_id = get_agent_id(ctx.obj.get("agent"), base_url)
+
+    agents = make_request("GET", "/roster", base_url, agent_id)
+
+    if output_json:
+        click.echo(json.dumps(agents, indent=2))
+    else:
+        if not agents:
+            click.echo("No agents registered")
+        else:
+            click.echo(f"Roster ({len(agents)} agent(s)):\n")
+            for a in agents:
+                click.echo(f"  {a['agent_id']}")
+                if a.get("name"):
+                    click.echo(f"    Name: {a['name']}")
+                if a.get("agent_type"):
+                    click.echo(f"    Type: {a['agent_type']}")
+                if a.get("description"):
+                    click.echo(f"    Description: {a['description']}")
+                if a.get("capabilities"):
+                    click.echo(f"    Capabilities: {', '.join(a['capabilities'])}")
+                click.echo(f"    Registered: {a['registered_at']}")
+                click.echo()
+
+
+@cli.command("ignite")
+@click.argument("brief_id", required=False)
+@click.option("--mantle", help="Ignite from mantle (role template)")
+@click.option("--message", help="Initial task/mission")
+@click.pass_context
+def ignite_start(ctx, brief_id, mantle, message):
+    """
+    Start ignition - Begin orientation for agent work.
+
+    Usage:
+        skein ignite brief-123                      # From brief
+        skein ignite --mantle quartermaster         # From mantle
+        skein ignite --mantle quartermaster --message "Track inventory"
+        skein ignite --message "Ad-hoc task"        # Just message
+        skein ignite                                # Generic
+
+    After orientation, register with:
+        skein ready --name "Your Name"
+    """
+    _ignite_start(ctx, brief_id, mantle, message)
+
+
+def _ignite_start(ctx, brief_id, mantle, message):
+    """
+    Start ignition process - Begin orientation for agent work.
+
+    After orientation, register with:
+        skein ready --name "Your Name"
+    """
+    base_url = get_base_url(ctx.obj.get("url"))
+    agent_id = get_agent_id(ctx.obj.get("agent"), base_url)
+
+    if agent_id == "unknown":
+        raise click.ClickException("Must set SKEIN_AGENT_ID or use --agent flag to ignite")
+
+    # Prepare response data
+    response = {
+        "status": "orienting",
+        "agent_id": agent_id,
+        "mission": None,
+        "brief_id": brief_id,
+        "mantle_name": mantle,
+        "message": message
+    }
+
+    mission_parts = []
+
+    # If brief provided, load it
+    if brief_id:
+        try:
+            brief = make_request("GET", f"/folios/{brief_id}", base_url, agent_id)
+            mission_parts.append(f"**From Brief ({brief_id}):**\n{brief.get('content', '')}")
+        except Exception as e:
+            raise click.ClickException(f"Failed to load brief: {str(e)}")
+
+    # If mantle provided, load it
+    mantle_data = None
+    if mantle:
+        project_root = find_project_root()
+        if project_root:
+            # Look in project for mantles
+            mantle_file = project_root / "mantles" / f"{mantle}.json"
+            if not mantle_file.exists():
+                # Also try agents/ for backward compatibility
+                mantle_file = project_root / "agents" / f"{mantle}.json"
+
+            if mantle_file.exists():
+                try:
+                    with open(mantle_file) as f:
+                        mantle_data = json.load(f)
+                        mission_parts.append(f"**From Mantle ({mantle}):**")
+                        if mantle_data.get("description"):
+                            mission_parts.append(f"Description: {mantle_data['description']}")
+                        if mantle_data.get("prompt"):
+                            mission_parts.append(f"\nPrompt:\n{mantle_data['prompt']}")
+                except Exception as e:
+                    click.echo(f"Warning: Could not load mantle {mantle}: {e}")
+            else:
+                click.echo(f"Warning: Mantle '{mantle}' not found at {mantle_file}")
+
+    # If message provided, add it
+    if message:
+        mission_parts.append(f"**Initial Task:**\n{message}")
+
+    response["mission"] = "\n\n".join(mission_parts) if mission_parts else None
+
+    # Get project context to suggest reading
+    project_root = find_project_root()
+    suggested_reading = []
+
+    if project_root:
+        # Core docs
+        core_docs = [
+            "CLAUDE.md",
+            "docs/PROJECT_CONTEXT.md",
+            "docs/SKEIN_QUICK_START.md",
+            "docs/ARCHITECTURE.md"
+        ]
+        # Conditional docs
+        conditional_docs = [
+            "docs/TESTING_GUIDE.md",
+            "docs/HORIZON_EXAMPLE.md",
+            "docs/TOOL_CREATION_GUIDE.md",
+            "docs/AGENT_CREATION_GUIDE.md",
+            "docs/SKEIN_AGENT_GUIDE.md",
+            "docs/TOKEN_TERMINOLOGY.md"
+        ]
+
+        for doc in core_docs + conditional_docs:
+            doc_path = project_root / doc
+            if doc_path.exists():
+                suggested_reading.append(str(doc))
+
+    response["suggested_reading"] = suggested_reading
+
+    # Suggest name based on mantle naming style or generic
+    suggested_name = f"Agent {agent_id.split('-')[-1]}"
+
+    if mantle_data and mantle_data.get("naming_style"):
+        naming_style = mantle_data["naming_style"]
+        if naming_style == "technical":
+            suggested_name = f"Silent {mantle.title()}"
+        elif naming_style == "pm":
+            suggested_name = "Dawn"
+        elif naming_style == "emergency":
+            suggested_name = f"Midnight {mantle.title()}"
+    elif mantle:
+        suggested_name = f"{mantle.title()} Agent"
+
+    response["suggested_name"] = suggested_name
+
+    # Register on roster as "orienting" with ignition info
+    try:
+        register_data = {
+            "agent_id": agent_id,
+            "status": "orienting",
+            "metadata": {
+                "ignited_at": datetime.now().isoformat(),
+                "ignited_from": brief_id,
+                "mantle": mantle,
+                "message": message
+            }
+        }
+        make_request("POST", "/roster/register", base_url, agent_id, json=register_data)
+    except:
+        # Not critical if roster update fails
+        pass
+
+    # Output results
+    click.echo("="*60)
+    click.echo("IGNITION - Orientation Phase")
+    click.echo("="*60)
+    click.echo()
+
+    if response["mission"]:
+        if brief_id:
+            click.echo(f"Brief: {brief_id}")
+        if mantle:
+            click.echo(f"Mantle: {mantle}")
+        if message:
+            click.echo(f"Message: {message}")
+        click.echo()
+        click.echo("Mission:")
+        click.echo(response["mission"])
+        click.echo()
+    else:
+        click.echo("Generic ignition (no brief, mantle, or message provided)")
+        click.echo()
+
+    if suggested_reading:
+        click.echo("REQUIRED Reading:")
+        # Core docs
+        core_docs = ["CLAUDE.md", "PROJECT_CONTEXT.md", "SKEIN_QUICK_START.md", "ARCHITECTURE.md"]
+        for doc in core_docs:
+            if any(doc in s for s in suggested_reading):
+                matching = [s for s in suggested_reading if doc in s][0]
+                click.echo(f"├── {doc}")
+                suggested_reading.remove(matching)
+
+        # Conditional docs
+        testing_docs = ["TESTING_GUIDE.md"]
+        system_docs = ["HORIZON_EXAMPLE.md", "TOOL_CREATION_GUIDE.md", "AGENT_CREATION_GUIDE.md",
+                       "SKEIN_AGENT_GUIDE.md", "TOKEN_TERMINOLOGY.md"]
+
+        has_testing = any(any(td in s for s in suggested_reading) for td in testing_docs)
+        has_system = any(any(sd in s for s in suggested_reading) for sd in system_docs)
+
+        if has_testing:
+            click.echo()
+            click.echo("IF TESTING")
+            for doc in testing_docs:
+                if any(doc in s for s in suggested_reading):
+                    click.echo(f"├── {doc}")
+
+        if has_system:
+            click.echo()
+            click.echo("IF WORKING WITH SPECIFIC SYSTEMS")
+            for i, doc in enumerate(system_docs):
+                if any(doc in s for s in suggested_reading):
+                    prefix = "└──" if i == len(system_docs) - 1 else "├──"
+                    if doc == "SKEIN_AGENT_GUIDE.md":
+                        click.echo(f"{prefix} {doc} (comprehensive SKEIN guide)")
+                    elif doc == "TOKEN_TERMINOLOGY.md":
+                        click.echo(f"{prefix} {doc} (use Payload/Burn/Creep terms when discussing tokens to disambiguate in discussion of token use)")
+                    else:
+                        click.echo(f"{prefix} {doc}")
+
+        click.echo()
+
+    click.echo(f"YOUR Suggested name: {response['suggested_name']}")
+    click.echo()
+    click.echo("After reading, explore project files and the SKEIN for relevant information. After you've fully oriented, run:")
+    click.echo()
+    click.echo(f"  skein ready --name \"Your Name\"")
+    click.echo()
+
+
+@cli.command("ready")
+@click.option("--name", required=True, help="Your chosen name/nom de plume")
+@click.pass_context
+def ready(ctx, name):
+    """
+    Complete ignition - Register and begin work.
+
+    Usage:
+        skein ready --name "Dawn Authentication Auditor"
+    """
+    base_url = get_base_url(ctx.obj.get("url"))
+    agent_id = get_agent_id(ctx.obj.get("agent"), base_url)
+
+    if agent_id == "unknown":
+        raise click.ClickException("Must set SKEIN_AGENT_ID or use --agent flag")
+
+    # Update roster from "orienting" to "active" with name
+    # Get existing roster entry to preserve ignition metadata
+    existing_metadata = {}
+    try:
+        roster_entry = make_request("GET", f"/roster/{agent_id}", base_url, agent_id)
+        existing_metadata = roster_entry.get("metadata", {})
+    except:
+        # Agent not in roster yet (didn't run ignite first)
+        existing_metadata = {
+            "registered_via": "direct",  # Didn't use ignite
+            "ignited_at": datetime.now().isoformat()
+        }
+
+    data = {
+        "agent_id": agent_id,
+        "name": name,
+        "status": "active",
+        "metadata": existing_metadata  # Preserve ignition data
+    }
+
+    try:
+        make_request("POST", "/roster/register", base_url, agent_id, json=data)
+    except Exception as e:
+        # If already registered, that's okay - update instead
+        try:
+            make_request("PATCH", f"/roster/{agent_id}", base_url, agent_id, json={"name": name, "status": "active"})
+        except:
+            raise click.ClickException(f"Failed to register: {str(e)}")
+
+    click.echo("="*60)
+    click.echo("READY")
+    click.echo("="*60)
+    click.echo()
+    click.echo(f"✓ Registered as: {name}")
+    click.echo(f"✓ Status: Active")
+    click.echo()
+    click.echo("You are now registered and ready to begin work.")
+    click.echo()
+
+
+@cli.command("torch")
+@click.pass_context
+def torch_start(ctx):
+    """
+    Begin retirement - Prepare to torch.
+
+    Usage:
+        skein torch
+
+    After filing any remaining work:
+        skein complete [--summary "..."]
+    """
+    _torch_start(ctx)
+
+
+def _torch_start(ctx):
+    """
+    Begin retirement process - Prepare to torch.
+
+    Usage:
+        skein torch
+
+    After filing any remaining work:
+        skein complete [--summary "..."]
+    """
+    base_url = get_base_url(ctx.obj.get("url"))
+    agent_id = get_agent_id(ctx.obj.get("agent"), base_url)
+
+    if agent_id == "unknown":
+        raise click.ClickException("Must set SKEIN_AGENT_ID or use --agent flag to torch")
+
+    # Get roster info
+    try:
+        roster_data = make_request("GET", f"/roster/{agent_id}", base_url, agent_id)
+        name = roster_data.get("name", agent_id)
+    except:
+        raise click.ClickException(f"Agent {agent_id} not found in roster. Must ignite before torching.")
+
+    # Get agent's SKEIN activity
+    try:
+        # Get all folios by this agent
+        all_folios = make_request("GET", "/folios", base_url, agent_id)
+        agent_folios = [f for f in all_folios if f.get("author") == agent_id or f.get("weaver") == agent_id]
+
+        # Count by type
+        work_summary = {
+            "issues": len([f for f in agent_folios if f.get("type") == "issue"]),
+            "findings": len([f for f in agent_folios if f.get("type") == "finding"]),
+            "plans": len([f for f in agent_folios if f.get("type") == "plan"]),
+            "briefs": len([f for f in agent_folios if f.get("type") == "brief"]),
+            "notions": len([f for f in agent_folios if f.get("type") == "notion"]),
+            "frictions": len([f for f in agent_folios if f.get("type") == "friction"]),
+            "summaries": len([f for f in agent_folios if f.get("type") == "summary"])
+        }
+    except:
+        work_summary = {}
+
+    # Update status to retiring (if server supports it)
+    try:
+        # Try to update via re-registration with new status
+        update_data = {
+            "agent_id": agent_id,
+            "name": name,
+            "status": "retiring"
+        }
+        make_request("POST", "/roster/register", base_url, agent_id, json=update_data)
+    except:
+        pass  # Continue even if update fails (server might not support status)
+
+    click.echo("="*60)
+    click.echo("TORCH - Retirement Phase")
+    click.echo("="*60)
+    click.echo()
+    click.echo(f"Name: {name}")
+    click.echo()
+
+    if work_summary:
+        click.echo("Your SKEIN Activity:")
+        for folio_type, count in work_summary.items():
+            if count > 0:
+                click.echo(f"  {folio_type}: {count}")
+        click.echo()
+
+    # Query agent's open work for visibility (work assigned TO them)
+    open_issues = []
+    open_frictions = []
+    ignited_from_brief = None
+    brief_is_open = False
+
+    try:
+        # Get assignment threads pointing to this agent
+        all_threads = make_request("GET", "/threads", base_url, agent_id)
+        assignment_threads = [t for t in all_threads
+                            if t.get("type") == "assignment" and t.get("to_id") == agent_id]
+        assigned_folio_ids = [t.get("from_id") for t in assignment_threads]
+
+        if assigned_folio_ids:
+            # Get all open issues and frictions
+            open_issues_all = make_request("GET", "/folios", base_url, agent_id,
+                                          params={"type": "issue", "status": "open"})
+            open_frictions_all = make_request("GET", "/folios", base_url, agent_id,
+                                             params={"type": "friction", "status": "open"})
+
+            # Filter to only those assigned to this agent
+            open_issues = [i for i in open_issues_all if i.get("folio_id") in assigned_folio_ids]
+            open_frictions = [f for f in open_frictions_all if f.get("folio_id") in assigned_folio_ids]
+
+        # Check if agent was ignited from a brief and if it's still open
+        try:
+            roster_entry = make_request("GET", f"/roster/{agent_id}", base_url, agent_id)
+            ignited_from = roster_entry.get("metadata", {}).get("ignited_from")
+            if ignited_from and ignited_from.startswith("brief-"):
+                # Get brief status
+                all_briefs = make_request("GET", "/folios", base_url, agent_id,
+                                         params={"type": "brief"})
+                brief = next((b for b in all_briefs if b.get("folio_id") == ignited_from), None)
+                if brief and brief.get("status") == "open":
+                    ignited_from_brief = brief
+                    brief_is_open = True
+        except:
+            pass
+    except:
+        # Continue even if we can't fetch open work
+        pass
+
+    # Display open work if any exists
+    if open_issues or open_frictions or brief_is_open:
+        click.echo("="*60)
+        click.echo("YOUR OPEN WORK")
+        click.echo("="*60)
+        click.echo()
+
+        if open_issues:
+            click.echo("Issues assigned to you:")
+            for issue in open_issues[:5]:
+                title = issue.get("title", "")[:50]
+                click.echo(f"  • {issue['folio_id']} - {title}")
+            if len(open_issues) > 5:
+                click.echo(f"  ... and {len(open_issues) - 5} more")
+            click.echo()
+
+        if open_frictions:
+            click.echo("Frictions assigned to you:")
+            for friction in open_frictions[:5]:
+                title = friction.get("title", "")[:50]
+                click.echo(f"  • {friction['folio_id']} - {title}")
+            if len(open_frictions) > 5:
+                click.echo(f"  ... and {len(open_frictions) - 5} more")
+            click.echo()
+
+        if brief_is_open and ignited_from_brief:
+            click.echo("Ignition brief:")
+            click.echo(f"  • {ignited_from_brief['folio_id']} [OPEN]")
+            click.echo()
+
+    click.echo("Before completing retirement, consider:")
+    click.echo()
+    click.echo("  • Is there incomplete work? File brief(s) if someone should continue.")
+    click.echo("  • Did you have larger ideas or patterns worth sharing? File notion(s).")
+    click.echo("  • Did you encounter friction or blockers? File friction(s).")
+    click.echo("  • Do you know of completed work that should be closed? Close it.")
+    click.echo()
+    click.echo("Examples:")
+    click.echo("  skein close issue-20251112-757o --link summary-20251112-5lut")
+    click.echo("  skein close friction-20251109-1lfe --note \"Fixed by refactoring imports\"")
+    click.echo()
+    click.echo("Note: Writing to SKEIN is optional but encouraged. Don't post just to post.")
+    click.echo()
+    click.echo("When done:")
+    click.echo()
+    click.echo(f"  skein complete")
+    click.echo()
+
+
+@cli.command("complete")
+@click.option("--summary", help="Optional retirement summary")
+@click.pass_context
+def complete(ctx, summary):
+    """
+    Complete torch - Retire from roster.
+
+    Usage:
+        skein complete
+        skein complete --summary "Completed auth audit. 3 issues filed."
+    """
+    base_url = get_base_url(ctx.obj.get("url"))
+    agent_id = get_agent_id(ctx.obj.get("agent"), base_url)
+
+    if agent_id == "unknown":
+        raise click.ClickException("Must set SKEIN_AGENT_ID or use --agent flag")
+
+    # Get roster info
+    try:
+        roster_data = make_request("GET", f"/roster/{agent_id}", base_url, agent_id)
+        name = roster_data.get("name", agent_id)
+    except:
+        raise click.ClickException(f"Agent {agent_id} not found in roster")
+
+    # Get final work summary
+    try:
+        all_folios = make_request("GET", "/folios", base_url, agent_id)
+        agent_folios = [f for f in all_folios if f.get("author") == agent_id or f.get("weaver") == agent_id]
+
+        final_work = {
+            "issues": len([f for f in agent_folios if f.get("type") == "issue"]),
+            "findings": len([f for f in agent_folios if f.get("type") == "finding"]),
+            "plans": len([f for f in agent_folios if f.get("type") == "plan"]),
+            "briefs": len([f for f in agent_folios if f.get("type") == "brief"]),
+            "notions": len([f for f in agent_folios if f.get("type") == "notion"]),
+            "frictions": len([f for f in agent_folios if f.get("type") == "friction"]),
+            "summaries": len([f for f in agent_folios if f.get("type") == "summary"])
+        }
+    except:
+        final_work = {}
+
+    # Post summary if provided
+    if summary:
+        # Find a site to post to (use most recent site they posted to)
+        try:
+            recent_sites = list(set([f.get("site") for f in agent_folios if f.get("site")]))
+            if recent_sites:
+                site_id = recent_sites[-1]
+                summary_data = {
+                    "site": site_id,
+                    "content": summary,
+                    "metadata": {
+                        "retirement_summary": True
+                    }
+                }
+                result = make_request("POST", "/summary", base_url, agent_id, json=summary_data)
+                summary_id = result.get("folio_id")
+            else:
+                summary_id = None
+        except:
+            summary_id = None
+    else:
+        summary_id = None
+
+    # Update status to retired (if server supports it)
+    try:
+        # Try to update via re-registration with new status
+        update_data = {
+            "agent_id": agent_id,
+            "name": name,
+            "status": "retired",
+            "metadata": {
+                "torched_at": datetime.now().isoformat(),
+                "work_summary": final_work
+            }
+        }
+        make_request("POST", "/roster/register", base_url, agent_id, json=update_data)
+    except:
+        # If status update not supported, that's okay - we can still complete
+        pass
+
+    click.echo("="*60)
+    click.echo("RETIRED")
+    click.echo("="*60)
+    click.echo()
+    click.echo(f"✓ Retired: {name}")
+    click.echo()
+
+    if final_work:
+        click.echo("Final Work Summary:")
+        for folio_type, count in final_work.items():
+            if count > 0:
+                click.echo(f"  {folio_type}: {count}")
+        click.echo()
+
+    if summary_id:
+        click.echo(f"✓ Summary posted: {summary_id}")
+        click.echo()
+
+    click.echo("Thank you for your service. 🔥")
+    click.echo()
+
+
+@cli.command()
+@click.argument("agent_id")
+@click.option("--capabilities", multiple=True, help="Agent capabilities (can specify multiple)")
+@click.option("--name", help="Human-readable name")
+@click.option("--type", "agent_type", type=click.Choice(["claude-code", "patbot", "horizon", "human", "system"]), help="Agent type")
+@click.option("--description", help="Longer description")
+@click.option("--eval", is_flag=True, help="Output eval-able export command")
+@click.pass_context
+def identify(ctx, agent_id, capabilities, name, agent_type, description, eval):
+    """
+    Set your agent identity for this shell session.
+
+    Usage:
+      eval $(skein identify agent-007 --eval)
+
+    Or manually:
+      export SKEIN_AGENT_ID=agent-007
+
+    Example: skein identify agent-007 --type claude-code --name "Security Auditor"
+    """
+    base_url = get_base_url(ctx.obj.get("url"))
+
+    if eval:
+        # Just output the export command for eval
+        click.echo(f"export SKEIN_AGENT_ID={agent_id}")
+        return
+
+    # Interactive mode - register if capabilities/name/type/description provided
+    click.echo(f"To identify as {agent_id}, run:")
+    click.echo(f"  export SKEIN_AGENT_ID={agent_id}")
+    click.echo()
+
+    if capabilities or name or agent_type or description:
+        reg_data = {
+            "agent_id": agent_id,
+            "capabilities": list(capabilities) if capabilities else [],
+            "metadata": {}
+        }
+        if name:
+            reg_data["name"] = name
+        if agent_type:
+            reg_data["agent_type"] = agent_type
+        if description:
+            reg_data["description"] = description
+
+        try:
+            reg_result = make_request("POST", "/roster/register", base_url, agent_id, json=reg_data)
+            if reg_result.get("success"):
+                if name:
+                    click.echo(f"✓ Registered as: {name}")
+                if agent_type:
+                    click.echo(f"  Type: {agent_type}")
+                if capabilities:
+                    click.echo(f"  Capabilities: {', '.join(capabilities)}")
+        except Exception as e:
+            click.echo(f"Warning: Registration failed: {e}", err=True)
+
+
+@cli.command("stats")
+@click.argument("target", type=click.Choice(["threads"]))
+@click.option("--orphaned", is_flag=True, help="Show orphaned threads")
+@click.option("--by-weaver", is_flag=True, help="Group by weaver")
+@click.option("--by-type", is_flag=True, help="Group by type")
+@click.option("--all", "show_all", is_flag=True, help="Show all stats")
+@click.option("--json", "output_json", is_flag=True, help="Output as JSON")
+@click.pass_context
+def stats(ctx, target, orphaned, by_weaver, by_type, show_all, output_json):
+    """Observability and debugging analytics.
+
+    Examples:
+        skein stats threads --orphaned
+        skein stats threads --by-weaver
+        skein stats threads --all
+    """
+    base_url = get_base_url(ctx.obj.get("url"))
+    agent_id = get_agent_id(ctx.obj.get("agent"), base_url)
+
+    if target == "threads":
+        analyze_threads(base_url, agent_id, orphaned, by_weaver, by_type,
+                       show_all, output_json)
+
+
+def analyze_threads(base_url, agent_id, orphaned, by_weaver, by_type,
+                   show_all, output_json):
+    """Analyze thread statistics."""
+    from .analytics import (
+        find_orphaned_threads,
+        analyze_by_weaver as analyze_threads_by_weaver,
+        analyze_by_type as analyze_threads_by_type,
+        print_orphaned_threads,
+        print_weaver_stats,
+        print_type_distribution
+    )
+
+    # If no options specified, show all by default
+    if not (orphaned or by_weaver or by_type or show_all):
+        show_all = True
+
+    # Fetch all threads once with error handling
+    try:
+        threads = make_request("GET", "/threads", base_url, agent_id)
+        if not isinstance(threads, list):
+            threads = []
+    except Exception as e:
+        raise click.ClickException(f"Failed to fetch threads: {str(e)}")
+
+    if output_json:
+        # Return structured data
+        results = {}
+        if orphaned or show_all:
+            try:
+                folios = make_request("GET", "/folios", base_url, agent_id)
+                if not isinstance(folios, list):
+                    folios = []
+            except Exception as e:
+                raise click.ClickException(f"Failed to fetch folios: {str(e)}")
+            results["orphaned"] = find_orphaned_threads(threads, folios)
+        if by_weaver or show_all:
+            results["by_weaver"] = analyze_threads_by_weaver(threads)
+        if by_type or show_all:
+            results["by_type"] = analyze_threads_by_type(threads)
+        click.echo(json.dumps(results, indent=2))
+        return
+
+    # Pretty print output
+    if orphaned or show_all:
+        try:
+            folios = make_request("GET", "/folios", base_url, agent_id)
+            if not isinstance(folios, list):
+                folios = []
+        except Exception as e:
+            raise click.ClickException(f"Failed to fetch folios: {str(e)}")
+        print_orphaned_threads(threads, folios)
+        if show_all:
+            click.echo()
+
+    if by_weaver or show_all:
+        print_weaver_stats(threads)
+        if show_all:
+            click.echo()
+
+    if by_type or show_all:
+        print_type_distribution(threads)
+
+
+@cli.command()
+@click.pass_context
+def whoami(ctx):
+    """Show current agent identity."""
+    base_url = get_base_url(ctx.obj.get("url"))
+    agent_id = get_agent_id(ctx.obj.get("agent"), base_url)
+
+    click.echo(f"Agent ID: {agent_id}")
+    click.echo(f"Server: {base_url}/skein")
+
+
+@cli.command()
+@click.argument("topic", type=click.Choice(["quickstart", "guide", "threads", "implementation"]))
+@click.pass_context
+def info(ctx, topic):
+    """Display SKEIN documentation.
+
+    Available topics:
+        quickstart      - Quick start guide for SKEIN
+        guide           - Comprehensive SKEIN agent guide
+        threads         - Conceptual overview of threads system
+        implementation  - Architecture and implementation details
+
+    Examples:
+        skein info quickstart
+        skein info guide
+        skein info threads
+    """
+    import os
+    from pathlib import Path
+
+    # Find docs directory
+    # Docs are in ~/projects/skein/docs/
+    current_file = Path(__file__)
+    project_root = current_file.parent.parent  # client/cli.py -> skein root
+    docs_dir = project_root / "docs"
+
+    doc_map = {
+        "quickstart": docs_dir / "SKEIN_QUICK_START.md",
+        "guide": docs_dir / "SKEIN_AGENT_GUIDE.md",
+        "threads": docs_dir / "THREADS_PHILOSOPHY.md",
+        "implementation": docs_dir / "ARCHITECTURE.md"
+    }
+
+    doc_file = doc_map.get(topic)
+
+    if not doc_file or not doc_file.exists():
+        click.echo(f"Documentation file not found: {doc_file}")
+        click.echo(f"Expected location: {doc_file}")
+        return
+
+    with open(doc_file, 'r') as f:
+        content = f.read()
+        click.echo(content)
+
+
+# ============================================================================
+# BACKUP Commands - Backup and Recovery
+# ============================================================================
+
+@cli.group()
+def backup():
+    """Backup and recovery commands for SKEIN data."""
+    pass
+
+
+@backup.command("create")
+@click.option("--tag", help="Tag to identify this backup (e.g., 'pre-migration')")
+@click.pass_context
+def backup_create(ctx, tag):
+    """Create a full backup of SKEIN data.
+
+    Examples:
+        skein backup create
+        skein backup create --tag pre-migration
+    """
+    from .backup import get_backup_manager_for_project
+
+    manager = get_backup_manager_for_project()
+    if not manager:
+        raise click.ClickException(
+            "Not in a SKEIN project. Run from a directory with .skein/"
+        )
+
+    try:
+        result = manager.create_full_backup(tag=tag)
+        click.echo(f"Backup created: {result['backup_name']}")
+        click.echo(f"  Location: {result['backup_path']}")
+        click.echo(f"  Checksum: {result['checksum'][:16]}...")
+        click.echo(f"  Size: {result['backup_size']:,} bytes")
+        stats = result['source_stats']
+        click.echo(f"  Files: {stats['total_files']}")
+    except Exception as e:
+        raise click.ClickException(f"Backup failed: {e}")
+
+
+@backup.command("list")
+@click.option("--full", "backup_type", flag_value="full", help="Show only full backups")
+@click.option("--json", "output_json", is_flag=True, help="Output as JSON")
+@click.pass_context
+def backup_list(ctx, backup_type, output_json):
+    """List available backups.
+
+    Examples:
+        skein backup list
+        skein backup list --full
+        skein backup list --json
+    """
+    from .backup import get_backup_manager_for_project
+    import json
+
+    manager = get_backup_manager_for_project()
+    if not manager:
+        raise click.ClickException(
+            "Not in a SKEIN project. Run from a directory with .skein/"
+        )
+
+    backups = manager.list_backups(backup_type=backup_type or 'all')
+
+    if output_json:
+        click.echo(json.dumps(backups, indent=2, default=str))
+        return
+
+    if not backups:
+        click.echo("No backups found.")
+        return
+
+    click.echo(f"Found {len(backups)} backup(s):\n")
+    for backup in backups:
+        name = backup.get('backup_name', 'unknown')
+        timestamp = backup.get('timestamp', 'unknown')
+        size = backup.get('backup_size', 0)
+        tag = backup.get('tag', '')
+        exists = "✓" if backup.get('exists', False) else "✗"
+
+        click.echo(f"{exists} {name}")
+        click.echo(f"    Time: {timestamp}")
+        click.echo(f"    Size: {size:,} bytes")
+        if tag:
+            click.echo(f"    Tag: {tag}")
+        click.echo()
+
+
+@backup.command("verify")
+@click.argument("backup_id")
+@click.pass_context
+def backup_verify(ctx, backup_id):
+    """Verify backup integrity.
+
+    Examples:
+        skein backup verify skein_full_2025-11-15_00-00-00
+    """
+    from .backup import get_backup_manager_for_project
+
+    manager = get_backup_manager_for_project()
+    if not manager:
+        raise click.ClickException(
+            "Not in a SKEIN project. Run from a directory with .skein/"
+        )
+
+    result = manager.verify_backup(backup_id)
+
+    if result['valid']:
+        click.echo(f"✓ Backup is valid")
+        click.echo(f"  Checksum: {result['checksum'][:16]}...")
+        click.echo(f"  Files: {result['file_count']}")
+        click.echo(f"  Size: {result['backup_size']:,} bytes")
+    else:
+        click.echo(f"✗ Backup verification failed")
+        click.echo(f"  Error: {result.get('error', 'Unknown error')}")
+
+
+@backup.command("cleanup")
+@click.option("--keep-last", type=int, help="Keep only the N most recent backups")
+@click.option("--older-than", "older_than_days", type=int, help="Remove backups older than N days")
+@click.option("--dry-run", is_flag=True, help="Show what would be removed without removing")
+@click.pass_context
+def backup_cleanup(ctx, keep_last, older_than_days, dry_run):
+    """Remove old backups based on retention policy.
+
+    Examples:
+        skein backup cleanup --keep-last 10
+        skein backup cleanup --older-than 30
+        skein backup cleanup --keep-last 5 --dry-run
+    """
+    from .backup import get_backup_manager_for_project
+
+    manager = get_backup_manager_for_project()
+    if not manager:
+        raise click.ClickException(
+            "Not in a SKEIN project. Run from a directory with .skein/"
+        )
+
+    if not keep_last and not older_than_days:
+        raise click.ClickException("Must specify --keep-last or --older-than")
+
+    result = manager.cleanup_old_backups(
+        keep_last=keep_last,
+        older_than_days=older_than_days,
+        dry_run=dry_run
+    )
+
+    if dry_run:
+        removed = result.get('would_remove', [])
+        if removed:
+            click.echo(f"Would remove {len(removed)} backup(s):")
+            for name in removed:
+                click.echo(f"  - {name}")
+        else:
+            click.echo("No backups would be removed.")
+    else:
+        removed = result.get('removed', [])
+        if removed:
+            click.echo(f"Removed {len(removed)} backup(s):")
+            for name in removed:
+                click.echo(f"  - {name}")
+        else:
+            click.echo("No backups removed.")
+
+    keeping = result.get('keeping', [])
+    if keeping:
+        click.echo(f"\nKeeping {len(keeping)} backup(s)")
+
+
+@cli.command("restore")
+@click.argument("backup_id")
+@click.option("--dry-run", is_flag=True, help="Show what would be restored without making changes")
+@click.option("--confirm", is_flag=True, help="Confirm restore (required for actual restore)")
+@click.pass_context
+def restore(ctx, backup_id, dry_run, confirm):
+    """Restore SKEIN data from a backup.
+
+    WARNING: This will overwrite current data. A pre-restore backup is created automatically.
+
+    Examples:
+        skein restore skein_full_2025-11-15_00-00-00 --dry-run
+        skein restore skein_full_2025-11-15_00-00-00 --confirm
+        skein restore latest --confirm
+    """
+    from .backup import get_backup_manager_for_project
+
+    manager = get_backup_manager_for_project()
+    if not manager:
+        raise click.ClickException(
+            "Not in a SKEIN project. Run from a directory with .skein/"
+        )
+
+    # Handle 'latest' as special case
+    if backup_id == 'latest':
+        backups = manager.list_backups()
+        if not backups:
+            raise click.ClickException("No backups found")
+        backup_id = backups[0]['backup_name'].replace('.tar.gz', '')
+
+    result = manager.restore_backup(backup_id, dry_run=dry_run, confirm=confirm)
+
+    if dry_run:
+        if result['success']:
+            info = result['would_restore']
+            click.echo("Would restore:")
+            click.echo(f"  Files: {info['files']}")
+            click.echo(f"  To: {info['to_directory']}")
+            stats = info.get('source_stats', {})
+            if stats:
+                click.echo(f"  Original size: {stats.get('total_size', 0):,} bytes")
+            click.echo("\nSample files:")
+            for member in info.get('members', [])[:10]:
+                click.echo(f"    {member}")
+            if len(info.get('members', [])) > 10:
+                click.echo(f"    ... and {info['files'] - 10} more")
+        else:
+            click.echo(f"Error: {result.get('error')}")
+    elif result['success']:
+        click.echo(f"✓ Restored from: {result['restored_from']}")
+        click.echo(f"  To: {result['restored_to']}")
+        click.echo(f"  Files restored: {result['files_restored']}")
+        if result.get('pre_restore_backup'):
+            click.echo(f"  Pre-restore backup: {result['pre_restore_backup']}")
+    else:
+        click.echo(f"✗ Restore failed: {result.get('error')}")
+        if result.get('pre_restore_backup'):
+            click.echo(f"  Pre-restore backup available: {result['pre_restore_backup']}")
+
+
+# ============================================================================
+# SHARD Commands - Git Worktree Management
+# ============================================================================
+
+def get_shard_worktree_module():
+    """
+    Import shard module from SKEIN package.
+
+    SHARD functionality is part of SKEIN infrastructure - it operates on
+    whatever project you're currently in.
+    """
+    try:
+        from skein import shard
+        return shard
+    except ImportError as e:
+        raise click.ClickException(
+            f"Failed to import SHARD module: {e}\n"
+            f"SHARD is part of SKEIN infrastructure. If you're seeing this, "
+            f"the SKEIN installation may be incomplete."
+        )
+
+
+@cli.group()
+def shard():
+    """SHARD agent coordination - worktree management for parallel agent work."""
+    pass
+
+
+@shard.command("spawn")
+@click.option("--agent", "spawn_agent", required=True, help="Agent ID for this SHARD")
+@click.option("--brief", help="Brief ID this SHARD relates to")
+@click.option("--description", help="Work description")
+@click.pass_context
+def shard_spawn(ctx, spawn_agent, brief, description):
+    """
+    Spawn a new SHARD: create git branch + worktree for isolated agent work.
+
+    Example:
+        skein shard spawn --agent opus-security-architect --brief brief-123 --description "Bash security"
+    """
+    base_url = get_base_url(ctx.obj.get("url"))
+    agent_id = get_agent_id(ctx.obj.get("agent"), base_url)
+
+    # Import shard_worktree from current project
+    shard_worktree = get_shard_worktree_module()
+
+    try:
+        # Create worktree
+        shard_info = shard_worktree.spawn_shard(
+            agent_id=spawn_agent,
+            brief_id=brief,
+            description=description
+        )
+
+        # Create SKEIN thread to track this SHARD
+        # Use "tag" type with SHARD metadata in content
+        thread_content = json.dumps({
+            "tag": "shard",
+            "shard_id": shard_info["shard_id"],
+            "worktree_name": shard_info["worktree_name"],
+            "worktree_path": shard_info["worktree_path"],
+            "branch_name": shard_info["branch_name"],
+            "status": "spawned",
+            "description": description or ""
+        })
+
+        # Thread from agent to brief (if provided) or agent to self
+        thread_data = {
+            "from_id": spawn_agent,
+            "to_id": brief if brief else spawn_agent,
+            "type": "tag",
+            "content": thread_content
+        }
+
+        try:
+            thread_result = make_request("POST", "/threads", base_url, agent_id, json=thread_data)
+            shard_info["thread_id"] = thread_result.get("thread_id")
+        except Exception as e:
+            # Don't fail spawn if thread creation fails
+            click.echo(f"Warning: Failed to create SKEIN thread: {e}", err=True)
+
+        click.echo(f"✓ Spawned SHARD: {shard_info['shard_id']}")
+        click.echo(f"  Agent: {shard_info['agent_id']}")
+        click.echo(f"  Branch: {shard_info['branch_name']}")
+        click.echo(f"  Worktree: {shard_info['worktree_path']}")
+        if shard_info.get('brief_id'):
+            click.echo(f"  Brief: {shard_info['brief_id']}")
+        if shard_info.get('thread_id'):
+            click.echo(f"  Thread: {shard_info['thread_id']}")
+        click.echo(f"\nTo work in this SHARD:")
+        click.echo(f"  cd {shard_info['worktree_path']}")
+
+    except shard_worktree.ShardError as e:
+        raise click.ClickException(str(e))
+    except Exception as e:
+        raise click.ClickException(f"Failed to spawn SHARD: {e}")
+
+
+@shard.command("list")
+@click.option("--active", is_flag=True, help="Show only active SHARDs")
+@click.option("--agent", "filter_agent", help="Filter by agent ID")
+@click.option("--json", "output_json", is_flag=True, help="Output as JSON")
+@click.pass_context
+def shard_list(ctx, active, filter_agent, output_json):
+    """
+    List SHARD worktrees.
+
+    Example:
+        skein shard list
+        skein shard list --agent opus-security-architect
+    """
+    # Import shard_worktree from current project
+    shard_worktree = get_shard_worktree_module()
+
+    try:
+        shards = shard_worktree.list_shards(active_only=active)
+
+        # Filter by agent if requested
+        if filter_agent:
+            shards = [s for s in shards if s['agent_id'] == filter_agent]
+
+        if output_json:
+            import json
+            click.echo(json.dumps(shards, indent=2))
+        else:
+            if not shards:
+                click.echo("No SHARDs found")
+            else:
+                click.echo(f"Found {len(shards)} SHARD(s):\n")
+                for shard in shards:
+                    click.echo(f"  {shard['worktree_name']}")
+                    click.echo(f"    Agent: {shard['agent_id']}")
+                    click.echo(f"    Branch: {shard['branch_name']}")
+                    click.echo(f"    Path: {shard['worktree_path']}")
+                    click.echo()
+
+    except shard_worktree.ShardError as e:
+        raise click.ClickException(str(e))
+    except Exception as e:
+        raise click.ClickException(f"Failed to list SHARDs: {e}")
+
+
+@shard.command("status")
+@click.argument("worktree_name")
+@click.pass_context
+def shard_status(ctx, worktree_name):
+    """
+    Get status of a specific SHARD.
+
+    Example:
+        skein shard status opus-security-architect-20251109-001
+    """
+    # Import shard_worktree from current project
+    shard_worktree = get_shard_worktree_module()
+
+    try:
+        shard = shard_worktree.get_shard_status(worktree_name)
+
+        if not shard:
+            raise click.ClickException(f"SHARD not found: {worktree_name}")
+
+        click.echo(f"SHARD: {shard['worktree_name']}")
+        click.echo(f"  Agent: {shard['agent_id']}")
+        click.echo(f"  Branch: {shard['branch_name']}")
+        click.echo(f"  Path: {shard['worktree_path']}")
+        click.echo(f"  Date: {shard['date']}")
+        click.echo(f"  Sequence: {shard['seq']}")
+
+    except shard_worktree.ShardError as e:
+        raise click.ClickException(str(e))
+    except Exception as e:
+        raise click.ClickException(f"Failed to get SHARD status: {e}")
+
+
+@shard.command("cleanup")
+@click.argument("worktree_name")
+@click.option("--keep-branch", is_flag=True, help="Keep git branch after removing worktree")
+@click.confirmation_option(prompt="Are you sure you want to cleanup this SHARD?")
+@click.pass_context
+def shard_cleanup(ctx, worktree_name, keep_branch):
+    """
+    Remove SHARD worktree and optionally delete branch.
+
+    Example:
+        skein shard cleanup opus-security-architect-20251109-001
+        skein shard cleanup opus-security-architect-20251109-001 --keep-branch
+    """
+    # Import shard_worktree from current project
+    shard_worktree = get_shard_worktree_module()
+
+    try:
+        shard_worktree.cleanup_shard(worktree_name, keep_branch=keep_branch)
+
+        click.echo(f"✓ Cleaned up SHARD: {worktree_name}")
+        if not keep_branch:
+            click.echo("  (Branch also deleted)")
+        else:
+            click.echo("  (Branch kept)")
+
+    except shard_worktree.ShardError as e:
+        raise click.ClickException(str(e))
+    except Exception as e:
+        raise click.ClickException(f"Failed to cleanup SHARD: {e}")
+
+
+@shard.command("pause")
+@click.argument("worktree_name")
+@click.argument("reason")
+@click.pass_context
+def shard_pause(ctx, worktree_name, reason):
+    """
+    Pause work on a SHARD.
+
+    Example:
+        skein shard pause opus-security-architect-20251109-001 "Blocked on bubblewrap version decision"
+    """
+    base_url = get_base_url(ctx.obj.get("url"))
+    agent_id = get_agent_id(ctx.obj.get("agent"), base_url)
+
+    # Import shard_worktree from current project
+    shard_worktree = get_shard_worktree_module()
+
+    # Verify SHARD exists
+    shard_info = shard_worktree.get_shard_status(worktree_name)
+    if not shard_info:
+        raise click.ClickException(f"SHARD not found: {worktree_name}")
+
+    # Find the SHARD thread
+    try:
+        threads = make_request("GET", f"/threads?limit=100", base_url, agent_id)
+
+        shard_thread_id = None
+        for thread in threads:
+            if thread.get("type") == "tag":
+                try:
+                    content = json.loads(thread.get("content", "{}"))
+                    if content.get("tag") == "shard" and content.get("worktree_name") == worktree_name:
+                        shard_thread_id = thread.get("thread_id")
+                        break
+                except json.JSONDecodeError:
+                    continue
+
+        if shard_thread_id:
+            # Reply to thread with pause status
+            reply_data = {
+                "thread_id": shard_thread_id,
+                "content": f"[PAUSED] {reason}"
+            }
+            make_request("POST", f"/threads/{shard_thread_id}/replies", base_url, agent_id, json=reply_data)
+
+        click.echo(f"⏸  Paused SHARD: {worktree_name}")
+        click.echo(f"  Reason: {reason}")
+
+    except Exception as e:
+        # Don't fail if thread update fails
+        click.echo(f"⏸  Paused SHARD: {worktree_name}")
+        click.echo(f"  Reason: {reason}")
+        click.echo(f"  Warning: Failed to update SKEIN thread: {e}", err=True)
+
+
+@shard.command("resume")
+@click.argument("worktree_name")
+@click.argument("message", required=False)
+@click.pass_context
+def shard_resume(ctx, worktree_name, message):
+    """
+    Resume work on a paused SHARD.
+
+    Examples:
+        skein shard resume opus-security-architect-20251109-001 "Decision made: use bubblewrap 0.5.0"
+        skein shard resume opus-security-architect-20251109-001
+    """
+    base_url = get_base_url(ctx.obj.get("url"))
+    agent_id = get_agent_id(ctx.obj.get("agent"), base_url)
+
+    # Import shard_worktree from current project
+    shard_worktree = get_shard_worktree_module()
+
+    # Verify SHARD exists
+    shard_info = shard_worktree.get_shard_status(worktree_name)
+    if not shard_info:
+        raise click.ClickException(f"SHARD not found: {worktree_name}")
+
+    # Find the SHARD thread
+    try:
+        threads = make_request("GET", f"/threads?limit=100", base_url, agent_id)
+
+        shard_thread_id = None
+        for thread in threads:
+            if thread.get("type") == "tag":
+                try:
+                    content = json.loads(thread.get("content", "{}"))
+                    if content.get("tag") == "shard" and content.get("worktree_name") == worktree_name:
+                        shard_thread_id = thread.get("thread_id")
+                        break
+                except json.JSONDecodeError:
+                    continue
+
+        if shard_thread_id:
+            # Reply to thread with resume status
+            resume_msg = f"[RESUMED] {message}" if message else "[RESUMED]"
+            reply_data = {
+                "thread_id": shard_thread_id,
+                "content": resume_msg
+            }
+            make_request("POST", f"/threads/{shard_thread_id}/replies", base_url, agent_id, json=reply_data)
+
+        click.echo(f"▶  Resumed SHARD: {worktree_name}")
+        if message:
+            click.echo(f"  Message: {message}")
+
+    except Exception as e:
+        # Don't fail if thread update fails
+        click.echo(f"▶  Resumed SHARD: {worktree_name}")
+        if message:
+            click.echo(f"  Message: {message}")
+        click.echo(f"  Warning: Failed to update SKEIN thread: {e}", err=True)
+
+
+@shard.command("tender")
+@click.argument("worktree_name")
+@click.option("--reviewer", help="Agent ID to review this SHARD (default: prime)")
+@click.option("--summary", help="Brief summary of changes")
+@click.pass_context
+def shard_tender(ctx, worktree_name, reviewer, summary):
+    """
+    Mark SHARD as ready for review (tender for assessment).
+
+    Examples:
+        skein tender opus-security-architect-20251109-001
+        skein tender opus-security-architect-20251109-001 --reviewer prime
+        skein tender opus-security-architect-20251109-001 --summary "Added 15 security checks"
+    """
+    base_url = get_base_url(ctx.obj.get("url"))
+    agent_id = get_agent_id(ctx.obj.get("agent"), base_url)
+
+    # Import shard_worktree from current project
+    shard_worktree = get_shard_worktree_module()
+
+    # Verify SHARD exists
+    shard_info = shard_worktree.get_shard_status(worktree_name)
+    if not shard_info:
+        raise click.ClickException(f"SHARD not found: {worktree_name}")
+
+    # Gather tender metadata
+    try:
+        metadata = shard_worktree.get_tender_metadata(worktree_name)
+        if not metadata:
+            raise click.ClickException(f"Could not gather metadata for {worktree_name}")
+    except Exception as e:
+        raise click.ClickException(f"Failed to gather metadata: {e}")
+
+    # Default reviewer
+    if not reviewer:
+        reviewer = "prime"
+
+    # Build tender content
+    tender_content = {
+        "type": "tender",
+        "worktree_name": worktree_name,
+        "branch_name": metadata["branch_name"],
+        "agent_id": metadata["agent_id"],
+        "commits": metadata["commits"],
+        "files_modified": metadata.get("files_modified", []),
+        "summary": summary or metadata.get("last_commit_message", "No summary provided"),
+    }
+
+    # Find the original SHARD thread
+    try:
+        threads = make_request("GET", f"/threads?limit=100", base_url, agent_id)
+
+        original_thread_id = None
+        for thread in threads:
+            if thread.get("type") == "tag":
+                try:
+                    content = json.loads(thread.get("content", "{}"))
+                    if content.get("tag") == "shard" and content.get("worktree_name") == worktree_name:
+                        original_thread_id = thread.get("thread_id")
+                        break
+                except json.JSONDecodeError:
+                    continue
+
+        # Create tender thread (from agent to reviewer)
+        # Note: Using type='tag' since SKEIN doesn't have 'tender' type yet
+        tender_thread_data = {
+            "from_id": metadata["agent_id"],
+            "to_id": reviewer,
+            "type": "tag",
+            "content": json.dumps(tender_content, indent=2)
+        }
+
+        tender_thread = make_request("POST", "/threads", base_url, agent_id, json=tender_thread_data)
+        tender_thread_id = tender_thread.get("thread_id")
+
+        # Also reply to original SHARD thread with tender status
+        if original_thread_id:
+            reply_data = {
+                "thread_id": original_thread_id,
+                "content": f"[TENDERED] Ready for review by {reviewer}\nTender: {tender_thread_id}"
+            }
+            make_request("POST", f"/threads/{original_thread_id}/replies", base_url, agent_id, json=reply_data)
+
+        # Display summary
+        click.echo(f"🎯 Tendered SHARD: {worktree_name}")
+        click.echo(f"  Reviewer: {reviewer}")
+        click.echo(f"  Tender Thread: {tender_thread_id}")
+        click.echo(f"  Commits: {metadata['commits']}")
+        click.echo(f"  Files Modified: {len(metadata.get('files_modified', []))}")
+
+        if summary:
+            click.echo(f"  Summary: {summary}")
+
+        click.echo(f"\n  Review with: skein inbox {reviewer}")
+
+    except Exception as e:
+        raise click.ClickException(f"Failed to create tender thread: {e}")
+
+
+# Alias for common usage
+@cli.command(name="shards", hidden=True)
+@click.option("--active", is_flag=True, help="Show only active SHARDs")
+@click.option("--agent", "filter_agent", help="Filter by agent ID")
+@click.option("--json", "output_json", is_flag=True, help="Output as JSON")
+@click.pass_context
+def shards_shortcut(ctx, active, filter_agent, output_json):
+    """Shortcut for 'skein shard list'."""
+    ctx.invoke(shard_list, active=active, filter_agent=filter_agent, output_json=output_json)
+
+
+if __name__ == "__main__":
+    cli()

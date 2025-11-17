@@ -1,0 +1,51 @@
+name: Lint
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Cache pip dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-lint-${{ hashFiles('**/requirements*.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-lint-
+
+      - name: Install linting dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install black flake8 isort mypy types-requests
+
+      - name: Check formatting with black
+        run: |
+          black --check --diff skein/ client/ tests/ skein_server.py
+
+      - name: Check import sorting with isort
+        run: |
+          isort --check-only --diff skein/ client/ tests/ skein_server.py
+
+      - name: Lint with flake8
+        run: |
+          # Stop the build if there are Python syntax errors or undefined names
+          flake8 skein/ client/ tests/ skein_server.py --count --select=E9,F63,F7,F82 --show-source --statistics
+          # Exit-zero treats all errors as warnings. Line length is handled by black
+          flake8 skein/ client/ tests/ skein_server.py --count --exit-zero --max-complexity=10 --max-line-length=100 --statistics
+
+      - name: Type check with mypy
+        run: |
+          mypy skein/ client/ --ignore-missing-imports --no-error-summary || true
