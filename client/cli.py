@@ -256,12 +256,12 @@ def setup_claude():
     """
     # Find the template in the package
     import skein
-    package_dir = Path(skein.__file__).parent.parent
+    package_dir = Path(skein.__file__).parent
     template_path = package_dir / "templates" / "CLAUDE.md"
 
     if not template_path.exists():
-        # Fallback: try relative to this file
-        template_path = Path(__file__).parent.parent / "templates" / "CLAUDE.md"
+        # Fallback: try relative to this file (project root)
+        template_path = Path(__file__).parent.parent / "skein" / "templates" / "CLAUDE.md"
 
     if not template_path.exists():
         raise click.ClickException(f"Template not found at {template_path}")
@@ -442,6 +442,180 @@ def logs(ctx, stream_id, level, since, search, tail, list_streams, output_json):
 
             if len(log_lines) > 50:
                 click.echo(f"\n... and {len(log_lines) - 50} more lines (use --json to see all)")
+
+
+@cli.command("log")
+@click.option("-n", "--max-count", type=int, help="Limit to N entries")
+@click.option("--since", "--after", help="Show folios after date (1day, 2hours, ISO)")
+@click.option("--until", "--before", help="Show folios before date")
+@click.option("--agent", help="Filter by agent ID")
+@click.option("--site", "site_filter", help="Filter by site")
+@click.option("--type", "type_filter", help="Filter by folio type")
+@click.option("--grep", help="Search in content")
+@click.option("--oneline", is_flag=True, help="Compact single-line format")
+@click.option("--follow", help="Follow thread connections from folio ID")
+@click.option("--no-pager", is_flag=True, help="Disable pager")
+@click.option("--json", "output_json", is_flag=True)
+@click.pass_context
+def log_cmd(ctx, max_count, since, until, agent, site_filter, type_filter, grep, oneline, follow, no_pager, output_json):
+    """Show folio history (git-style log)."""
+    base_url = get_base_url(ctx.obj.get("url"))
+    agent_id = get_agent_id(ctx.obj.get("agent"), base_url)
+
+    # Detect TTY for smart defaults
+    is_tty = sys.stdout.isatty()
+
+    # Build params for API
+    params = {}
+    if site_filter:
+        params["site_id"] = site_filter
+    if type_filter:
+        params["type"] = type_filter
+
+    # Fetch folios
+    folios_list = make_request("GET", "/folios", base_url, agent_id, params=params if params else None)
+
+    # Fetch all threads for thread count
+    try:
+        all_threads = make_request("GET", "/threads", base_url, agent_id)
+        threads_by_folio = {}
+        for thread in all_threads:
+            for fid in [thread['from_id'], thread['to_id']]:
+                if fid not in threads_by_folio:
+                    threads_by_folio[fid] = []
+                threads_by_folio[fid].append(thread)
+    except:
+        threads_by_folio = {}
+
+    # Filter by agent
+    if agent:
+        folios_list = [f for f in folios_list if agent.lower() in f.get('created_by', '').lower()]
+
+    # Filter by grep
+    if grep:
+        folios_list = [f for f in folios_list if grep.lower() in f.get('content', '').lower()]
+
+    # Filter by since/until
+    if since or until:
+        from datetime import datetime, timedelta
+        import re
+
+        def parse_time_filter(time_str):
+            # Try relative format (1day, 2hours, etc.)
+            match = re.match(r'^(\d+)(hour|day|week|minute)s?$', time_str)
+            if match:
+                num = int(match.group(1))
+                unit = match.group(2)
+                delta = {
+                    'minute': timedelta(minutes=num),
+                    'hour': timedelta(hours=num),
+                    'day': timedelta(days=num),
+                    'week': timedelta(weeks=num)
+                }.get(unit, timedelta(days=num))
+                return datetime.now() - delta
+            # Try ISO format
+            try:
+                return datetime.fromisoformat(time_str.replace('Z', '+00:00'))
+            except:
+                return None
+
+        if since:
+            since_dt = parse_time_filter(since)
+            if since_dt:
+                folios_list = [f for f in folios_list if datetime.fromisoformat(f['created_at'].replace('Z', '+00:00')) >= since_dt]
+
+        if until:
+            until_dt = parse_time_filter(until)
+            if until_dt:
+                folios_list = [f for f in folios_list if datetime.fromisoformat(f['created_at'].replace('Z', '+00:00')) <= until_dt]
+
+    # Follow thread connections
+    if follow:
+        # Find all folios connected via threads
+        connected = set([follow])
+        to_check = [follow]
+        while to_check:
+            current = to_check.pop()
+            for thread in threads_by_folio.get(current, []):
+                for fid in [thread['from_id'], thread['to_id']]:
+                    if fid not in connected:
+                        connected.add(fid)
+                        to_check.append(fid)
+        folios_list = [f for f in folios_list if f.get('folio_id') in connected]
+
+    # Sort by date (newest first)
+    folios_list.sort(key=lambda x: x.get('created_at', ''), reverse=True)
+
+    # Apply limit (default 20 for non-TTY/agents)
+    total_count = len(folios_list)
+    if max_count:
+        folios_list = folios_list[:max_count]
+    elif not is_tty:
+        # Agent default: limit to 20
+        folios_list = folios_list[:20]
+
+    if output_json:
+        click.echo(json.dumps(folios_list, indent=2))
+        return
+
+    if not folios_list:
+        click.echo("No folios found")
+        return
+
+    # Build output lines
+    output_lines = []
+    for f in folios_list:
+        folio_id = f.get('folio_id', 'unknown')
+        folio_type = f.get('type', 'folio')
+        site = f.get('site') or f.get('site_id') or ''
+        agent_name = f.get('created_by', 'unknown')
+        created_at = f.get('created_at', '')[:19].replace('T', ' ')
+        content = f.get('content', '')
+        status = f.get('status', 'open').upper()
+
+        # Get first line of content, truncated
+        first_line = content.split('\n')[0][:60]
+        if len(content.split('\n')[0]) > 60:
+            first_line += '...'
+
+        # Thread count
+        thread_count = len(threads_by_folio.get(folio_id, []))
+
+        # Colors (like git: yellow for id only)
+        yellow = '\033[33m'
+        reset = '\033[0m'
+
+        if oneline:
+            site_str = f" ({site})" if site else ""
+            output_lines.append(f"{yellow}{folio_type}-{folio_id.split('-', 1)[-1]}{reset}{site_str} {agent_name} {first_line}")
+        else:
+            site_str = f" ({site})" if site else ""
+            output_lines.append(f"{yellow}folio {folio_type}-{folio_id.split('-', 1)[-1]}{site_str}{reset}")
+            output_lines.append(f"Agent: {agent_name}")
+            output_lines.append(f"Date:  {created_at}")
+            output_lines.append("")
+            output_lines.append(f"    {first_line}")
+            if thread_count > 0:
+                output_lines.append("")
+                output_lines.append(f"    {status} +{thread_count}")
+            output_lines.append("")
+
+    # Add footer for agents if truncated
+    if not is_tty and len(folios_list) < total_count:
+        output_lines.append(f"(Showing {len(folios_list)} of {total_count} folios. Use -n to see more)")
+
+    # Output with pager for TTY, plain for agents
+    output_text = '\n'.join(output_lines)
+    if is_tty and not no_pager:
+        import subprocess
+        try:
+            proc = subprocess.Popen(['less', '-R'], stdin=subprocess.PIPE)
+            proc.communicate(input=output_text.encode())
+        except:
+            # Fallback if less not available
+            click.echo(output_text)
+    else:
+        click.echo(output_text)
 
 
 # ============================================================================
@@ -988,6 +1162,98 @@ def search(ctx, query, resources, type, site, sites, all_sites, status, sort, li
 
 
 @cli.command()
+@click.option("--json", "output_json", is_flag=True)
+@click.pass_context
+def status(ctx, output_json):
+    """Show project status overview."""
+    base_url = get_base_url(ctx.obj.get("url"))
+    agent_id = get_agent_id(ctx.obj.get("agent"), base_url)
+
+    # Check server health (direct request, not through /skein prefix)
+    try:
+        resp = requests.get(f"{base_url}/health", timeout=2)
+        health = resp.json()
+        server_status = "healthy" if health.get("status") == "healthy" else "unhealthy"
+    except:
+        server_status = "unreachable"
+
+    # Get project config
+    project_config = get_project_config()
+    project_name = project_config.get("project_id", "unknown") if project_config else "unknown"
+
+    # Get all folios for counts
+    try:
+        all_folios = make_request("GET", "/folios", base_url, agent_id)
+    except:
+        all_folios = []
+
+    # Count open issues and frictions
+    open_issues = len([f for f in all_folios if f.get('type') == 'issue' and f.get('status', 'open') == 'open'])
+    open_frictions = len([f for f in all_folios if f.get('type') == 'friction' and f.get('status', 'open') == 'open'])
+    pending_briefs = len([f for f in all_folios if f.get('type') == 'brief' and f.get('status', 'open') == 'open'])
+
+    # Get folios from last hour and count by type
+    from datetime import datetime, timedelta
+    one_hour_ago = datetime.now() - timedelta(hours=1)
+
+    recent_folios = []
+    recent_agents = set()
+    for f in all_folios:
+        try:
+            created = datetime.fromisoformat(f['created_at'].replace('Z', '+00:00').replace('+00:00', ''))
+            if created >= one_hour_ago:
+                recent_folios.append(f)
+                recent_agents.add(f.get('created_by', 'unknown'))
+        except:
+            pass
+
+    # Count by type for last hour
+    type_counts = {}
+    for f in recent_folios:
+        ftype = f.get('type', 'other')
+        type_counts[ftype] = type_counts.get(ftype, 0) + 1
+
+    if output_json:
+        click.echo(json.dumps({
+            "server": base_url,
+            "server_status": server_status,
+            "project": project_name,
+            "open_issues": open_issues,
+            "open_frictions": open_frictions,
+            "pending_briefs": pending_briefs,
+            "active_agents": len(recent_agents),
+            "last_hour": type_counts
+        }, indent=2))
+        return
+
+    # Format output with colors and alignment
+    yellow = '\033[33m'
+    reset = '\033[0m'
+
+    click.echo(f"Server:  {base_url} ({server_status})")
+    click.echo(f"Project: {project_name}")
+    click.echo()
+    click.echo(f"Open issues:    {yellow}{open_issues:>3}{reset}")
+    click.echo(f"Open frictions: {yellow}{open_frictions:>3}{reset}")
+    click.echo(f"Pending briefs: {yellow}{pending_briefs:>3}{reset}")
+    click.echo()
+    click.echo(f"Active agents:  {yellow}{len(recent_agents):>3}{reset}")
+    click.echo()
+
+    # Last hour summary
+    if type_counts:
+        # B=brief, I=issue, F=finding, R=friction, S=summary
+        type_abbrev = {'brief': 'B', 'issue': 'I', 'finding': 'F', 'friction': 'R', 'summary': 'S'}
+        parts = []
+        for ftype, count in sorted(type_counts.items()):
+            abbrev = type_abbrev.get(ftype, ftype[0].upper())
+            parts.append(f"{count}{abbrev}")
+        click.echo(f"Last hour: {' '.join(parts)}")
+    else:
+        click.echo("Last hour: (no activity)")
+
+
+@cli.command()
 @click.option("--since", help="Time filter (1hour, 2days, or ISO timestamp)")
 @click.option("--json", "output_json", is_flag=True)
 @click.pass_context
@@ -1155,6 +1421,85 @@ def frictions(ctx, site_id, output_json):
                 click.echo(f"  {f['title']}")
                 click.echo(f"    Site: {f['site_id']} | ID: {f['folio_id']}")
                 click.echo()
+
+
+@cli.command()
+@click.argument("folio_id")
+@click.option("--no-pager", is_flag=True, help="Disable pager")
+@click.option("--json", "output_json", is_flag=True)
+@click.pass_context
+def folio(ctx, folio_id, no_pager, output_json):
+    """Read a single folio by ID."""
+    base_url = get_base_url(ctx.obj.get("url"))
+    agent_id = get_agent_id(ctx.obj.get("agent"), base_url)
+
+    folio_data = make_request("GET", f"/folios/{folio_id}", base_url, agent_id)
+
+    if output_json:
+        click.echo(json.dumps(folio_data, indent=2))
+        return
+
+    # Detect TTY for pager
+    is_tty = sys.stdout.isatty()
+
+    # Colors
+    yellow = '\033[33m'
+    reset = '\033[0m'
+
+    # Build output
+    output_lines = []
+    fid = folio_data.get('folio_id', 'unknown')
+    ftype = folio_data.get('type', 'folio')
+    site = folio_data.get('site') or ''
+    site_str = f" ({site})" if site else ""
+
+    output_lines.append(f"{yellow}folio {ftype}-{fid.split('-', 1)[-1]}{site_str}{reset}")
+    output_lines.append(f"Agent: {folio_data.get('created_by', 'unknown')}")
+    output_lines.append(f"Date:  {folio_data.get('created_at', '')[:19].replace('T', ' ')}")
+    if folio_data.get('status'):
+        output_lines.append(f"Status: {folio_data.get('status')}")
+    output_lines.append("")
+
+    # Full content with indentation
+    content = folio_data.get('content', '')
+    for line in content.split('\n'):
+        output_lines.append(f"    {line}")
+
+    # Get thread connections
+    try:
+        all_threads = make_request("GET", "/threads", base_url, agent_id)
+        related_threads = [t for t in all_threads if fid in [t['from_id'], t['to_id']]]
+        if related_threads:
+            output_lines.append("")
+            output_lines.append(f"    Threads ({len(related_threads)}):")
+            for t in related_threads:
+                other_id = t['to_id'] if t['from_id'] == fid else t['from_id']
+                output_lines.append(f"      → {other_id}")
+    except:
+        pass
+
+    # Output with pager for TTY
+    output_text = '\n'.join(output_lines)
+    if is_tty and not no_pager:
+        import subprocess
+        try:
+            proc = subprocess.Popen(['less', '-R'], stdin=subprocess.PIPE)
+            proc.communicate(input=output_text.encode())
+        except:
+            click.echo(output_text)
+    else:
+        click.echo(output_text)
+
+
+# Alias: skein show -> skein folio
+@cli.command("show")
+@click.argument("folio_id")
+@click.option("--no-pager", is_flag=True, help="Disable pager")
+@click.option("--json", "output_json", is_flag=True)
+@click.pass_context
+def show(ctx, folio_id, no_pager, output_json):
+    """Read a single folio by ID (alias for 'folio')."""
+    ctx.invoke(folio, folio_id=folio_id, no_pager=no_pager, output_json=output_json)
 
 
 @cli.command()
@@ -1706,15 +2051,15 @@ def tag(ctx, resource_id, tag_name):
 @click.argument("resource_id")
 @click.argument("status_value", type=click.Choice(["open", "closed", "investigating", "resolved", "blocked", "in-progress"]))
 @click.pass_context
-def status(ctx, resource_id, status_value):
+def update(ctx, resource_id, status_value):
     """Set status on a resource.
 
     Creates a thread from current agent to resource with type:status.
 
     Examples:
-        skein status issue-123 investigating
-        skein status issue-123 closed
-        skein status issue-456 open
+        skein update issue-123 investigating
+        skein update issue-123 closed
+        skein update issue-456 open
     """
     base_url = get_base_url(ctx.obj.get("url"))
     agent_id = get_agent_id(ctx.obj.get("agent"), base_url)

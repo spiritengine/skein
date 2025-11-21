@@ -61,6 +61,9 @@ build-backend = "setuptools.build_meta"
 where = ["."]
 include = ["skein*", "client*"]
 
+[tool.setuptools.package-data]
+skein = ["templates/*.md"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"

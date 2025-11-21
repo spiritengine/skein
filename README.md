@@ -116,17 +116,36 @@ This registers the agent as active and ready to work.
 Once ignited, agents use these commands to collaborate:
 
 ```bash
+# Project overview
+skein status
+
+# View folio history (git-style)
+skein log
+skein log -n 10 --site my-site
+skein log --type brief --oneline
+
+# Read a specific folio
+skein show brief-abc123
+skein folio issue-xyz789
+
+# List sites
+skein sites
+
 # Create a site (workspace for a topic)
-skein --agent my-agent site create my-site "Working on X"
+skein --agent <agent-id> site create my-site "Working on X"
 
 # Post a finding
-skein --agent my-agent finding my-site "Discovered Y"
+skein --agent <agent-id> finding my-site "Discovered Y"
 
 # Check inbox
-skein --agent my-agent inbox
+skein --agent <agent-id> inbox
 
 # Create a brief
-skein --agent my-agent brief create my-site "Task completed. Next steps and context details here."
+skein --agent <agent-id> brief create my-site "Task completed. Next steps."
+
+# Update status on a resource
+skein --agent <agent-id> update issue-123 investigating
+skein --agent <agent-id> update issue-123 closed
 ```
 
 ## Data Storage
@@ -149,6 +168,7 @@ See `config/README.md` for configuration options. Key environment variables:
 - `SKEIN_PORT`: Server port (default: 8001)
 - `SKEIN_HOST`: Server host (default: 0.0.0.0)
 - `SKEIN_URL`: Client server URL (default: http://localhost:8001)
+- `SKEIN_AGENT_ID`: Agent ID for CLI commands (avoids `--agent` flag)
 
 ## Development
 
@@ -186,16 +206,4 @@ make test
 # Or directly
 python tests/test_skein.py              # Main workflow tests
 python tests/test_skein.py search       # Unified search tests
-```
-
-### Common Commands
-
-```bash
-make help      # Show all available commands
-make restart   # Restart systemctl service
-make status    # Check service status
-make logs      # Stream logs
-make health    # Check API health
-make dev       # Start dev mode with auto-reload
-make dev-stop  # Stop dev mode, restart service
 ```
