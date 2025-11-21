@@ -237,6 +237,54 @@ def init(project, name):
     click.echo(f"Server URL: {project_config['server_url']}")
 
 
+@cli.group()
+def setup():
+    """Setup commands for SKEIN integration."""
+    pass
+
+
+@setup.command("claude")
+def setup_claude():
+    """
+    Append SKEIN agent instructions to CLAUDE.md.
+
+    Adds the SKEIN template to your project's CLAUDE.md file,
+    creating it if it doesn't exist.
+
+    Example:
+        skein setup claude
+    """
+    # Find the template in the package
+    import skein
+    package_dir = Path(skein.__file__).parent.parent
+    template_path = package_dir / "templates" / "CLAUDE.md"
+
+    if not template_path.exists():
+        # Fallback: try relative to this file
+        template_path = Path(__file__).parent.parent / "templates" / "CLAUDE.md"
+
+    if not template_path.exists():
+        raise click.ClickException(f"Template not found at {template_path}")
+
+    # Read template
+    with open(template_path) as f:
+        template_content = f.read()
+
+    # Target file in current directory
+    target_path = Path.cwd() / "CLAUDE.md"
+
+    # Append or create
+    if target_path.exists():
+        with open(target_path, 'a') as f:
+            f.write("\n\n")
+            f.write(template_content)
+        click.echo(f"Appended SKEIN instructions to {target_path}")
+    else:
+        with open(target_path, 'w') as f:
+            f.write(template_content)
+        click.echo(f"Created {target_path} with SKEIN instructions")
+
+
 @cli.command()
 @click.option("--verbose", "-v", is_flag=True, help="Show detailed information")
 def projects(verbose):

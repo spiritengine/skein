@@ -27,11 +27,6 @@ cd /path/to/your/project
 skein --agent AGENT summary site-id "work done"  # ✅ Works
 ```
 
-**What goes wrong if you're in the wrong directory:**
-```bash
-# Running from somewhere else
-cd /tmp
-skein --agent AGENT summary site-id "work done"  # ❌ "Not Found" errors
 ```
 
 **Common mistakes:**

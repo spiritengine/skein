@@ -1,0 +1,20 @@
+[Unit]
+Description=SKEIN Server (Structured Knowledge Exchange & Integration Nexus)
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=__WORKING_DIR__
+Environment="PATH=__PYTHON_BIN_DIR__:/usr/local/bin:/usr/bin"
+Environment="PYTHONUNBUFFERED=1"
+ExecStart=__PYTHON__ skein_server.py
+Restart=on-failure
+RestartSec=5
+
+# Local dev - less restrictive
+KillMode=control-group
+KillSignal=SIGINT
+TimeoutStopSec=10
+
+[Install]
+WantedBy=default.target

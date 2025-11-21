@@ -1,9 +1,24 @@
-.PHONY: help restart status logs start stop test dev dev-stop lint format docker-build docker-up docker-down
+.PHONY: help install install-service restart status logs start stop test dev dev-stop lint format docker-build docker-up docker-down
 
 help:  ## Show this help
 	@echo "SKEIN Makefile Commands:"
 	@echo ""
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36mmake %-15s\033[0m %s\n", $$1, $$2}'
+
+install:  ## Install SKEIN package
+	@echo "Installing SKEIN..."
+	@pip install -e .
+
+install-service:  ## Install systemd user service
+	@echo "Installing SKEIN systemd user service..."
+	@mkdir -p ~/.config/systemd/user
+	@sed -e 's|__WORKING_DIR__|$(PWD)|g' \
+	     -e 's|__PYTHON__|$(shell which python)|g' \
+	     -e 's|__PYTHON_BIN_DIR__|$(dir $(shell which python))|g' \
+	     systemd/skein.service.template > ~/.config/systemd/user/skein.service
+	@systemctl --user daemon-reload
+	@systemctl --user enable skein
+	@echo "Service installed. Use 'make start' to start SKEIN."
 
 restart:  ## Restart SKEIN server
 	@echo "🔄 Restarting SKEIN server..."
