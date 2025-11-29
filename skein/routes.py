@@ -23,7 +23,7 @@ from .storage import JSONStore, LogDatabase, get_data_dir_for_project
 from .utils import (
     generate_folio_id, generate_thread_id, parse_mentions,
     get_current_status, get_current_assignment,
-    invalidate_status_cache, invalidate_assignment_cache,
+    auto_invalidate_cache,
     parse_relative_time
 )
 
@@ -213,7 +213,17 @@ async def get_site(site_id: str, store: JSONStore = Depends(get_project_store)):
     """Get specific site."""
     site = store.get_site(site_id)
     if not site:
-        raise HTTPException(status_code=404, detail="Site not found")
+        # Include available active sites in error message for better UX
+        all_sites = store.get_sites()
+        active_sites = [s for s in all_sites if s.status == "active"]
+        if active_sites:
+            site_ids = [s.site_id for s in active_sites[:50]]
+            suffix = f" (+{len(active_sites) - 50} more)" if len(active_sites) > 50 else ""
+            raise HTTPException(
+                status_code=404,
+                detail=f"Site '{site_id}' not found. Active sites: {', '.join(site_ids)}{suffix}. Run 'skein sites' for full list."
+            )
+        raise HTTPException(status_code=404, detail=f"Site '{site_id}' not found. No active sites exist - create one with 'skein site create <id> \"description\"'")
     return site
 
 
@@ -257,7 +267,17 @@ async def post_to_site(
     # Verify site exists
     site = store.get_site(site_id)
     if not site:
-        raise HTTPException(status_code=404, detail="Site not found")
+        # Include available active sites in error message for better UX
+        all_sites = store.get_sites()
+        active_sites = [s for s in all_sites if s.status == "active"]
+        if active_sites:
+            site_ids = [s.site_id for s in active_sites[:50]]
+            suffix = f" (+{len(active_sites) - 50} more)" if len(active_sites) > 50 else ""
+            raise HTTPException(
+                status_code=404,
+                detail=f"Site '{site_id}' not found. Active sites: {', '.join(site_ids)}{suffix}. Run 'skein sites' for full list."
+            )
+        raise HTTPException(status_code=404, detail=f"Site '{site_id}' not found. No active sites exist - create one with 'skein site create <id> \"description\"'")
 
     created_by = x_agent_id or "unknown"
     folio_id = generate_folio_id(folio_create.type)
@@ -314,7 +334,7 @@ async def post_to_site(
             created_at=datetime.now()
         )
         store.save_thread(status_thread)
-        invalidate_status_cache(folio_id)
+        auto_invalidate_cache("status", folio_id)
 
     # SUGAR API: Create assignment thread if assigned_to provided (undocumented)
     if folio_create.assigned_to:
@@ -328,7 +348,7 @@ async def post_to_site(
             created_at=datetime.now()
         )
         store.save_thread(assignment_thread)
-        invalidate_assignment_cache(folio_id)
+        auto_invalidate_cache("assignment", folio_id)
 
     # Create thread for target_agent if set (for briefs)
     if folio_create.target_agent:
@@ -473,7 +493,7 @@ async def update_folio(
             created_at=datetime.now()
         )
         json_store.save_thread(status_thread)
-        invalidate_status_cache(folio_id)
+        auto_invalidate_cache("status", folio_id)
         # Also update field for backward compat (will be removed after migration)
         folio.status = status
 
@@ -489,7 +509,7 @@ async def update_folio(
             created_at=datetime.now()
         )
         json_store.save_thread(assignment_thread)
-        invalidate_assignment_cache(folio_id)
+        auto_invalidate_cache("assignment", folio_id)
         # Also update field for backward compat (will be removed after migration)
         folio.assigned_to = assigned_to
 
@@ -529,11 +549,11 @@ async def create_thread(
     if not success:
         raise HTTPException(status_code=500, detail="Failed to create thread")
 
-    # Invalidate caches if this is a status or assignment thread
+    # Auto-invalidate caches based on thread type
     if thread_create.type == "status":
-        invalidate_status_cache(thread_create.to_id)
+        auto_invalidate_cache("status", thread_create.to_id)
     elif thread_create.type == "assignment":
-        invalidate_assignment_cache(thread_create.from_id)
+        auto_invalidate_cache("assignment", thread_create.from_id)
 
     return {"success": True, "thread_id": thread_id}
 

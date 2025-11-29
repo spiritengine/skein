@@ -149,6 +149,24 @@ def invalidate_assignment_cache(folio_id: str):
         del _assignment_cache[folio_id]
 
 
+def auto_invalidate_cache(thread_type: str, folio_id: str):
+    """
+    Automatically invalidate the appropriate cache based on thread type.
+
+    Call this after saving a thread to ensure cache consistency.
+
+    Args:
+        thread_type: The type of thread being created ('status', 'assignment', etc.)
+        folio_id: The folio ID to invalidate cache for
+                  - For status threads: the to_id (folio being statused)
+                  - For assignment threads: the from_id (folio being assigned)
+    """
+    if thread_type == "status":
+        invalidate_status_cache(folio_id)
+    elif thread_type == "assignment":
+        invalidate_assignment_cache(folio_id)
+
+
 def parse_relative_time(time_str: str) -> datetime:
     """
     Parse relative time strings like '1day', '2hours', '30min' to datetime.
