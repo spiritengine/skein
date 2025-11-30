@@ -16,7 +16,14 @@ import click
 import requests
 from pathlib import Path
 from datetime import datetime
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Set
+
+# Import name generator from skein package
+try:
+    from skein.utils import generate_agent_name
+except ImportError:
+    # Fallback if skein package not installed
+    generate_agent_name = None
 
 
 def find_project_root() -> Optional[Path]:
@@ -445,7 +452,7 @@ def logs(ctx, stream_id, level, since, search, tail, list_streams, output_json):
 
 
 @cli.command("log")
-@click.option("-n", "--max-count", type=int, help="Limit to N entries")
+@click.option("-n", "--max-count", "--limit", type=int, help="Limit to N entries")
 @click.option("--since", "--after", help="Show folios after date (1day, 2hours, ISO)")
 @click.option("--until", "--before", help="Show folios before date")
 @click.option("--agent", help="Filter by agent ID")
@@ -1506,9 +1513,11 @@ def show(ctx, folio_id, no_pager, output_json):
 @click.argument("site_id")
 @click.option("--type", help="Filter by folio type")
 @click.option("--status", help="Filter by status")
+@click.option("-n", "--limit", type=int, help="Limit number of folios shown (default: 20 for agents, unlimited for TTY)")
+@click.option("--all", "show_all", is_flag=True, help="Show all folios (override default limit)")
 @click.option("--json", "output_json", is_flag=True)
 @click.pass_context
-def folios(ctx, site_id, type, status, output_json):
+def folios(ctx, site_id, type, status, limit, show_all, output_json):
     """List all folios in a site."""
     # Validate site_id is not empty
     if not site_id or site_id.strip() == "":
@@ -1525,13 +1534,29 @@ def folios(ctx, site_id, type, status, output_json):
 
     folios_list = make_request("GET", "/folios", base_url, agent_id, params=params)
 
+    # Apply default limit for non-TTY (agents) unless --all specified
+    total_count = len(folios_list)
+    is_tty = sys.stdout.isatty()
+
+    if not show_all:
+        if limit:
+            folios_list = folios_list[:limit]
+        elif not is_tty:
+            # Agent default: limit to 20
+            folios_list = folios_list[:20]
+
     if output_json:
         click.echo(json.dumps(folios_list, indent=2))
     else:
-        if not folios_list:
+        if not folios_list and total_count == 0:
             click.echo(f"No folios found in site {site_id}")
         else:
-            click.echo(f"Found {len(folios_list)} folio(s) in site {site_id}:\n")
+            # Show count with truncation info if applicable
+            showing_count = len(folios_list)
+            if showing_count < total_count:
+                click.echo(f"Showing {showing_count} of {total_count} folio(s) in site {site_id}:\n")
+            else:
+                click.echo(f"Found {total_count} folio(s) in site {site_id}:\n")
 
             # Group by type for better readability
             by_type = {}
@@ -1598,6 +1623,11 @@ def folios(ctx, site_id, type, status, output_json):
                     if f.get('assigned_to'):
                         click.echo(f"      Assigned: {f['assigned_to']}")
                 click.echo()
+
+            # Show truncation hint if limited
+            if showing_count < total_count:
+                remaining = total_count - showing_count
+                click.echo(f"({remaining} more folios, use --all or -n {total_count} to see all)")
 
 
 @cli.command()
@@ -2105,17 +2135,21 @@ def update(ctx, resource_id, status_value):
 
 @cli.command()
 @click.argument("resource_id")
+@click.argument("note_positional", required=False, default=None)
 @click.option("--link", help="Link to solution (folio ID)")
 @click.option("--note", help="Note about the fix")
 @click.pass_context
-def close(ctx, resource_id, link, note):
+def close(ctx, resource_id, note_positional, link, note):
     """Close an issue/friction (sets status to closed).
 
     Examples:
         skein close issue-123
+        skein close issue-123 "Fixed the bug"
         skein close issue-123 --link summary-456
         skein close friction-789 --link summary-456 --note "Fixed by adding validation"
     """
+    # Allow note as positional or --note flag
+    note = note or note_positional
     base_url = get_base_url(ctx.obj.get("url"))
     agent_id = get_agent_id(ctx.obj.get("agent"), base_url)
 
@@ -2239,6 +2273,80 @@ def ignite_start(ctx, brief_id, mantle, message):
     _ignite_start(ctx, brief_id, mantle, message)
 
 
+def _get_existing_agent_names(base_url: str, agent_id: str) -> Set[str]:
+    """
+    Get set of existing agent names from roster for collision detection.
+
+    Returns:
+        Set of agent names (not IDs) currently in roster
+    """
+    try:
+        agents = make_request("GET", "/roster", base_url, agent_id)
+        return {a.get("name", "").lower() for a in agents if a.get("name")}
+    except:
+        return set()
+
+
+def _generate_suggested_name(
+    base_url: str,
+    agent_id: str,
+    mantle: Optional[str],
+    mantle_data: Optional[dict],
+    brief_content: str = ""
+) -> str:
+    """
+    Generate a memorable suggested name for the agent.
+
+    Uses the new generate_agent_name() function with collision detection
+    against existing roster names. Falls back to legacy naming if the
+    name generator is not available.
+
+    Args:
+        base_url: SKEIN server URL
+        agent_id: Current agent ID (for roster lookup)
+        mantle: Mantle name if provided
+        mantle_data: Loaded mantle data if available
+        brief_content: Brief/task content for context-aware naming
+
+    Returns:
+        Suggested agent name
+    """
+    # Get existing names for collision detection
+    existing_names = _get_existing_agent_names(base_url, agent_id)
+
+    # Get project config for name generator
+    project_config = get_project_config()
+    project_id = project_config.get("project_id") if project_config else None
+
+    # Try the new name generator
+    if generate_agent_name is not None:
+        try:
+            return generate_agent_name(
+                existing_names=existing_names,
+                project=project_id,
+                role=mantle,
+                brief_content=brief_content,
+            )
+        except Exception:
+            pass  # Fall back to legacy naming
+
+    # Legacy fallback: mantle-based naming
+    suggested_name = f"Agent {agent_id.split('-')[-1]}"
+
+    if mantle_data and mantle_data.get("naming_style"):
+        naming_style = mantle_data["naming_style"]
+        if naming_style == "technical":
+            suggested_name = f"Silent {mantle.title()}"
+        elif naming_style == "pm":
+            suggested_name = "Dawn"
+        elif naming_style == "emergency":
+            suggested_name = f"Midnight {mantle.title()}"
+    elif mantle:
+        suggested_name = f"{mantle.title()} Agent"
+
+    return suggested_name
+
+
 def _ignite_start(ctx, brief_id, mantle, message):
     """
     Start ignition process - Begin orientation for agent work.
@@ -2263,12 +2371,14 @@ def _ignite_start(ctx, brief_id, mantle, message):
     }
 
     mission_parts = []
+    brief_content = ""
 
     # If brief provided, load it
     if brief_id:
         try:
             brief = make_request("GET", f"/folios/{brief_id}", base_url, agent_id)
-            mission_parts.append(f"**From Brief ({brief_id}):**\n{brief.get('content', '')}")
+            brief_content = brief.get('content', '')
+            mission_parts.append(f"**From Brief ({brief_id}):**\n{brief_content}")
         except Exception as e:
             raise click.ClickException(f"Failed to load brief: {str(e)}")
 
@@ -2332,20 +2442,10 @@ def _ignite_start(ctx, brief_id, mantle, message):
 
     response["suggested_reading"] = suggested_reading
 
-    # Suggest name based on mantle naming style or generic
-    suggested_name = f"Agent {agent_id.split('-')[-1]}"
-
-    if mantle_data and mantle_data.get("naming_style"):
-        naming_style = mantle_data["naming_style"]
-        if naming_style == "technical":
-            suggested_name = f"Silent {mantle.title()}"
-        elif naming_style == "pm":
-            suggested_name = "Dawn"
-        elif naming_style == "emergency":
-            suggested_name = f"Midnight {mantle.title()}"
-    elif mantle:
-        suggested_name = f"{mantle.title()} Agent"
-
+    # Generate memorable suggested name
+    # Combine brief content and message for naming context
+    naming_context = f"{brief_content}\n{message}" if message else brief_content
+    suggested_name = _generate_suggested_name(base_url, agent_id, mantle, mantle_data, naming_context)
     response["suggested_name"] = suggested_name
 
     # Register on roster as "orienting" with ignition info
@@ -3625,5 +3725,10 @@ def shards_shortcut(ctx, active, filter_agent, output_json):
     ctx.invoke(shard_list, active=active, filter_agent=filter_agent, output_json=output_json)
 
 
-if __name__ == "__main__":
+def main():
+    """Entry point for the skein CLI (called by pip-installed command)."""
     cli()
+
+
+if __name__ == "__main__":
+    main()

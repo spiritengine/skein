@@ -7,7 +7,18 @@ help:  ## Show this help
 
 install:  ## Install SKEIN package
 	@echo "Installing SKEIN..."
-	@pip install -e .
+	@pip install .
+
+reinstall:  ## Reinstall SKEIN package and restart server
+	@echo "🔄 Building wheel..."
+	@rm -rf build/ dist/ *.egg-info
+	@python -m build --wheel
+	@echo "🔄 Installing to speakbot env..."
+	@/home/patrick/.pyenv/versions/speakbot/bin/pip install --force-reinstall dist/skein-*.whl
+	@echo "🔄 Restarting server..."
+	@systemctl --user restart skein 2>/dev/null || sudo systemctl restart skein 2>/dev/null || true
+	@sleep 1
+	@echo "✅ Done"
 
 install-service:  ## Install systemd user service
 	@echo "Installing SKEIN systemd user service..."

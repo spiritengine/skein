@@ -459,7 +459,9 @@ class JSONStore:
             thread_map[t.thread_id] = t
 
         # Find replies to any threads in the inbox
-        # A reply is a thread where from_id is another thread's thread_id
+        # A reply can have either:
+        #   - from_id = thread_id (thread chaining: thread-A -> thread-B)
+        #   - to_id = thread_id (agent reply: agent -> thread-A via 'skein reply')
         all_threads = self.get_threads()
         involved_thread_ids = set(thread_map.keys())
 
@@ -469,8 +471,10 @@ class JSONStore:
         for _ in range(max_depth):
             found_new = False
             for thread in all_threads:
-                # If this thread's from_id is a thread we care about, include it
-                if thread.from_id in involved_thread_ids and thread.thread_id not in thread_map:
+                if thread.thread_id in thread_map:
+                    continue
+                # Include if from_id or to_id is a thread we care about
+                if thread.from_id in involved_thread_ids or thread.to_id in involved_thread_ids:
                     thread_map[thread.thread_id] = thread
                     involved_thread_ids.add(thread.thread_id)
                     found_new = True
