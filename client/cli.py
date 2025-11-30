@@ -1683,8 +1683,33 @@ def survey(ctx, site_ids, type, status, output_json):
                 click.echo(f"  {folio_type.upper()} ({len(by_type[folio_type])} item(s)):")
                 for f in by_type[folio_type]:
                     status_str = f"[{f['status']}]" if f.get('status') else ""
-                    click.echo(f"    {f['folio_id']} {status_str}")
+                    # Format created_at date
+                    created_at = f.get('created_at', '')
+                    if created_at:
+                        # Parse ISO format and display as YYYY-MM-DD
+                        try:
+                            dt = datetime.fromisoformat(created_at.replace('Z', '+00:00'))
+                            date_str = dt.strftime('%Y-%m-%d')
+                        except (ValueError, AttributeError):
+                            date_str = created_at[:10] if len(created_at) >= 10 else created_at
+                    else:
+                        date_str = ""
+
+                    click.echo(f"    {f['folio_id']} {status_str} {date_str}")
                     click.echo(f"      {f['title'][:80]}{'...' if len(f['title']) > 80 else ''}")
+
+                    # Show successor_name if present (useful for briefs)
+                    if f.get('successor_name'):
+                        click.echo(f"      Successor: {f['successor_name']}")
+
+                    # Show content preview (first 100 chars, single line)
+                    content = f.get('content', '')
+                    if content:
+                        # Clean up content: replace newlines with spaces, truncate
+                        preview = ' '.join(content.split())[:100]
+                        if len(content) > 100:
+                            preview += '...'
+                        click.echo(f"      {preview}")
                 click.echo()
 
         click.echo(f"{'='*60}")
