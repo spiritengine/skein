@@ -84,6 +84,15 @@ class Folio(BaseModel):
     acknowledged_at: Optional[datetime] = None
 
 
+class FolioUpdate(BaseModel):
+    """Model for updating a folio's mutable fields."""
+    title: Optional[str] = None
+    content: Optional[str] = None
+    status: Optional[str] = None
+    assigned_to: Optional[str] = None
+    archived: Optional[bool] = None
+
+
 # Thread Models
 
 ThreadType = Literal["message", "mention", "reference", "assignment", "succession", "reply", "tag", "status"]

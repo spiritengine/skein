@@ -1510,6 +1510,66 @@ def show(ctx, folio_id, no_pager, output_json):
 
 
 @cli.command()
+@click.argument("folio_id")
+@click.option("--title", "-t", help="New title for the folio")
+@click.option("--content", "-c", help="New content for the folio")
+@click.option("--status", "-s", help="New status (e.g., open, closed, investigating)")
+@click.option("--json", "output_json", is_flag=True, help="Output as JSON")
+@click.pass_context
+def edit(ctx, folio_id, title, content, status, output_json):
+    """Edit a folio's title, content, or status.
+
+    Examples:
+        skein edit brief-20251124-abc --title "Updated title"
+        skein edit issue-20251120-xyz --status closed
+        skein edit friction-20251121-def --content "New description"
+    """
+    if not title and not content and not status:
+        raise click.ClickException(
+            "At least one of --title, --content, or --status must be provided.\n"
+            "Usage: skein edit FOLIO_ID [--title TEXT] [--content TEXT] [--status TEXT]"
+        )
+
+    base_url = get_base_url(ctx.obj.get("url"))
+    agent_id = get_agent_id(ctx.obj.get("agent"), base_url)
+
+    # Build update payload - only include fields that were provided
+    update_data = {}
+    if title is not None:
+        update_data["title"] = title
+    if content is not None:
+        update_data["content"] = content
+    if status is not None:
+        update_data["status"] = status
+
+    result = make_request(
+        "PATCH",
+        f"/folios/{folio_id}",
+        base_url,
+        agent_id,
+        json=update_data
+    )
+
+    if output_json:
+        click.echo(json.dumps(result, indent=2, default=str))
+        return
+
+    if result.get("success"):
+        updated_folio = result.get("folio", {})
+        click.echo(f"Updated {folio_id}")
+        if title:
+            click.echo(f"  Title: {updated_folio.get('title', title)}")
+        if content:
+            # Truncate content for display
+            display_content = content[:50] + "..." if len(content) > 50 else content
+            click.echo(f"  Content: {display_content}")
+        if status:
+            click.echo(f"  Status: {updated_folio.get('status', status)}")
+    else:
+        raise click.ClickException(f"Failed to update folio: {result}")
+
+
+@cli.command()
 @click.argument("site_id")
 @click.option("--type", help="Filter by folio type")
 @click.option("--status", help="Filter by status")
