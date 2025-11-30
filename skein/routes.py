@@ -13,7 +13,7 @@ from fastapi.responses import FileResponse
 from .models import (
     AgentRegistration, AgentInfo,
     SiteCreate, Site,
-    FolioCreate, Folio,
+    FolioCreate, Folio, FolioUpdate,
     ThreadCreate, Thread,
     LogBatch, LogLine,
     FolioType,
@@ -469,54 +469,60 @@ async def get_folio(folio_id: str, store: JSONStore = Depends(get_project_store)
 @router.patch("/folios/{folio_id}")
 async def update_folio(
     folio_id: str,
-    status: Optional[str] = None,
-    assigned_to: Optional[str] = None,
-    archived: Optional[bool] = None,
-    x_agent_id: str = Header(None, alias="X-Agent-Id")
+    update: FolioUpdate,
+    x_agent_id: str = Header(None, alias="X-Agent-Id"),
+    store: JSONStore = Depends(get_project_store)
 ):
-    """Update folio metadata."""
-    folio = json_store.get_folio(folio_id)
+    """Update folio fields (title, content, status, assigned_to, archived)."""
+    folio = store.get_folio(folio_id)
     if not folio:
         raise HTTPException(status_code=404, detail="Folio not found")
 
     created_by = x_agent_id or "unknown"
 
+    # Update title and content directly on the folio
+    if update.title is not None:
+        folio.title = update.title
+
+    if update.content is not None:
+        folio.content = update.content
+
     # PURE THREADS: Create status thread instead of updating field
-    if status:
+    if update.status is not None:
         status_thread = Thread(
             thread_id=generate_thread_id(),
             from_id=folio_id,
             to_id=folio_id,
             type="status",
-            content=status,
+            content=update.status,
             weaver=created_by,
             created_at=datetime.now()
         )
-        json_store.save_thread(status_thread)
+        store.save_thread(status_thread)
         auto_invalidate_cache("status", folio_id)
         # Also update field for backward compat (will be removed after migration)
-        folio.status = status
+        folio.status = update.status
 
     # PURE THREADS: Create assignment thread instead of updating field
-    if assigned_to:
+    if update.assigned_to is not None:
         assignment_thread = Thread(
             thread_id=generate_thread_id(),
             from_id=folio_id,
-            to_id=assigned_to,
+            to_id=update.assigned_to,
             type="assignment",
-            content=f"Assigned to {assigned_to}",
+            content=f"Assigned to {update.assigned_to}",
             weaver=created_by,
             created_at=datetime.now()
         )
-        json_store.save_thread(assignment_thread)
+        store.save_thread(assignment_thread)
         auto_invalidate_cache("assignment", folio_id)
         # Also update field for backward compat (will be removed after migration)
-        folio.assigned_to = assigned_to
+        folio.assigned_to = update.assigned_to
 
-    if archived is not None:
-        folio.archived = archived
+    if update.archived is not None:
+        folio.archived = update.archived
 
-    json_store.save_folio(folio)
+    store.save_folio(folio)
     return {"success": True, "folio": folio}
 
 
