@@ -3679,8 +3679,10 @@ def shard_resume(ctx, worktree_name, message):
 @click.argument("worktree_name")
 @click.option("--reviewer", help="Agent ID to review this SHARD (default: prime)")
 @click.option("--summary", help="Brief summary of changes")
+@click.option("--status", type=click.Choice(["complete", "incomplete", "abandoned"]), default="complete",
+              help="Work status: complete (default), incomplete, or abandoned")
 @click.pass_context
-def shard_tender(ctx, worktree_name, reviewer, summary):
+def shard_tender(ctx, worktree_name, reviewer, summary, status):
     """
     Mark SHARD as ready for review (tender for assessment).
 
@@ -3688,6 +3690,7 @@ def shard_tender(ctx, worktree_name, reviewer, summary):
         skein tender opus-security-architect-20251109-001
         skein tender opus-security-architect-20251109-001 --reviewer prime
         skein tender opus-security-architect-20251109-001 --summary "Added 15 security checks"
+        skein tender opus-security-architect-20251109-001 --status incomplete --summary "Partial work"
     """
     base_url = get_base_url(ctx.obj.get("url"))
     agent_id = get_agent_id(ctx.obj.get("agent"), base_url)
@@ -3721,6 +3724,7 @@ def shard_tender(ctx, worktree_name, reviewer, summary):
         "commits": metadata["commits"],
         "files_modified": metadata.get("files_modified", []),
         "summary": summary or metadata.get("last_commit_message", "No summary provided"),
+        "status": status,
     }
 
     # Find the original SHARD thread
@@ -3760,6 +3764,7 @@ def shard_tender(ctx, worktree_name, reviewer, summary):
 
         # Display summary
         click.echo(f"🎯 Tendered SHARD: {worktree_name}")
+        click.echo(f"  Status: {status}")
         click.echo(f"  Reviewer: {reviewer}")
         click.echo(f"  Tender Thread: {tender_thread_id}")
         click.echo(f"  Commits: {metadata['commits']}")
