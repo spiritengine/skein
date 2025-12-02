@@ -3681,16 +3681,20 @@ def shard_resume(ctx, worktree_name, message):
 @click.option("--summary", help="Brief summary of changes")
 @click.option("--status", type=click.Choice(["complete", "incomplete", "abandoned"]), default="complete",
               help="Work status: complete (default), incomplete, or abandoned")
+@click.option("--confidence", type=click.IntRange(1, 10),
+              help="Merge confidence 1-10: 10=safe/additive/isolated (auto-merge candidate), "
+                   "5=moderate risk (needs review), 1=hot mess/critical path (careful review needed)")
 @click.pass_context
-def shard_tender(ctx, worktree_name, reviewer, summary, status):
+def shard_tender(ctx, worktree_name, reviewer, summary, status, confidence):
     """
     Mark SHARD as ready for review (tender for assessment).
 
     Examples:
-        skein tender opus-security-architect-20251109-001
-        skein tender opus-security-architect-20251109-001 --reviewer prime
-        skein tender opus-security-architect-20251109-001 --summary "Added 15 security checks"
-        skein tender opus-security-architect-20251109-001 --status incomplete --summary "Partial work"
+        skein shard tender opus-security-architect-20251109-001
+        skein shard tender opus-security-architect-20251109-001 --reviewer prime
+        skein shard tender opus-security-architect-20251109-001 --summary "Added 15 security checks"
+        skein shard tender opus-security-architect-20251109-001 --status incomplete --summary "Partial work"
+        skein shard tender opus-security-architect-20251109-001 --status complete --confidence 8 --summary "Added docs"
     """
     base_url = get_base_url(ctx.obj.get("url"))
     agent_id = get_agent_id(ctx.obj.get("agent"), base_url)
@@ -3726,6 +3730,8 @@ def shard_tender(ctx, worktree_name, reviewer, summary, status):
         "summary": summary or metadata.get("last_commit_message", "No summary provided"),
         "status": status,
     }
+    if confidence is not None:
+        tender_content["confidence"] = confidence
 
     # Find the original SHARD thread
     try:
@@ -3765,6 +3771,8 @@ def shard_tender(ctx, worktree_name, reviewer, summary, status):
         # Display summary
         click.echo(f"🎯 Tendered SHARD: {worktree_name}")
         click.echo(f"  Status: {status}")
+        if confidence is not None:
+            click.echo(f"  Confidence: {confidence}/10")
         click.echo(f"  Reviewer: {reviewer}")
         click.echo(f"  Tender Thread: {tender_thread_id}")
         click.echo(f"  Commits: {metadata['commits']}")
