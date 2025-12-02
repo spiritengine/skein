@@ -997,6 +997,164 @@ def resume(ctx, brief_id):
 # ============================================================================
 
 @cli.command()
+@click.argument("pattern", required=False, default="")
+@click.option("--site", "-s", multiple=True, help="Site pattern(s) to search - supports wildcards (e.g., 'opus-*')")
+@click.option("--type", "-t", help="Filter by folio type (issue, brief, friction, finding, summary, notion)")
+@click.option("--status", help="Filter by status (open, closed, investigating)")
+@click.option("--assigned", help="Filter by assignee")
+@click.option("--since", help="Only items after this time (e.g., '1hour', '2days', ISO timestamp)")
+@click.option("--sort", help="Sort by: created (default), created_asc, relevance")
+@click.option("--limit", type=int, default=50, help="Max results (default: 50)")
+@click.option("--all", "show_all", is_flag=True, help="Include archived folios")
+@click.option("--json", "output_json", is_flag=True, help="Output as JSON")
+@click.pass_context
+def find(ctx, pattern, site, type, status, assigned, since, sort, limit, show_all, output_json):
+    """
+    Find folios across SKEIN - unified search and discovery.
+
+    PATTERN is an optional text search. If omitted, lists all matching folios.
+
+    Examples:
+        skein find                          # All open folios
+        skein find --site my-site           # Folios in specific site
+        skein find --site "opus-*"          # Folios matching site pattern
+        skein find "authentication"         # Search for text
+        skein find "bug" --type issue       # Search issues for "bug"
+        skein find --type brief --status open   # Open briefs
+        skein find -s "opus-*" -s "test-*"  # Multiple site patterns
+        skein find --since 1day             # Recent folios
+    """
+    base_url = get_base_url(ctx.obj.get("url"))
+    agent_id = get_agent_id(ctx.obj.get("agent"), base_url)
+
+    # Build API params
+    params = {"resources": "folios"}
+
+    if pattern:
+        params["q"] = pattern
+
+    # Handle site patterns
+    if site:
+        if len(site) == 1 and "*" not in site[0]:
+            # Single exact site
+            params["site"] = site[0]
+        else:
+            # Multiple sites or patterns
+            params["sites"] = list(site)
+
+    if type:
+        params["type"] = type
+
+    if status:
+        params["status"] = status
+
+    if assigned:
+        params["assigned_to"] = assigned
+
+    if since:
+        params["since"] = since
+
+    if sort:
+        params["sort"] = sort
+
+    if limit:
+        params["limit"] = limit
+
+    if show_all:
+        params["archived"] = True
+
+    response = make_request("GET", "/search", base_url, agent_id, params=params)
+
+    if output_json:
+        click.echo(json.dumps(response, indent=2))
+        return
+
+    # Human-readable output
+    results_data = response.get("results", {})
+    folios_data = results_data.get("folios", {})
+    folios = folios_data.get("items", [])
+    total = folios_data.get("total", 0)
+
+    if total == 0:
+        if pattern:
+            click.echo(f"No folios found matching '{pattern}'")
+        else:
+            click.echo("No folios found")
+        if site:
+            click.echo(f"  (searched sites: {', '.join(site)})")
+        return
+
+    # Group by site for display
+    by_site = {}
+    for f in folios:
+        site_id = f.get("site_id", "unknown")
+        if site_id not in by_site:
+            by_site[site_id] = []
+        by_site[site_id].append(f)
+
+    # Header
+    if pattern:
+        click.echo(f"Found {total} folio(s) matching '{pattern}':\n")
+    else:
+        click.echo(f"Found {total} folio(s):\n")
+
+    # Display grouped by site
+    for site_id in sorted(by_site.keys()):
+        site_folios = by_site[site_id]
+        click.echo(f"{'='*60}")
+        click.echo(f"Site: {site_id} ({len(site_folios)} folio(s))")
+        click.echo(f"{'='*60}")
+
+        # Group by type within site
+        by_type = {}
+        for f in site_folios:
+            folio_type = f['type']
+            if folio_type not in by_type:
+                by_type[folio_type] = []
+            by_type[folio_type].append(f)
+
+        for folio_type in sorted(by_type.keys()):
+            click.echo(f"\n  {folio_type.upper()} ({len(by_type[folio_type])} item(s)):")
+            for f in by_type[folio_type]:
+                status_str = f"[{f.get('status', 'open')}]"
+                # Format created_at date
+                created_at = f.get('created_at', '')
+                if created_at:
+                    try:
+                        dt = datetime.fromisoformat(created_at.replace('Z', '+00:00'))
+                        date_str = dt.strftime('%Y-%m-%d')
+                    except (ValueError, AttributeError):
+                        date_str = created_at[:10] if len(created_at) >= 10 else created_at
+                else:
+                    date_str = ""
+
+                click.echo(f"    {f['folio_id']} {status_str} {date_str}")
+                click.echo(f"      {f.get('title', 'No title')[:80]}{'...' if len(f.get('title', '')) > 80 else ''}")
+
+                # Show successor_name if present (useful for briefs)
+                if f.get('successor_name'):
+                    click.echo(f"      Successor: {f['successor_name']}")
+
+                # Show content preview
+                content = f.get('content', '')
+                if content:
+                    preview = ' '.join(content.split())[:100]
+                    if len(content) > 100:
+                        preview += '...'
+                    click.echo(f"      {preview}")
+
+        click.echo()
+
+    # Summary
+    if len(folios) < total:
+        click.echo(f"Showing {len(folios)} of {total} folios (use --limit to see more)")
+
+    exec_time = response.get("execution_time_ms", 0)
+    if exec_time:
+        click.echo(f"(Search completed in {exec_time}ms)")
+
+
+@cli.command(hidden=True)
 @click.argument("query")
 @click.option("--resources", help="Resource types to search (comma-separated: folios, threads, agents, sites). Default: folios")
 @click.option("--type", help="Filter by type (issue, brief, summary, etc.)")
@@ -1010,7 +1168,7 @@ def resume(ctx, brief_id):
 @click.pass_context
 def search(ctx, query, resources, type, site, sites, all_sites, status, sort, limit, output_json):
     """
-    Search for work across SKEIN.
+    Search for work across SKEIN. (Deprecated: use 'find PATTERN')
 
     By default, searches folios across all sites in the current project.
     Use --resources to search other resource types.
@@ -1502,14 +1660,14 @@ def show(ctx, folio_id, no_pager, output_json):
     ctx.invoke(folio, folio_id=folio_id, no_pager=no_pager, output_json=output_json)
 
 
-@cli.command()
+@cli.command(hidden=True)
 @click.argument("site_id")
 @click.option("--type", help="Filter by folio type")
 @click.option("--status", help="Filter by status")
 @click.option("--json", "output_json", is_flag=True)
 @click.pass_context
 def folios(ctx, site_id, type, status, output_json):
-    """List all folios in a site."""
+    """List all folios in a site. (Deprecated: use 'find --site SITE_ID')"""
     # Validate site_id is not empty
     if not site_id or site_id.strip() == "":
         raise click.ClickException("site_id cannot be empty. Usage: skein folios SITE_ID")
@@ -1600,14 +1758,14 @@ def folios(ctx, site_id, type, status, output_json):
                 click.echo()
 
 
-@cli.command()
+@cli.command(hidden=True)
 @click.argument("site_ids", nargs=-1, required=True)
 @click.option("--type", help="Filter by folio type")
 @click.option("--status", help="Filter by status")
 @click.option("--json", "output_json", is_flag=True)
 @click.pass_context
 def survey(ctx, site_ids, type, status, output_json):
-    """Survey folios across multiple sites.
+    """Survey folios across multiple sites. (Deprecated: use 'find --site PATTERN')
 
     Example:
         skein survey opus-coding-assistant opus-security-architect
