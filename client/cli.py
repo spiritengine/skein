@@ -1671,7 +1671,6 @@ def show(ctx, folio_id, no_pager, output_json):
     ctx.invoke(folio, folio_id=folio_id, no_pager=no_pager, output_json=output_json)
 
 
-<<<<<<< HEAD
 @cli.command()
 @click.argument("folio_id")
 @click.option("--title", "-t", help="New title for the folio")
@@ -1733,9 +1732,6 @@ def edit(ctx, folio_id, title, content, status, output_json):
 
 
 @cli.command()
-=======
-@cli.command(hidden=True)
->>>>>>> 415aac9... Add unified find command for folio discovery
 @click.argument("site_id")
 @click.option("--type", help="Filter by folio type")
 @click.option("--status", help="Filter by status")
@@ -1743,13 +1739,8 @@ def edit(ctx, folio_id, title, content, status, output_json):
 @click.option("--all", "show_all", is_flag=True, help="Show all folios (override default limit)")
 @click.option("--json", "output_json", is_flag=True)
 @click.pass_context
-<<<<<<< HEAD
 def folios(ctx, site_id, type, status, limit, show_all, output_json):
     """List all folios in a site."""
-=======
-def folios(ctx, site_id, type, status, output_json):
-    """List all folios in a site. (Deprecated: use 'find --site SITE_ID')"""
->>>>>>> 415aac9... Add unified find command for folio discovery
     # Validate site_id is not empty
     if not site_id or site_id.strip() == "":
         raise click.ClickException("site_id cannot be empty. Usage: skein folios SITE_ID")
