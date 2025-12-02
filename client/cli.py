@@ -140,10 +140,14 @@ def make_request(method: str, endpoint: str, base_url: str, agent_id: str, **kwa
     if agent_id != "unknown":
         headers["X-Agent-Id"] = agent_id
 
-    # Add project ID from project config if available
-    project_config = get_project_config()
-    if project_config and "project_id" in project_config:
-        headers["X-Project-Id"] = project_config["project_id"]
+    # Add project ID from env var or project config
+    project_id = os.environ.get("SKEIN_PROJECT")
+    if not project_id:
+        project_config = get_project_config()
+        if project_config:
+            project_id = project_config.get("project_id")
+    if project_id:
+        headers["X-Project-Id"] = project_id
 
     try:
         resp = requests.request(method, url, headers=headers, **kwargs)
@@ -1004,6 +1008,164 @@ def resume(ctx, brief_id):
 # ============================================================================
 
 @cli.command()
+@click.argument("pattern", required=False, default="")
+@click.option("--site", "-s", multiple=True, help="Site pattern(s) to search - supports wildcards (e.g., 'opus-*')")
+@click.option("--type", "-t", help="Filter by folio type (issue, brief, friction, finding, summary, notion)")
+@click.option("--status", help="Filter by status (open, closed, investigating)")
+@click.option("--assigned", help="Filter by assignee")
+@click.option("--since", help="Only items after this time (e.g., '1hour', '2days', ISO timestamp)")
+@click.option("--sort", help="Sort by: created (default), created_asc, relevance")
+@click.option("--limit", type=int, default=50, help="Max results (default: 50)")
+@click.option("--all", "show_all", is_flag=True, help="Include archived folios")
+@click.option("--json", "output_json", is_flag=True, help="Output as JSON")
+@click.pass_context
+def find(ctx, pattern, site, type, status, assigned, since, sort, limit, show_all, output_json):
+    """
+    Find folios across SKEIN - unified search and discovery.
+
+    PATTERN is an optional text search. If omitted, lists all matching folios.
+
+    Examples:
+        skein find                          # All open folios
+        skein find --site my-site           # Folios in specific site
+        skein find --site "opus-*"          # Folios matching site pattern
+        skein find "authentication"         # Search for text
+        skein find "bug" --type issue       # Search issues for "bug"
+        skein find --type brief --status open   # Open briefs
+        skein find -s "opus-*" -s "test-*"  # Multiple site patterns
+        skein find --since 1day             # Recent folios
+    """
+    base_url = get_base_url(ctx.obj.get("url"))
+    agent_id = get_agent_id(ctx.obj.get("agent"), base_url)
+
+    # Build API params
+    params = {"resources": "folios"}
+
+    if pattern:
+        params["q"] = pattern
+
+    # Handle site patterns
+    if site:
+        if len(site) == 1 and "*" not in site[0]:
+            # Single exact site
+            params["site"] = site[0]
+        else:
+            # Multiple sites or patterns
+            params["sites"] = list(site)
+
+    if type:
+        params["type"] = type
+
+    if status:
+        params["status"] = status
+
+    if assigned:
+        params["assigned_to"] = assigned
+
+    if since:
+        params["since"] = since
+
+    if sort:
+        params["sort"] = sort
+
+    if limit:
+        params["limit"] = limit
+
+    if show_all:
+        params["archived"] = True
+
+    response = make_request("GET", "/search", base_url, agent_id, params=params)
+
+    if output_json:
+        click.echo(json.dumps(response, indent=2))
+        return
+
+    # Human-readable output
+    results_data = response.get("results", {})
+    folios_data = results_data.get("folios", {})
+    folios = folios_data.get("items", [])
+    total = folios_data.get("total", 0)
+
+    if total == 0:
+        if pattern:
+            click.echo(f"No folios found matching '{pattern}'")
+        else:
+            click.echo("No folios found")
+        if site:
+            click.echo(f"  (searched sites: {', '.join(site)})")
+        return
+
+    # Group by site for display
+    by_site = {}
+    for f in folios:
+        site_id = f.get("site_id", "unknown")
+        if site_id not in by_site:
+            by_site[site_id] = []
+        by_site[site_id].append(f)
+
+    # Header
+    if pattern:
+        click.echo(f"Found {total} folio(s) matching '{pattern}':\n")
+    else:
+        click.echo(f"Found {total} folio(s):\n")
+
+    # Display grouped by site
+    for site_id in sorted(by_site.keys()):
+        site_folios = by_site[site_id]
+        click.echo(f"{'='*60}")
+        click.echo(f"Site: {site_id} ({len(site_folios)} folio(s))")
+        click.echo(f"{'='*60}")
+
+        # Group by type within site
+        by_type = {}
+        for f in site_folios:
+            folio_type = f['type']
+            if folio_type not in by_type:
+                by_type[folio_type] = []
+            by_type[folio_type].append(f)
+
+        for folio_type in sorted(by_type.keys()):
+            click.echo(f"\n  {folio_type.upper()} ({len(by_type[folio_type])} item(s)):")
+            for f in by_type[folio_type]:
+                status_str = f"[{f.get('status', 'open')}]"
+                # Format created_at date
+                created_at = f.get('created_at', '')
+                if created_at:
+                    try:
+                        dt = datetime.fromisoformat(created_at.replace('Z', '+00:00'))
+                        date_str = dt.strftime('%Y-%m-%d')
+                    except (ValueError, AttributeError):
+                        date_str = created_at[:10] if len(created_at) >= 10 else created_at
+                else:
+                    date_str = ""
+
+                click.echo(f"    {f['folio_id']} {status_str} {date_str}")
+                click.echo(f"      {f.get('title', 'No title')[:80]}{'...' if len(f.get('title', '')) > 80 else ''}")
+
+                # Show successor_name if present (useful for briefs)
+                if f.get('successor_name'):
+                    click.echo(f"      Successor: {f['successor_name']}")
+
+                # Show content preview
+                content = f.get('content', '')
+                if content:
+                    preview = ' '.join(content.split())[:100]
+                    if len(content) > 100:
+                        preview += '...'
+                    click.echo(f"      {preview}")
+
+        click.echo()
+
+    # Summary
+    if len(folios) < total:
+        click.echo(f"Showing {len(folios)} of {total} folios (use --limit to see more)")
+
+    exec_time = response.get("execution_time_ms", 0)
+    if exec_time:
+        click.echo(f"(Search completed in {exec_time}ms)")
+
+
+@cli.command(hidden=True)
 @click.argument("query")
 @click.option("--resources", help="Resource types to search (comma-separated: folios, threads, agents, sites). Default: folios")
 @click.option("--type", help="Filter by type (issue, brief, summary, etc.)")
@@ -1017,7 +1179,7 @@ def resume(ctx, brief_id):
 @click.pass_context
 def search(ctx, query, resources, type, site, sites, all_sites, status, sort, limit, output_json):
     """
-    Search for work across SKEIN.
+    Search for work across SKEIN. (Deprecated: use 'find PATTERN')
 
     By default, searches folios across all sites in the current project.
     Use --resources to search other resource types.
@@ -1249,8 +1411,8 @@ def status(ctx, output_json):
 
     # Last hour summary
     if type_counts:
-        # B=brief, I=issue, F=finding, R=friction, S=summary
-        type_abbrev = {'brief': 'B', 'issue': 'I', 'finding': 'F', 'friction': 'R', 'summary': 'S'}
+        # B=brief, I=issue, F=finding, R=friction, S=summary, T=tender
+        type_abbrev = {'brief': 'B', 'issue': 'I', 'finding': 'F', 'friction': 'R', 'summary': 'S', 'tender': 'T'}
         parts = []
         for ftype, count in sorted(type_counts.items()):
             abbrev = type_abbrev.get(ftype, ftype[0].upper())
@@ -1509,6 +1671,7 @@ def show(ctx, folio_id, no_pager, output_json):
     ctx.invoke(folio, folio_id=folio_id, no_pager=no_pager, output_json=output_json)
 
 
+<<<<<<< HEAD
 @cli.command()
 @click.argument("folio_id")
 @click.option("--title", "-t", help="New title for the folio")
@@ -1570,6 +1733,9 @@ def edit(ctx, folio_id, title, content, status, output_json):
 
 
 @cli.command()
+=======
+@cli.command(hidden=True)
+>>>>>>> 415aac9... Add unified find command for folio discovery
 @click.argument("site_id")
 @click.option("--type", help="Filter by folio type")
 @click.option("--status", help="Filter by status")
@@ -1577,8 +1743,13 @@ def edit(ctx, folio_id, title, content, status, output_json):
 @click.option("--all", "show_all", is_flag=True, help="Show all folios (override default limit)")
 @click.option("--json", "output_json", is_flag=True)
 @click.pass_context
+<<<<<<< HEAD
 def folios(ctx, site_id, type, status, limit, show_all, output_json):
     """List all folios in a site."""
+=======
+def folios(ctx, site_id, type, status, output_json):
+    """List all folios in a site. (Deprecated: use 'find --site SITE_ID')"""
+>>>>>>> 415aac9... Add unified find command for folio discovery
     # Validate site_id is not empty
     if not site_id or site_id.strip() == "":
         raise click.ClickException("site_id cannot be empty. Usage: skein folios SITE_ID")
@@ -1690,14 +1861,14 @@ def folios(ctx, site_id, type, status, limit, show_all, output_json):
                 click.echo(f"({remaining} more folios, use --all or -n {total_count} to see all)")
 
 
-@cli.command()
+@cli.command(hidden=True)
 @click.argument("site_ids", nargs=-1, required=True)
 @click.option("--type", help="Filter by folio type")
 @click.option("--status", help="Filter by status")
 @click.option("--json", "output_json", is_flag=True)
 @click.pass_context
 def survey(ctx, site_ids, type, status, output_json):
-    """Survey folios across multiple sites.
+    """Survey folios across multiple sites. (Deprecated: use 'find --site PATTERN')
 
     Example:
         skein survey opus-coding-assistant opus-security-architect
@@ -3677,6 +3848,7 @@ def shard_resume(ctx, worktree_name, message):
 
 @shard.command("tender")
 @click.argument("worktree_name")
+@click.option("--site", help="Site to post tender folio (default: derived from project)")
 @click.option("--reviewer", help="Agent ID to review this SHARD (default: prime)")
 @click.option("--summary", help="Brief summary of changes")
 @click.option("--status", type=click.Choice(["complete", "incomplete", "abandoned"]), default="complete",
@@ -3685,16 +3857,16 @@ def shard_resume(ctx, worktree_name, message):
               help="Merge confidence 1-10: 10=safe/additive/isolated (auto-merge candidate), "
                    "5=moderate risk (needs review), 1=hot mess/critical path (careful review needed)")
 @click.pass_context
-def shard_tender(ctx, worktree_name, reviewer, summary, status, confidence):
+def shard_tender(ctx, worktree_name, site, reviewer, summary, status, confidence):
     """
     Mark SHARD as ready for review (tender for assessment).
 
+    Creates a tender folio visible to QMs and reviewers.
+
     Examples:
-        skein shard tender opus-security-architect-20251109-001
-        skein shard tender opus-security-architect-20251109-001 --reviewer prime
-        skein shard tender opus-security-architect-20251109-001 --summary "Added 15 security checks"
-        skein shard tender opus-security-architect-20251109-001 --status incomplete --summary "Partial work"
-        skein shard tender opus-security-architect-20251109-001 --status complete --confidence 8 --summary "Added docs"
+        skein shard tender my-shard-001
+        skein shard tender my-shard --summary "Added auth checks" --confidence 8
+        skein shard tender my-shard --site speakbot-pm --status incomplete
     """
     base_url = get_base_url(ctx.obj.get("url"))
     agent_id = get_agent_id(ctx.obj.get("agent"), base_url)
@@ -3715,76 +3887,86 @@ def shard_tender(ctx, worktree_name, reviewer, summary, status, confidence):
     except Exception as e:
         raise click.ClickException(f"Failed to gather metadata: {e}")
 
+    # Derive site from project if not specified
+    if not site:
+        worktree_path = shard_info.get("worktree_path", "")
+        if "/projects/" in worktree_path:
+            parts = worktree_path.split("/projects/")[1].split("/")
+            if parts:
+                site = f"{parts[0]}-development"
+        if not site:
+            site = "shard-review"
+
     # Default reviewer
     if not reviewer:
         reviewer = "prime"
 
-    # Build tender content
-    tender_content = {
+    # Build summary text
+    summary_text = summary or metadata.get("last_commit_message", "No summary provided")
+
+    # Build folio content
+    files_list = metadata.get("files_modified", [])
+    files_str = "\n".join(f"  - {f}" for f in files_list[:20])
+    if len(files_list) > 20:
+        files_str += f"\n  ... and {len(files_list) - 20} more"
+
+    content = f"""## Tender: {worktree_name}
+
+**Status:** {status}
+**Confidence:** {confidence or 'unrated'}/10
+**Reviewer:** {reviewer}
+
+### Summary
+{summary_text}
+
+### Changes
+- **Commits:** {metadata.get('commits', 0)}
+- **Branch:** {metadata.get('branch_name', 'unknown')}
+
+### Files Modified
+{files_str if files_str else '  (none)'}
+"""
+
+    # Create tender folio
+    folio_data = {
         "type": "tender",
-        "worktree_name": worktree_name,
-        "branch_name": metadata["branch_name"],
-        "agent_id": metadata["agent_id"],
-        "commits": metadata["commits"],
-        "files_modified": metadata.get("files_modified", []),
-        "summary": summary or metadata.get("last_commit_message", "No summary provided"),
-        "status": status,
-    }
-    if confidence is not None:
-        tender_content["confidence"] = confidence
-
-    # Find the original SHARD thread
-    try:
-        threads = make_request("GET", f"/threads?limit=100", base_url, agent_id)
-
-        original_thread_id = None
-        for thread in threads:
-            if thread.get("type") == "tag":
-                try:
-                    content = json.loads(thread.get("content", "{}"))
-                    if content.get("tag") == "shard" and content.get("worktree_name") == worktree_name:
-                        original_thread_id = thread.get("thread_id")
-                        break
-                except json.JSONDecodeError:
-                    continue
-
-        # Create tender thread (from agent to reviewer)
-        # Note: Using type='tag' since SKEIN doesn't have 'tender' type yet
-        tender_thread_data = {
-            "from_id": metadata["agent_id"],
-            "to_id": reviewer,
-            "type": "tag",
-            "content": json.dumps(tender_content, indent=2)
+        "site_id": site,
+        "title": f"{worktree_name}: {summary_text[:80]}",
+        "content": content,
+        "metadata": {
+            "worktree_name": worktree_name,
+            "branch_name": metadata.get("branch_name"),
+            "commits": metadata.get("commits", 0),
+            "files_modified": files_list,
+            "status": status,
+            "confidence": confidence,
+            "reviewer": reviewer,
+            "agent_id": metadata.get("agent_id"),
         }
+    }
 
-        tender_thread = make_request("POST", "/threads", base_url, agent_id, json=tender_thread_data)
-        tender_thread_id = tender_thread.get("thread_id")
+    try:
+        result = make_request("POST", "/folios", base_url, agent_id, json=folio_data)
+        folio_id = result.get("folio_id")
 
-        # Also reply to original SHARD thread with tender status
-        if original_thread_id:
-            reply_data = {
-                "thread_id": original_thread_id,
-                "content": f"[TENDERED] Ready for review by {reviewer}\nTender: {tender_thread_id}"
-            }
-            make_request("POST", f"/threads/{original_thread_id}/replies", base_url, agent_id, json=reply_data)
-
-        # Display summary
-        click.echo(f"🎯 Tendered SHARD: {worktree_name}")
+        click.echo(f"Tendered SHARD: {worktree_name}")
+        click.echo(f"  Folio: {folio_id}")
+        click.echo(f"  Site: {site}")
         click.echo(f"  Status: {status}")
         if confidence is not None:
             click.echo(f"  Confidence: {confidence}/10")
         click.echo(f"  Reviewer: {reviewer}")
-        click.echo(f"  Tender Thread: {tender_thread_id}")
-        click.echo(f"  Commits: {metadata['commits']}")
-        click.echo(f"  Files Modified: {len(metadata.get('files_modified', []))}")
+        click.echo(f"  Commits: {metadata.get('commits', 0)}")
+        click.echo(f"  Files: {len(files_list)}")
 
         if summary:
             click.echo(f"  Summary: {summary}")
 
-        click.echo(f"\n  Review with: skein inbox {reviewer}")
+        click.echo(f"\n  View: skein folio {folio_id}")
+        click.echo(f"  List tenders: skein folios {site} --type tender")
 
     except Exception as e:
-        raise click.ClickException(f"Failed to create tender thread: {e}")
+        raise click.ClickException(f"Failed to create tender folio: {e}")
 
 
 # Alias for common usage

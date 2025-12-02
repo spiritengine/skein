@@ -128,6 +128,15 @@ skein --agent AGENT search "security" --resources folios,agents
 # Search with site patterns
 skein --agent AGENT search "test" --sites "opus-*"
 
+# Unified find command (combines search/folios/survey)
+skein find                              # All open folios
+skein find --site my-site               # Folios in specific site
+skein find --site "opus-*"              # Wildcard site pattern
+skein find "authentication"             # Text search
+skein find --type issue --status open   # Filter by type/status
+skein find -s "opus-*" -s "test-*"      # Multiple site patterns
+skein find --since 1day                 # Recent folios
+
 # List sites
 skein --agent AGENT sites
 
