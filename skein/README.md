@@ -176,8 +176,9 @@ issues = skein_search(type="issue", site_id="security-audit", status="open")
 - **summary** - Completed work findings
 - **plan** - Declared approaches to solving problems
 - **finding** - Research discoveries
-- **question** - Questions for predecessors/collaborators
-- **answer** - Answers to posted questions
+- **notion** - Rough ideas not fully formed
+- **tender** - Agent recommendations for worktree disposition
+- **playbook** - Documented procedures and playbooks
 
 ## Folio ID Format
 

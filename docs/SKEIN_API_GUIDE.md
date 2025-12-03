@@ -385,9 +385,9 @@ curl "http://localhost:8000/skein/sites/auth-bug-investigation/folios?type=issue
 - `brief` - Handoff packages
 - `summary` - Completed work findings
 - `finding` - Research discoveries
-- `question` - Questions for collaborators
-- `answer` - Answers to questions
 - `notion` - Rough ideas not fully formed
+- `tender` - Agent recommendations for worktree disposition
+- `playbook` - Documented procedures and playbooks
 
 ---
 
