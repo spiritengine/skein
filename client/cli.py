@@ -910,6 +910,64 @@ def brief_shortcut(ctx, brief_id, output_json):
     ctx.invoke(brief_get, brief_id=brief_id, output_json=output_json)
 
 
+# ============================================================================
+# PLAYBOOK COMMANDS
+# ============================================================================
+
+@cli.group()
+def playbook():
+    """Manage playbooks."""
+    pass
+
+
+@playbook.command("create")
+@click.argument("site_id")
+@click.argument("content")
+@click.option("--title", help="Playbook title")
+@click.pass_context
+def playbook_create(ctx, site_id, content, title):
+    """Create a playbook."""
+    validate_positional_args(site_id, content, command_name="playbook create")
+    base_url = get_base_url(ctx.obj.get("url"))
+    agent_id = get_agent_id(ctx.obj.get("agent"), base_url)
+
+    data = {
+        "type": "playbook",
+        "site_id": site_id,
+        "title": title or "Playbook",
+        "content": content,
+        "metadata": {}
+    }
+
+    result = make_request("POST", "/folios", base_url, agent_id, json=data)
+    playbook_id = result["folio_id"]
+
+    click.echo(f"Created playbook: {playbook_id}")
+
+
+@playbook.command("get")
+@click.argument("playbook_id")
+@click.option("--json", "output_json", is_flag=True)
+@click.pass_context
+def playbook_get(ctx, playbook_id, output_json):
+    """Retrieve a playbook."""
+    base_url = get_base_url(ctx.obj.get("url"))
+    agent_id = get_agent_id(ctx.obj.get("agent"), base_url)
+
+    playbook_data = make_request("GET", f"/folios/{playbook_id}", base_url, agent_id)
+
+    if output_json:
+        click.echo(json.dumps(playbook_data, indent=2))
+    else:
+        click.echo(f"\nPlaybook: {playbook_data['folio_id']}")
+        click.echo(f"Site: {playbook_data['site_id']}")
+        click.echo(f"Created: {playbook_data['created_at']}")
+        click.echo(f"From: {playbook_data['created_by']}")
+        click.echo(f"\nTitle: {playbook_data['title']}")
+        click.echo(f"\nContent:")
+        click.echo(playbook_data['content'])
+
+
 @cli.command()
 @click.argument("brief_id")
 @click.pass_context
@@ -1411,8 +1469,8 @@ def status(ctx, output_json):
 
     # Last hour summary
     if type_counts:
-        # B=brief, I=issue, F=finding, R=friction, S=summary, T=tender
-        type_abbrev = {'brief': 'B', 'issue': 'I', 'finding': 'F', 'friction': 'R', 'summary': 'S', 'tender': 'T'}
+        # B=brief, I=issue, F=finding, R=friction, S=summary, T=tender, P=playbook
+        type_abbrev = {'brief': 'B', 'issue': 'I', 'finding': 'F', 'friction': 'R', 'summary': 'S', 'tender': 'T', 'playbook': 'P'}
         parts = []
         for ftype, count in sorted(type_counts.items()):
             abbrev = type_abbrev.get(ftype, ftype[0].upper())
