@@ -5,7 +5,7 @@ SKEIN CLI - Command-line interface for SKEIN collaboration system.
 Usage:
     export SKEIN_AGENT_ID=agent-007
     skein log stream-name "Error message" --level ERROR
-    skein brief create site-id "Handoff content"
+    skein brief create site-id "Handoff content" --title "Brief Title"
     skein brief brief-20251106-x9k2
 """
 
@@ -841,11 +841,11 @@ def brief():
 @brief.command("create")
 @click.argument("site_id")
 @click.argument("content")
+@click.option("--title", required=True, help="Brief title (required)")
 @click.option("--target", help="Target agent")
-@click.option("--title", help="Brief title")
 @click.option("--successor-name", help="Suggested name for successor agent")
 @click.pass_context
-def brief_create(ctx, site_id, content, target, title, successor_name):
+def brief_create(ctx, site_id, content, title, target, successor_name):
     """Create a handoff brief."""
     validate_positional_args(site_id, content, command_name="brief create")
     base_url = get_base_url(ctx.obj.get("url"))
@@ -854,7 +854,7 @@ def brief_create(ctx, site_id, content, target, title, successor_name):
     data = {
         "type": "brief",
         "site_id": site_id,
-        "title": title or "Handoff Brief",
+        "title": title,
         "content": content,
         "target_agent": target,
         "metadata": {"questions_enabled": True}
