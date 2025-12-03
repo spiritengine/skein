@@ -24,7 +24,8 @@ from .utils import (
     generate_folio_id, generate_thread_id, parse_mentions,
     get_current_status, get_current_assignment,
     auto_invalidate_cache,
-    parse_relative_time
+    parse_relative_time,
+    generate_agent_name
 )
 
 logger = logging.getLogger(__name__)
@@ -1182,3 +1183,38 @@ async def get_screenshot_metadata(
         file_size=screenshot_data["file_size"],
         metadata={}
     )
+
+
+# Agent Naming
+
+@router.post("/naming/generate")
+async def generate_name(
+    role: Optional[str] = None,
+    brief_content: Optional[str] = None,
+    project: Optional[str] = None,
+    x_project_id: Optional[str] = Header(None)
+):
+    """
+    Generate a memorable agent name.
+
+    Uses the naming system (simple.py generator with Haiku classification
+    and muster name pools) to generate names like "chrome-badger-1202".
+
+    Args:
+        role: Agent role/mantle (used for genre classification)
+        brief_content: Task description (used for genre classification)
+        project: Project context
+
+    Returns:
+        {"name": "generated-name-1202"}
+    """
+    # Use project from header if not explicitly provided
+    project_id = project or x_project_id
+
+    name = generate_agent_name(
+        project=project_id,
+        role=role,
+        brief_content=brief_content
+    )
+
+    return {"name": name}
