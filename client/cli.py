@@ -1602,24 +1602,33 @@ def finding(ctx, site_id, description):
 
 @cli.command()
 @click.argument("site_id")
-@click.argument("description")
+@click.argument("content")
+@click.option("--name", help="Mantle name/title")
 @click.pass_context
-def plan(ctx, site_id, description):
-    """Post a plan (declared approach for solving something)."""
-    validate_positional_args(site_id, description, command_name="plan")
+def mantle(ctx, site_id, content, name):
+    """Create a mantle (role template for agent orientation).
+
+    Mantles are orientation documents used by `skein ignite --mantle`.
+    They contain prompts, instructions, and context for a specific role.
+
+    Examples:
+        skein mantle skein-development "You are a researcher..."
+        skein mantle opus-agents "# Quartermaster\\n\\nYou oversee..." --name quartermaster
+    """
+    validate_positional_args(site_id, content, command_name="mantle")
     base_url = get_base_url(ctx.obj.get("url"))
     agent_id = get_agent_id(ctx.obj.get("agent"), base_url)
 
     data = {
-        "type": "plan",
+        "type": "mantle",
         "site_id": site_id,
-        "title": description[:100],  # First 100 chars as title
-        "content": description,
+        "title": name or content[:100],  # Use name if provided, else first 100 chars
+        "content": content,
         "metadata": {}
     }
 
     result = make_request("POST", "/folios", base_url, agent_id, json=data)
-    click.echo(f"Posted plan: {result['folio_id']}")
+    click.echo(f"Created mantle: {result['folio_id']}")
 
 
 @cli.command()
@@ -2684,30 +2693,18 @@ def _ignite_start(ctx, brief_id, mantle, message):
         except Exception as e:
             raise click.ClickException(f"Failed to load brief: {str(e)}")
 
-    # If mantle provided, load it
+    # If mantle provided, load it as a folio from SKEIN
     mantle_data = None
+    mantle_content = ""
     if mantle:
-        project_root = find_project_root()
-        if project_root:
-            # Look in project for mantles
-            mantle_file = project_root / "mantles" / f"{mantle}.json"
-            if not mantle_file.exists():
-                # Also try agents/ for backward compatibility
-                mantle_file = project_root / "agents" / f"{mantle}.json"
-
-            if mantle_file.exists():
-                try:
-                    with open(mantle_file) as f:
-                        mantle_data = json.load(f)
-                        mission_parts.append(f"**From Mantle ({mantle}):**")
-                        if mantle_data.get("description"):
-                            mission_parts.append(f"Description: {mantle_data['description']}")
-                        if mantle_data.get("prompt"):
-                            mission_parts.append(f"\nPrompt:\n{mantle_data['prompt']}")
-                except Exception as e:
-                    click.echo(f"Warning: Could not load mantle {mantle}: {e}")
-            else:
-                click.echo(f"Warning: Mantle '{mantle}' not found at {mantle_file}")
+        try:
+            mantle_folio = make_request("GET", f"/folios/{mantle}", base_url, agent_id)
+            mantle_content = mantle_folio.get('content', '')
+            mission_parts.append(f"**From Mantle ({mantle}):**\n{mantle_content}")
+            # Store folio data for naming context
+            mantle_data = {"content": mantle_content}
+        except Exception as e:
+            raise click.ClickException(f"Failed to load mantle folio '{mantle}': {str(e)}")
 
     # If message provided, add it
     if message:
@@ -2745,8 +2742,9 @@ def _ignite_start(ctx, brief_id, mantle, message):
     response["suggested_reading"] = suggested_reading
 
     # Generate memorable suggested name
-    # Combine brief content and message for naming context
-    naming_context = f"{brief_content}\n{message}" if message else brief_content
+    # Combine brief, mantle, and message content for naming context
+    content_parts = [brief_content, mantle_content, message or ""]
+    naming_context = "\n".join(p for p in content_parts if p)
     suggested_name = _generate_suggested_name(base_url, agent_id, mantle, mantle_data, naming_context)
     response["suggested_name"] = suggested_name
 
