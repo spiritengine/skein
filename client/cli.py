@@ -1633,6 +1633,37 @@ def mantle(ctx, site_id, content, name):
 
 @cli.command()
 @click.argument("site_id")
+@click.argument("content")
+@click.option("--name", help="Mantle name/title")
+@click.pass_context
+def mantle(ctx, site_id, content, name):
+    """Create a mantle (role template for agent orientation).
+
+    Mantles are orientation documents used by `skein ignite --mantle`.
+    They contain prompts, instructions, and context for a specific role.
+
+    Examples:
+        skein mantle skein-development "You are a researcher..."
+        skein mantle opus-agents "# Quartermaster\\n\\nYou oversee..." --name quartermaster
+    """
+    validate_positional_args(site_id, content, command_name="mantle")
+    base_url = get_base_url(ctx.obj.get("url"))
+    agent_id = get_agent_id(ctx.obj.get("agent"), base_url)
+
+    data = {
+        "type": "mantle",
+        "site_id": site_id,
+        "title": name or content[:100],  # Use name if provided, else first 100 chars
+        "content": content,
+        "metadata": {}
+    }
+
+    result = make_request("POST", "/folios", base_url, agent_id, json=data)
+    click.echo(f"Created mantle: {result['folio_id']}")
+
+
+@cli.command()
+@click.argument("site_id")
 @click.argument("description")
 @click.pass_context
 def summary(ctx, site_id, description):
@@ -1887,7 +1918,7 @@ def edit(ctx, folio_id, title, content, status, output_json):
         raise click.ClickException(f"Failed to update folio: {result}")
 
 
-@cli.command()
+@cli.command(hidden=True)
 @click.argument("site_id")
 @click.option("--type", help="Filter by folio type")
 @click.option("--status", help="Filter by status")
@@ -1896,7 +1927,7 @@ def edit(ctx, folio_id, title, content, status, output_json):
 @click.option("--json", "output_json", is_flag=True)
 @click.pass_context
 def folios(ctx, site_id, type, status, limit, show_all, output_json):
-    """List all folios in a site."""
+    """List all folios in a site. (Deprecated: use 'find --site SITE_ID')"""
     # Validate site_id is not empty
     if not site_id or site_id.strip() == "":
         raise click.ClickException("site_id cannot be empty. Usage: skein folios SITE_ID")
