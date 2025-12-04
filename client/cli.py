@@ -1491,8 +1491,8 @@ def status(ctx, output_json):
 
     # Last hour summary
     if type_counts:
-        # B=brief, I=issue, F=finding, R=friction, S=summary, T=tender, P=playbook
-        type_abbrev = {'brief': 'B', 'issue': 'I', 'finding': 'F', 'friction': 'R', 'summary': 'S', 'tender': 'T', 'playbook': 'P'}
+        # B=brief, I=issue, F=finding, R=friction, S=summary, T=tender, W=writ, P=playbook
+        type_abbrev = {'brief': 'B', 'issue': 'I', 'finding': 'F', 'friction': 'R', 'summary': 'S', 'tender': 'T', 'writ': 'W', 'playbook': 'P'}
         parts = []
         for ftype, count in sorted(type_counts.items()):
             abbrev = type_abbrev.get(ftype, ftype[0].upper())
@@ -1651,6 +1651,73 @@ def summary(ctx, site_id, description):
 
     result = make_request("POST", "/folios", base_url, agent_id, json=data)
     click.echo(f"Posted summary: {result['folio_id']}")
+
+
+@cli.command()
+@click.argument("site_id")
+@click.argument("decision")
+@click.option("--thread", "thread_id", help="Tender ID to respond to (updates tender status to 'responded')")
+@click.pass_context
+def writ(ctx, site_id, decision, thread_id):
+    """Post a writ (human decision in response to a tender).
+
+    A writ is a human-in-the-loop decision that responds to an agent's tender.
+    When --thread points to a tender, the tender's status is auto-updated to 'responded'.
+
+    Examples:
+        skein writ skein-dev "Approved for merge"
+        skein writ skein-dev "Merge after fixing tests" --thread tender-20251201-abc1
+        skein writ skein-dev "Rejected - needs more testing" --thread tender-20251201-xyz9
+    """
+    validate_positional_args(site_id, decision, command_name="writ")
+    base_url = get_base_url(ctx.obj.get("url"))
+    agent_id = get_agent_id(ctx.obj.get("agent"), base_url)
+
+    # If threading to a tender, verify it exists and is a tender
+    if thread_id:
+        try:
+            tender = make_request("GET", f"/folios/{thread_id}", base_url, agent_id)
+            if tender.get("type") != "tender":
+                raise click.ClickException(f"{thread_id} is not a tender (type: {tender.get('type')})")
+        except requests.exceptions.HTTPError as e:
+            if e.response.status_code == 404:
+                raise click.ClickException(f"Tender not found: {thread_id}")
+            raise
+
+    # Create writ folio
+    data = {
+        "type": "writ",
+        "site_id": site_id,
+        "title": decision[:100],
+        "content": decision,
+        "metadata": {"thread_id": thread_id} if thread_id else {}
+    }
+
+    result = make_request("POST", "/folios", base_url, agent_id, json=data)
+    writ_id = result["folio_id"]
+    click.echo(f"Posted writ: {writ_id}")
+
+    # If threaded to a tender, create reply thread and update tender status
+    if thread_id:
+        # Create reply thread linking writ to tender
+        thread_data = {
+            "from_id": writ_id,
+            "to_id": thread_id,
+            "type": "reply",
+            "content": decision
+        }
+        make_request("POST", "/threads", base_url, agent_id, json=thread_data)
+
+        # Update tender status to 'responded'
+        status_data = {
+            "from_id": thread_id,
+            "to_id": thread_id,
+            "type": "status",
+            "content": "responded"
+        }
+        make_request("POST", "/threads", base_url, agent_id, json=status_data)
+        click.echo(f"  Linked to tender: {thread_id}")
+        click.echo(f"  Tender status: responded")
 
 
 @cli.command()

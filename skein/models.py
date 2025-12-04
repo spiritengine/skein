@@ -51,7 +51,7 @@ class Site(BaseModel):
 
 # Folio Models
 
-FolioType = Literal["issue", "friction", "brief", "summary", "finding", "notion", "tender", "playbook", "mantle"]
+FolioType = Literal["issue", "friction", "brief", "summary", "finding", "notion", "tender", "playbook", "mantle", "writ"]
 
 
 class FolioCreate(BaseModel):

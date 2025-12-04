@@ -178,6 +178,7 @@ issues = skein_search(type="issue", site_id="security-audit", status="open")
 - **finding** - Research discoveries
 - **notion** - Rough ideas not fully formed
 - **tender** - Agent recommendations for worktree disposition
+- **writ** - Human decisions in response to tenders (mill integration)
 - **playbook** - Documented procedures and playbooks
 
 ## Folio ID Format

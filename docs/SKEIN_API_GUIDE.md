@@ -387,6 +387,7 @@ curl "http://localhost:8000/skein/sites/auth-bug-investigation/folios?type=issue
 - `finding` - Research discoveries
 - `notion` - Rough ideas not fully formed
 - `tender` - Agent recommendations for worktree disposition
+- `writ` - Human decisions in response to tenders (mill integration)
 - `playbook` - Documented procedures and playbooks
 
 ---
