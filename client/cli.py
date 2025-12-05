@@ -2943,67 +2943,68 @@ def _ignite_start(ctx, brief_id, mantle, message):
 
         click.echo()
 
-    click.echo(f"YOUR Suggested name: {response['suggested_name']}")
-    click.echo()
     click.echo("After reading, explore project files and the SKEIN for relevant information. After you've fully oriented, run:")
     click.echo()
-    click.echo(f"  skein ready --name \"Your Name\"")
+    click.echo(f"  skein ready")
     click.echo()
 
 
 @cli.command("ready")
-@click.option("--name", required=True, help="Your chosen name/nom de plume")
 @click.pass_context
-def ready(ctx, name):
+def ready(ctx):
     """
-    Complete ignition - Register and begin work.
+    Complete ignition - Get assigned name and begin work.
 
     Usage:
-        skein ready --name "Dawn Authentication Auditor"
+        skein ready
+
+    The system assigns you a name. Use it for all subsequent commands.
     """
     base_url = get_base_url(ctx.obj.get("url"))
-    agent_id = get_agent_id(ctx.obj.get("agent"), base_url)
 
-    if agent_id == "unknown":
-        raise click.ClickException("Must set SKEIN_AGENT_ID or use --agent flag")
+    # Get ignition context if available (from prior ignite command's metadata)
+    # For now, we don't have session state, so brief_content will be empty
+    # Future: could store ignition context in a temp file
+    brief_content = ""
 
-    # Update roster from "orienting" to "active" with name
-    # Get existing roster entry to preserve ignition metadata
-    existing_metadata = {}
-    try:
-        roster_entry = make_request("GET", f"/roster/{agent_id}", base_url, agent_id)
-        existing_metadata = roster_entry.get("metadata", {})
-    except:
-        # Agent not in roster yet (didn't run ignite first)
-        existing_metadata = {
-            "registered_via": "direct",  # Didn't use ignite
-            "ignited_at": datetime.now().isoformat()
-        }
+    # Generate name - this IS the agent identity
+    assigned_name = _generate_suggested_name(
+        base_url=base_url,
+        agent_id="unknown",  # We don't have an ID yet
+        mantle=None,
+        mantle_data=None,
+        brief_content=brief_content
+    )
 
+    # Build metadata
+    metadata = {
+        "registered_at": datetime.now().isoformat(),
+        "registered_via": "ready"
+    }
+
+    # Register with assigned name AS the agent_id
     data = {
-        "agent_id": agent_id,
-        "name": name,
+        "agent_id": assigned_name,
+        "name": assigned_name,
         "status": "active",
-        "metadata": existing_metadata  # Preserve ignition data
+        "metadata": metadata
     }
 
     try:
-        make_request("POST", "/roster/register", base_url, agent_id, json=data)
+        make_request("POST", "/roster/register", base_url, assigned_name, json=data)
     except Exception as e:
-        # If already registered, that's okay - update instead
-        try:
-            make_request("PATCH", f"/roster/{agent_id}", base_url, agent_id, json={"name": name, "status": "active"})
-        except:
-            raise click.ClickException(f"Failed to register: {str(e)}")
+        raise click.ClickException(f"Failed to register: {str(e)}")
 
     click.echo("="*60)
     click.echo("READY")
     click.echo("="*60)
     click.echo()
-    click.echo(f"✓ Registered as: {name}")
-    click.echo(f"✓ Status: Active")
+    click.echo(f"You are: {assigned_name}")
     click.echo()
-    click.echo("You are now registered and ready to begin work.")
+    click.echo("Use this for all commands:")
+    click.echo(f"  skein --agent {assigned_name} issue SITE \"description\"")
+    click.echo(f"  skein --agent {assigned_name} finding SITE \"discovery\"")
+    click.echo(f"  skein --agent {assigned_name} torch")
     click.echo()
 
 
@@ -3887,30 +3888,44 @@ def shard_show(ctx, worktree_name):
         click.echo(f"{shard['worktree_name']} ({shard['branch_name']})")
         click.echo()
 
-        # Commit log
-        if git_info.get("commit_log"):
-            for sha, msg in git_info["commit_log"]:
+        # Uncommitted changes first (if any)
+        uncommitted = git_info.get("uncommitted", [])
+        if uncommitted:
+            click.echo("Uncommitted:")
+            for line in uncommitted:
+                click.echo(f" {line}")
+            click.echo()
+
+        # Commit log and diffstat
+        commit_log = git_info.get("commit_log", [])
+        if commit_log:
+            for sha, msg in commit_log:
                 click.echo(f"{sha} {msg}")
             click.echo()
 
-        # Status line
-        working = git_info.get("working_tree", "unknown")
-        merge = git_info.get("merge_status", "unknown")
-
-        status_parts = []
-        if working == "dirty":
-            status_parts.append("Uncommitted changes")
+            # Diffstat
+            diffstat = git_info.get("diffstat", "")
+            if diffstat:
+                click.echo(diffstat)
+                click.echo()
         else:
+            click.echo("No commits ahead of master")
+            click.echo()
+
+        # Status line
+        status_parts = []
+        working = git_info.get("working_tree", "unknown")
+        if working == "clean" and not uncommitted:
             status_parts.append("Working tree clean")
 
+        merge = git_info.get("merge_status", "unknown")
         if merge == "conflict":
             status_parts.append("Has conflicts")
-        elif merge == "clean":
+        elif merge == "clean" and commit_log:
             status_parts.append("Merges clean")
 
-        click.echo(", ".join(status_parts))
-
-        # TODO: Show linked tender if one exists
+        if status_parts:
+            click.echo(", ".join(status_parts))
 
     except shard_worktree.ShardError as e:
         raise click.ClickException(str(e))
