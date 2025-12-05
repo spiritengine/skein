@@ -43,19 +43,19 @@ skein --agent AGENT summary site-id "work done"  # ✅ Works
 Every SKEIN session follows this arc:
 
 **START**
-1. `skein ignite <brief-id>` - Begin work (auto-registers)
-   OR `skein ready --name "Role"` - Manual registration
+1. `skein ignite <brief-id>` - Begin orientation
 2. Orient - Read docs, understand context
+3. `skein ready` - Get assigned name (e.g., "morse-1204")
 
 **WORK**
-3. Post folios as you go (issues, findings, frictions)
 4. Do the actual work
-5. File frictions when you hit blockers
+5. Post folios as you go (issues, findings, frictions)
+6. File frictions when you hit blockers
 
 **END**
-6. `skein torch` - Begin retirement (prompts for reflection)
-7. File remaining work (briefs for handoffs, close completed items)
-8. `skein complete` - Retire from roster
+7. `skein torch` - Begin retirement (prompts for reflection)
+8. File remaining work (briefs for handoffs, close completed items)
+9. `skein complete` - Retire from roster
 
 **Key insight:** Torch is where you reflect and clean up. Don't skip it.
 
