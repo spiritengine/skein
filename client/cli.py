@@ -149,6 +149,18 @@ def make_request(method: str, endpoint: str, base_url: str, agent_id: str, **kwa
     if project_id:
         headers["X-Project-Id"] = project_id
 
+    # Warn if agent is still orienting when posting folios
+    if method == "POST" and endpoint == "/folios" and agent_id != "unknown":
+        try:
+            roster_url = f"{base_url}/skein/roster/{agent_id}"
+            roster_resp = requests.get(roster_url, headers=headers)
+            if roster_resp.ok:
+                agent_data = roster_resp.json()
+                if agent_data.get("status") == "orienting":
+                    click.echo(f"Note: You're still orienting. Run 'skein --agent {agent_id} ready' when done.", err=True)
+        except:
+            pass  # Not critical
+
     try:
         resp = requests.request(method, url, headers=headers, **kwargs)
         resp.raise_for_status()
@@ -365,6 +377,71 @@ def projects(verbose):
 
     if not verbose:
         click.echo(f"\nUse 'skein projects -v' for detailed information")
+
+
+# ============================================================================
+# Health Check
+# ============================================================================
+
+@cli.command()
+@click.option("--json", "output_json", is_flag=True, help="Output as JSON")
+@click.pass_context
+def health(ctx, output_json):
+    """
+    Check SKEIN system health.
+
+    Verifies:
+    - Git repository exists
+    - SKEIN project initialized (.skein/ directory)
+    - SKEIN server is responding
+
+    Exit codes:
+    - 0: All checks pass
+    - 1: One or more checks failed
+    """
+    import subprocess
+    checks = {}
+
+    # Check git repo
+    try:
+        result = subprocess.run(
+            ['git', 'rev-parse', '--git-dir'],
+            capture_output=True, timeout=5
+        )
+        checks["git"] = result.returncode == 0
+    except Exception:
+        checks["git"] = False
+
+    # Check .skein/ directory
+    project_root = find_project_root()
+    if project_root:
+        skein_dir = project_root / '.skein'
+        checks["initialized"] = skein_dir.exists()
+    else:
+        checks["initialized"] = False
+
+    # Check server
+    base_url = get_base_url(ctx.obj.get("url"))
+    try:
+        import urllib.request
+        health_url = base_url.replace("/skein", "") + "/health"
+        with urllib.request.urlopen(health_url, timeout=5) as response:
+            data = json.loads(response.read().decode())
+            checks["server"] = data.get("status") == "healthy"
+    except Exception:
+        checks["server"] = False
+
+    all_ok = all(checks.values())
+
+    if output_json:
+        click.echo(json.dumps({"healthy": all_ok, "checks": checks}))
+    else:
+        click.echo(f"{'✓' if checks['git'] else '✗'} Git repository")
+        click.echo(f"{'✓' if checks['initialized'] else '✗'} SKEIN initialized")
+        click.echo(f"{'✓' if checks['server'] else '✗'} SKEIN server responding")
+        click.echo(f"\nSKEIN is {'healthy' if all_ok else 'unhealthy'}")
+
+    raise SystemExit(0 if all_ok else 1)
 
 
 # ============================================================================
@@ -2877,10 +2954,11 @@ def _ignite_start(ctx, brief_id, mantle, message):
     suggested_name = _generate_suggested_name(base_url, agent_id, mantle, mantle_data, naming_context)
     response["suggested_name"] = suggested_name
 
-    # Register on roster as "orienting" with ignition info
+    # Register on roster as "orienting" with the generated name
     try:
         register_data = {
-            "agent_id": agent_id,
+            "agent_id": suggested_name,
+            "name": suggested_name,
             "status": "orienting",
             "metadata": {
                 "ignited_at": datetime.now().isoformat(),
@@ -2889,10 +2967,10 @@ def _ignite_start(ctx, brief_id, mantle, message):
                 "message": message
             }
         }
-        make_request("POST", "/roster/register", base_url, agent_id, json=register_data)
-    except:
-        # Not critical if roster update fails
-        pass
+        make_request("POST", "/roster/register", base_url, suggested_name, json=register_data)
+    except Exception as e:
+        # Log but don't fail - registration is not critical
+        click.echo(f"Note: Could not register on roster: {e}", err=True)
 
     # Output results
     click.echo("="*60)
@@ -2955,9 +3033,11 @@ def _ignite_start(ctx, brief_id, mantle, message):
 
         click.echo()
 
+    click.echo(f"You are: {suggested_name}")
+    click.echo()
     click.echo("After reading, explore project files and the SKEIN for relevant information. After you've fully oriented, run:")
     click.echo()
-    click.echo(f"  skein ready")
+    click.echo(f"  skein --agent {suggested_name} ready")
     click.echo()
 
 
@@ -2965,58 +3045,44 @@ def _ignite_start(ctx, brief_id, mantle, message):
 @click.pass_context
 def ready(ctx):
     """
-    Complete ignition - Get assigned name and begin work.
+    Complete ignition - Activate and begin work.
 
     Usage:
-        skein ready
+        skein --agent NAME ready
 
-    The system assigns you a name. Use it for all subsequent commands.
+    Transitions agent from 'orienting' to 'active' status.
     """
     base_url = get_base_url(ctx.obj.get("url"))
+    agent_id = ctx.obj.get("agent")
 
-    # Get ignition context if available (from prior ignite command's metadata)
-    # For now, we don't have session state, so brief_content will be empty
-    # Future: could store ignition context in a temp file
-    brief_content = ""
+    if not agent_id:
+        raise click.ClickException("Must use --agent flag. Run 'skein ignite' first to get your assigned name.")
 
-    # Generate name - this IS the agent identity
-    assigned_name = _generate_suggested_name(
-        base_url=base_url,
-        agent_id="unknown",  # We don't have an ID yet
-        mantle=None,
-        mantle_data=None,
-        brief_content=brief_content
-    )
-
-    # Build metadata
-    metadata = {
-        "registered_at": datetime.now().isoformat(),
-        "registered_via": "ready"
-    }
-
-    # Register with assigned name AS the agent_id
+    # Update agent status from orienting to active
     data = {
-        "agent_id": assigned_name,
-        "name": assigned_name,
+        "agent_id": agent_id,
+        "name": agent_id,
         "status": "active",
-        "metadata": metadata
+        "metadata": {
+            "ready_at": datetime.now().isoformat()
+        }
     }
 
     try:
-        make_request("POST", "/roster/register", base_url, assigned_name, json=data)
+        make_request("POST", "/roster/register", base_url, agent_id, json=data)
     except Exception as e:
-        raise click.ClickException(f"Failed to register: {str(e)}")
+        raise click.ClickException(f"Failed to activate: {str(e)}")
 
     click.echo("="*60)
     click.echo("READY")
     click.echo("="*60)
     click.echo()
-    click.echo(f"You are: {assigned_name}")
+    click.echo(f"You are: {agent_id}")
     click.echo()
     click.echo("Use this for all commands:")
-    click.echo(f"  skein --agent {assigned_name} issue SITE \"description\"")
-    click.echo(f"  skein --agent {assigned_name} finding SITE \"discovery\"")
-    click.echo(f"  skein --agent {assigned_name} torch")
+    click.echo(f"  skein --agent {agent_id} issue SITE \"description\"")
+    click.echo(f"  skein --agent {agent_id} finding SITE \"discovery\"")
+    click.echo(f"  skein --agent {agent_id} torch")
     click.echo()
 
 
@@ -3921,7 +3987,21 @@ def shard_show(ctx, worktree_name):
                 click.echo(diffstat)
                 click.echo()
         else:
-            click.echo("No commits ahead of master")
+            # No unique commits - show tip info
+            tip_sha = git_info.get("tip_sha", "")
+            tip_msg = git_info.get("tip_message", "")
+            tip_in_master = git_info.get("tip_in_master", False)
+            commits_behind = git_info.get("commits_behind", 0)
+
+            if tip_sha:
+                click.echo(f"Tip: {tip_sha} {tip_msg}")
+                if tip_in_master:
+                    if commits_behind > 0:
+                        click.echo(f"     (in master, {commits_behind} commits behind HEAD)")
+                    else:
+                        click.echo("     (in master)")
+                click.echo()
+            click.echo("No unique commits.")
             click.echo()
 
         # Status line
@@ -3939,10 +4019,58 @@ def shard_show(ctx, worktree_name):
         if status_parts:
             click.echo(", ".join(status_parts))
 
+        # Hint about diff command when there are conflicts
+        if merge == "conflict":
+            click.echo(f"\nTo see changes: skein shard diff {worktree_name}")
+
     except shard_worktree.ShardError as e:
         raise click.ClickException(str(e))
     except Exception as e:
         raise click.ClickException(f"Failed to show SHARD: {e}")
+
+
+@shard.command("diff")
+@click.argument("worktree_name")
+@click.option("--stat", "show_stat", is_flag=True, help="Show diffstat only")
+@click.pass_context
+def shard_diff(ctx, worktree_name, show_stat):
+    """
+    Show diff for a SHARD (changes from master).
+
+    Useful for reviewing changes without cd'ing to the worktree.
+
+    Examples:
+        skein shard diff my-shard-001
+        skein shard diff my-shard-001 --stat
+    """
+    shard_worktree = get_shard_worktree_module()
+
+    try:
+        shard = shard_worktree.get_shard_status(worktree_name)
+
+        if not shard:
+            raise click.ClickException(f"SHARD not found: {worktree_name}")
+
+        if show_stat:
+            # Just show diffstat (already gathered in git_info)
+            git_info = shard_worktree.get_shard_git_info(worktree_name)
+            diffstat = git_info.get("diffstat", "")
+            if diffstat:
+                click.echo(diffstat)
+            else:
+                click.echo("No changes from master.")
+        else:
+            # Show full diff
+            diff_output = shard_worktree.get_shard_diff(worktree_name)
+            if diff_output:
+                click.echo(diff_output)
+            else:
+                click.echo("No changes from master.")
+
+    except shard_worktree.ShardError as e:
+        raise click.ClickException(str(e))
+    except Exception as e:
+        raise click.ClickException(f"Failed to get diff: {e}")
 
 
 @shard.command("cleanup")
@@ -3974,6 +4102,43 @@ def shard_cleanup(ctx, worktree_name, keep_branch):
         raise click.ClickException(str(e))
     except Exception as e:
         raise click.ClickException(f"Failed to cleanup SHARD: {e}")
+
+
+@shard.command("merge")
+@click.argument("worktree_name")
+@click.pass_context
+def shard_merge(ctx, worktree_name):
+    """
+    Merge SHARD branch into master and cleanup.
+
+    Refuses if there are uncommitted changes or conflicts.
+
+    Example:
+        skein shard merge beadle_0001-20251202-001
+    """
+    shard_worktree = get_shard_worktree_module()
+
+    try:
+        result = shard_worktree.merge_shard(worktree_name)
+
+        if result["success"]:
+            click.echo(result["message"])
+        else:
+            click.echo(f"Error: {result['message']}")
+            if result.get("uncommitted"):
+                click.echo("\nUncommitted files:")
+                for f in result["uncommitted"]:
+                    click.echo(f"  {f}")
+            if result.get("conflicts"):
+                click.echo("\nFiles with conflicts:")
+                for f in result["conflicts"]:
+                    click.echo(f"  {f}")
+            raise SystemExit(1)
+
+    except shard_worktree.ShardError as e:
+        raise click.ClickException(str(e))
+    except Exception as e:
+        raise click.ClickException(f"Failed to merge SHARD: {e}")
 
 
 @shard.command("pause")

@@ -19,6 +19,7 @@ class AgentRegistration(BaseModel):
     description: Optional[str] = None
     capabilities: List[str] = Field(default_factory=list)
     metadata: Dict[str, Any] = Field(default_factory=dict)
+    status: Optional[str] = "active"  # "orienting" or "active"
 
 
 class AgentInfo(BaseModel):

@@ -107,7 +107,7 @@ async def register_agent(
         description=registration.description,
         registered_at=datetime.now(),
         capabilities=registration.capabilities,
-        status="active",
+        status=registration.status or "active",
         metadata=registration.metadata
     )
 
