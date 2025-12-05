@@ -318,11 +318,16 @@ class JSONStore:
         self._save_json(agents_file, agents)
         return True
 
-    def get_agents(self) -> List[AgentInfo]:
-        """Get all registered agents."""
+    def get_agents(self, status: Optional[str] = None) -> List[AgentInfo]:
+        """Get registered agents, optionally filtered by status."""
         agents_file = self.roster_dir / "agents.json"
         agents_data = self._load_json(agents_file, [])
-        return [AgentInfo(**a) for a in agents_data]
+        agents = [AgentInfo(**a) for a in agents_data]
+
+        if status is not None:
+            agents = [a for a in agents if a.status == status]
+
+        return agents
 
     def get_agent(self, agent_id: str) -> Optional[AgentInfo]:
         """Get specific agent."""

@@ -376,6 +376,8 @@ def get_shard_git_info(worktree_name: str) -> Dict:
         - working_tree: 'clean' or 'dirty'
         - merge_status: 'clean', 'conflict', or 'unknown'
         - commit_log: list of (sha, message) tuples
+        - diffstat: git diff --stat output (str)
+        - uncommitted: list of uncommitted file changes
     """
     shard_info = get_shard_status(worktree_name)
     if not shard_info:
@@ -385,7 +387,9 @@ def get_shard_git_info(worktree_name: str) -> Dict:
         "commits_ahead": 0,
         "working_tree": "unknown",
         "merge_status": "unknown",
-        "commit_log": []
+        "commit_log": [],
+        "diffstat": "",
+        "uncommitted": []
     }
 
     try:
@@ -430,6 +434,22 @@ def get_shard_git_info(worktree_name: str) -> Dict:
                     sha = parts[0]
                     msg = parts[1] if len(parts) > 1 else ""
                     result["commit_log"].append((sha, msg))
+        except:
+            pass
+
+        # Diffstat (files changed between master and branch)
+        try:
+            if result["commits_ahead"] > 0:
+                diffstat = repo.git.diff("--stat", f"master..{branch}")
+                result["diffstat"] = diffstat.strip()
+        except:
+            pass
+
+        # Uncommitted changes in worktree
+        try:
+            status = repo.git.status("--porcelain", worktree_path)
+            if status.strip():
+                result["uncommitted"] = status.strip().split("\n")
         except:
             pass
 

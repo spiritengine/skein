@@ -2631,24 +2631,36 @@ def register(ctx, capabilities, name, agent_type, description):
 
 @cli.command()
 @click.option("--json", "output_json", is_flag=True)
+@click.option("--status", default="active", help="Filter: active (default), retired, or all")
 @click.pass_context
-def roster(ctx, output_json):
+def roster(ctx, output_json, status):
     """List registered agents."""
     base_url = get_base_url(ctx.obj.get("url"))
     agent_id = get_agent_id(ctx.obj.get("agent"), base_url)
 
-    agents = make_request("GET", "/roster", base_url, agent_id)
+    # Build query params - if "all", don't filter
+    params = {}
+    if status != "all":
+        params["status"] = status
+
+    agents = make_request("GET", "/roster", base_url, agent_id, params=params)
 
     if output_json:
         click.echo(json.dumps(agents, indent=2))
     else:
         if not agents:
-            click.echo("No agents registered")
+            if status == "all":
+                click.echo("No agents registered")
+            else:
+                click.echo(f"No {status} agents")
         else:
-            click.echo(f"Roster ({len(agents)} agent(s)):\n")
+            if status == "all":
+                click.echo(f"Roster ({len(agents)} agent(s)):\n")
+            else:
+                click.echo(f"Roster ({len(agents)} {status} agent(s)):\n")
             for a in agents:
                 click.echo(f"  {a['agent_id']}")
-                if a.get("name"):
+                if a.get("name") and a.get("name") != a.get("agent_id"):
                     click.echo(f"    Name: {a['name']}")
                 if a.get("agent_type"):
                     click.echo(f"    Type: {a['agent_type']}")

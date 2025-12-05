@@ -120,9 +120,12 @@ async def register_agent(
 
 
 @router.get("/roster", response_model=List[AgentInfo])
-async def get_roster(store: JSONStore = Depends(get_project_store)):
-    """Get all registered agents."""
-    return store.get_agents()
+async def get_roster(
+    status: Optional[str] = Query(None, description="Filter by status: active, retired"),
+    store: JSONStore = Depends(get_project_store)
+):
+    """Get registered agents, optionally filtered by status."""
+    return store.get_agents(status=status)
 
 
 @router.get("/roster/{agent_id}", response_model=AgentInfo)
