@@ -367,6 +367,78 @@ def get_shard_status(worktree_name: str) -> Optional[Dict[str, str]]:
     return None
 
 
+def get_shard_git_info(worktree_name: str) -> Dict:
+    """
+    Get git information for a SHARD: commits ahead, working tree status, merge status.
+
+    Returns dict with:
+        - commits_ahead: int
+        - working_tree: 'clean' or 'dirty'
+        - merge_status: 'clean', 'conflict', or 'unknown'
+        - commit_log: list of (sha, message) tuples
+    """
+    shard_info = get_shard_status(worktree_name)
+    if not shard_info:
+        return {}
+
+    result = {
+        "commits_ahead": 0,
+        "working_tree": "unknown",
+        "merge_status": "unknown",
+        "commit_log": []
+    }
+
+    try:
+        repo = _get_repo()
+        branch = shard_info["branch_name"]
+        worktree_path = shard_info["worktree_path"]
+
+        # Commits ahead of master
+        try:
+            count = repo.git.rev_list("--count", f"master..{branch}")
+            result["commits_ahead"] = int(count)
+        except:
+            pass
+
+        # Working tree status (check for uncommitted changes)
+        try:
+            status = repo.git.status("--porcelain", worktree_path)
+            result["working_tree"] = "dirty" if status.strip() else "clean"
+        except:
+            pass
+
+        # Merge status - check if branch can merge cleanly into master
+        try:
+            # Find merge base
+            merge_base = repo.git.merge_base("master", branch)
+            # Use merge-tree with base, master, and branch
+            merge_output = repo.git.merge_tree(merge_base, "master", branch)
+            # If output contains conflict markers, there are conflicts
+            if "<<<<<<" in merge_output or "+<<<<<<" in merge_output:
+                result["merge_status"] = "conflict"
+            else:
+                result["merge_status"] = "clean"
+        except Exception:
+            result["merge_status"] = "unknown"
+
+        # Commit log (commits on branch not in master)
+        try:
+            log_output = repo.git.log("--oneline", f"master..{branch}")
+            if log_output.strip():
+                for line in log_output.strip().split("\n"):
+                    parts = line.split(" ", 1)
+                    sha = parts[0]
+                    msg = parts[1] if len(parts) > 1 else ""
+                    result["commit_log"].append((sha, msg))
+        except:
+            pass
+
+    except Exception:
+        pass
+
+    return result
+
+
 def get_tender_metadata(worktree_name: str) -> Optional[Dict]:
     """
     Gather metadata about a SHARD for tendering (ready for review).

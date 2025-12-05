@@ -2765,9 +2765,7 @@ def _ignite_start(ctx, brief_id, mantle, message):
     """
     base_url = get_base_url(ctx.obj.get("url"))
     agent_id = get_agent_id(ctx.obj.get("agent"), base_url)
-
-    if agent_id == "unknown":
-        raise click.ClickException("Must set SKEIN_AGENT_ID or use --agent flag to ignite")
+    # agent_id may be "unknown" - that's fine, identity comes at ready
 
     # Prepare response data
     response = {
@@ -2796,11 +2794,32 @@ def _ignite_start(ctx, brief_id, mantle, message):
     mantle_content = ""
     if mantle:
         try:
-            mantle_folio = make_request("GET", f"/folios/{mantle}", base_url, agent_id)
+            # If it looks like a folio ID (mantle-YYYYMMDD-xxxx), use directly
+            if mantle.startswith("mantle-"):
+                mantle_folio = make_request("GET", f"/folios/{mantle}", base_url, agent_id)
+            else:
+                # Search for mantle by name using the /search endpoint
+                search_response = make_request("GET", "/search", base_url, agent_id, params={"q": mantle, "type": "mantle"})
+                folios_data = search_response.get("results", {}).get("folios", {})
+                results = folios_data.get("items", [])
+                if not results:
+                    raise click.ClickException(f"No mantle found matching '{mantle}'")
+                # Prefer exact title match, otherwise take first result
+                mantle_folio = None
+                for r in results:
+                    if r.get('title', '').lower() == mantle.lower():
+                        mantle_folio = r
+                        break
+                if not mantle_folio:
+                    mantle_folio = results[0]
+                    if len(results) > 1:
+                        click.echo(f"Note: Multiple mantles match '{mantle}', using '{mantle_folio.get('title', mantle_folio.get('folio_id'))}'", err=True)
             mantle_content = mantle_folio.get('content', '')
             mission_parts.append(f"**From Mantle ({mantle}):**\n{mantle_content}")
             # Store folio data for naming context
             mantle_data = {"content": mantle_content}
+        except click.ClickException:
+            raise
         except Exception as e:
             raise click.ClickException(f"Failed to load mantle folio '{mantle}': {str(e)}")
 
@@ -3226,22 +3245,19 @@ def complete(ctx, summary):
     else:
         summary_id = None
 
-    # Update status to retired (if server supports it)
+    # Update status to retired
     try:
-        # Try to update via re-registration with new status
         update_data = {
-            "agent_id": agent_id,
-            "name": name,
             "status": "retired",
             "metadata": {
                 "torched_at": datetime.now().isoformat(),
                 "work_summary": final_work
             }
         }
-        make_request("POST", "/roster/register", base_url, agent_id, json=update_data)
-    except:
-        # If status update not supported, that's okay - we can still complete
-        pass
+        make_request("PATCH", f"/roster/{agent_id}", base_url, agent_id, json=update_data)
+    except Exception as e:
+        # Log but don't fail - agent can still complete even if status update fails
+        click.echo(f"Warning: Could not update roster status: {e}", err=True)
 
     click.echo("="*60)
     click.echo("RETIRED")
@@ -3822,13 +3838,23 @@ def shard_list(ctx, active, filter_agent, output_json):
             if not shards:
                 click.echo("No SHARDs found")
             else:
-                click.echo(f"Found {len(shards)} SHARD(s):\n")
                 for shard in shards:
-                    click.echo(f"  {shard['worktree_name']}")
-                    click.echo(f"    Agent: {shard['agent_id']}")
-                    click.echo(f"    Branch: {shard['branch_name']}")
-                    click.echo(f"    Path: {shard['worktree_path']}")
-                    click.echo()
+                    git_info = shard_worktree.get_shard_git_info(shard['worktree_name'])
+
+                    # Build compact status line
+                    name = shard['worktree_name']
+                    commits = git_info.get('commits_ahead', 0)
+                    working = git_info.get('working_tree', 'unknown')
+                    merge = git_info.get('merge_status', 'unknown')
+
+                    # Format: name  +N  status  [conflict]
+                    parts = [f"{name:<35}"]
+                    parts.append(f"+{commits:<3}")
+                    parts.append(working)
+                    if merge == "conflict":
+                        parts.append("conflict")
+
+                    click.echo("  ".join(parts))
 
     except shard_worktree.ShardError as e:
         raise click.ClickException(str(e))
@@ -3836,15 +3862,15 @@ def shard_list(ctx, active, filter_agent, output_json):
         raise click.ClickException(f"Failed to list SHARDs: {e}")
 
 
-@shard.command("status")
+@shard.command("show")
 @click.argument("worktree_name")
 @click.pass_context
-def shard_status(ctx, worktree_name):
+def shard_show(ctx, worktree_name):
     """
-    Get status of a specific SHARD.
+    Show details of a specific SHARD.
 
     Example:
-        skein shard status opus-security-architect-20251109-001
+        skein shard show opus-security-architect-20251109-001
     """
     # Import shard_worktree from current project
     shard_worktree = get_shard_worktree_module()
@@ -3855,17 +3881,41 @@ def shard_status(ctx, worktree_name):
         if not shard:
             raise click.ClickException(f"SHARD not found: {worktree_name}")
 
-        click.echo(f"SHARD: {shard['worktree_name']}")
-        click.echo(f"  Agent: {shard['agent_id']}")
-        click.echo(f"  Branch: {shard['branch_name']}")
-        click.echo(f"  Path: {shard['worktree_path']}")
-        click.echo(f"  Date: {shard['date']}")
-        click.echo(f"  Sequence: {shard['seq']}")
+        git_info = shard_worktree.get_shard_git_info(worktree_name)
+
+        # Header: name (branch)
+        click.echo(f"{shard['worktree_name']} ({shard['branch_name']})")
+        click.echo()
+
+        # Commit log
+        if git_info.get("commit_log"):
+            for sha, msg in git_info["commit_log"]:
+                click.echo(f"{sha} {msg}")
+            click.echo()
+
+        # Status line
+        working = git_info.get("working_tree", "unknown")
+        merge = git_info.get("merge_status", "unknown")
+
+        status_parts = []
+        if working == "dirty":
+            status_parts.append("Uncommitted changes")
+        else:
+            status_parts.append("Working tree clean")
+
+        if merge == "conflict":
+            status_parts.append("Has conflicts")
+        elif merge == "clean":
+            status_parts.append("Merges clean")
+
+        click.echo(", ".join(status_parts))
+
+        # TODO: Show linked tender if one exists
 
     except shard_worktree.ShardError as e:
         raise click.ClickException(str(e))
     except Exception as e:
-        raise click.ClickException(f"Failed to get SHARD status: {e}")
+        raise click.ClickException(f"Failed to show SHARD: {e}")
 
 
 @shard.command("cleanup")

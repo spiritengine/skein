@@ -5,10 +5,11 @@ SKEIN FastAPI routes.
 import logging
 import base64
 from datetime import datetime
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 from pathlib import Path
 from fastapi import APIRouter, HTTPException, Query, Header, Depends
 from fastapi.responses import FileResponse
+from pydantic import BaseModel
 
 from .models import (
     AgentRegistration, AgentInfo,
@@ -133,14 +134,20 @@ async def get_agent(agent_id: str, store: JSONStore = Depends(get_project_store)
     return agent
 
 
+class AgentUpdate(BaseModel):
+    """Model for updating agent fields."""
+    status: Optional[str] = None
+    name: Optional[str] = None
+    agent_type: Optional[str] = None
+    description: Optional[str] = None
+    capabilities: Optional[List[str]] = None
+    metadata: Optional[Dict[str, Any]] = None
+
+
 @router.patch("/roster/{agent_id}")
 async def update_agent(
     agent_id: str,
-    status: Optional[str] = None,
-    name: Optional[str] = None,
-    agent_type: Optional[str] = None,
-    description: Optional[str] = None,
-    capabilities: Optional[List[str]] = None,
+    update: AgentUpdate,
     store: JSONStore = Depends(get_project_store)
 ):
     """Update agent registration."""
@@ -148,16 +155,19 @@ async def update_agent(
     if not agent:
         raise HTTPException(status_code=404, detail="Agent not found")
 
-    if status:
-        agent.status = status
-    if name:
-        agent.name = name
-    if agent_type:
-        agent.agent_type = agent_type
-    if description:
-        agent.description = description
-    if capabilities:
-        agent.capabilities = capabilities
+    if update.status is not None:
+        agent.status = update.status
+    if update.name is not None:
+        agent.name = update.name
+    if update.agent_type is not None:
+        agent.agent_type = update.agent_type
+    if update.description is not None:
+        agent.description = update.description
+    if update.capabilities is not None:
+        agent.capabilities = update.capabilities
+    if update.metadata is not None:
+        # Merge metadata rather than replace
+        agent.metadata.update(update.metadata)
 
     store.save_agent(agent)
     return {"success": True, "agent": agent}
