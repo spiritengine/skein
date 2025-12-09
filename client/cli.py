@@ -4378,6 +4378,53 @@ def shard_tender(ctx, worktree_name, site, reviewer, summary, status, confidence
         raise click.ClickException(f"Failed to create tender folio: {e}")
 
 
+# Web UI Command
+@cli.command()
+@click.option("--host", default="127.0.0.1", help="Host to bind to (default: 127.0.0.1)")
+@click.option("--port", "-p", default=8002, type=int, help="Port to listen on (default: 8002)")
+@click.option("--open", "open_browser", is_flag=True, help="Open browser after starting")
+def web(host, port, open_browser):
+    """Launch the SKEIN web UI.
+
+    Opens a browser-based interface for viewing sites, folios, and activity.
+
+    Example:
+        skein web              # Start on localhost:8002
+        skein web --port 8080  # Start on custom port
+        skein web --open       # Start and open browser
+    """
+    try:
+        from skein.web import run_server
+    except ImportError as e:
+        raise click.ClickException(f"Web UI not available: {e}")
+
+    click.echo("=" * 60)
+    click.echo("SKEIN Web UI")
+    click.echo("=" * 60)
+    click.echo(f"Server: http://{host}:{port}")
+    click.echo(f"Project: {os.environ.get('SKEIN_PROJECT', 'default')}")
+    click.echo("=" * 60)
+    click.echo("Press Ctrl+C to stop")
+    click.echo()
+
+    if open_browser:
+        import webbrowser
+        webbrowser.open(f"http://{host}:{port}")
+
+    run_server(host=host, port=port)
+
+
+# Alias: 'skein ui' as shortcut for 'skein web'
+@cli.command(name="ui", hidden=True)
+@click.option("--host", default="127.0.0.1", help="Host to bind to")
+@click.option("--port", "-p", default=8002, type=int, help="Port to listen on")
+@click.option("--open", "open_browser", is_flag=True, help="Open browser")
+@click.pass_context
+def ui_shortcut(ctx, host, port, open_browser):
+    """Shortcut for 'skein web'."""
+    ctx.invoke(web, host=host, port=port, open_browser=open_browser)
+
+
 # Alias for common usage
 @cli.command(name="shards", hidden=True)
 @click.option("--active", is_flag=True, help="Show only active SHARDs")

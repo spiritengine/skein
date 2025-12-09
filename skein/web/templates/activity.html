@@ -1,0 +1,76 @@
+{% extends "base.html" %}
+
+{% block title %}Activity - SKEIN{% endblock %}
+
+{% block content %}
+<h1>Activity Log</h1>
+
+<div class="grid grid-2">
+    <div class="card">
+        <h2 class="card-title">Recent Folios</h2>
+
+        {% if folios %}
+        <div id="folio-list">
+            {% for folio in folios %}
+            <div class="folio-item">
+                <div class="folio-info">
+                    <div class="folio-title">
+                        <a href="/folios/{{ folio.folio_id }}">{{ folio.title }}</a>
+                    </div>
+                    <div class="folio-meta">
+                        <a href="/sites/{{ folio.site_id }}">{{ folio.site_id }}</a> |
+                        {{ folio.created_by }} |
+                        {{ folio.created_at.strftime('%Y-%m-%d %H:%M') }}
+                    </div>
+                </div>
+                <div class="folio-badges">
+                    <span class="badge badge-{{ folio.type }}">{{ folio.type }}</span>
+                    <span class="badge badge-{{ folio.status }}">{{ folio.status }}</span>
+                </div>
+            </div>
+            {% endfor %}
+        </div>
+        {% else %}
+        <div class="empty-state">
+            <p>No folios yet</p>
+        </div>
+        {% endif %}
+    </div>
+
+    <div class="card">
+        <h2 class="card-title">Recent Threads</h2>
+
+        {% if threads %}
+        <div class="timeline">
+            {% for thread in threads[:30] %}
+            <div class="timeline-item">
+                <div class="timeline-time">{{ thread.created_at.strftime('%Y-%m-%d %H:%M') }}</div>
+                <div class="timeline-content">
+                    <span class="badge badge-type">{{ thread.type }}</span>
+                    {% if thread.weaver %}
+                    <span style="color: var(--text-secondary); font-size: 0.875rem;">by {{ thread.weaver }}</span>
+                    {% endif %}
+                    {% if thread.content %}
+                    <div style="margin-top: 0.25rem; font-size: 0.875rem;">
+                        {{ thread.content[:100] }}{% if thread.content|length > 100 %}...{% endif %}
+                    </div>
+                    {% endif %}
+                    <div style="font-size: 0.75rem; color: var(--text-secondary); margin-top: 0.25rem;">
+                        {{ thread.from_id }} -> {{ thread.to_id }}
+                    </div>
+                </div>
+            </div>
+            {% endfor %}
+        </div>
+        {% else %}
+        <div class="empty-state">
+            <p>No threads yet</p>
+        </div>
+        {% endif %}
+    </div>
+</div>
+
+<div style="margin-top: 1rem; font-size: 0.875rem; color: var(--text-secondary);">
+    Showing last {{ limit }} entries
+</div>
+{% endblock %}

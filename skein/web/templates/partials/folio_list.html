@@ -1,0 +1,29 @@
+{% if folios %}
+{% for folio in folios[:10] %}
+<div class="folio-item">
+    <div class="folio-info">
+        <div class="folio-title">
+            <a href="/folios/{{ folio.folio_id }}">{{ folio.title }}</a>
+        </div>
+        <div class="folio-meta">
+            <a href="/sites/{{ folio.site_id }}">{{ folio.site_id }}</a> |
+            {{ folio.created_by }} |
+            {{ folio.created_at.strftime('%Y-%m-%d %H:%M') }}
+        </div>
+    </div>
+    <div class="folio-badges">
+        <span class="badge badge-{{ folio.type }}">{{ folio.type }}</span>
+        <span class="badge badge-{{ folio.status }}">{{ folio.status }}</span>
+    </div>
+</div>
+{% endfor %}
+{% if folios|length > 10 %}
+<div style="padding: 1rem; text-align: center; color: var(--text-secondary);">
+    <a href="/activity">View all {{ folios|length }} folios</a>
+</div>
+{% endif %}
+{% else %}
+<div class="empty-state" style="padding: 2rem;">
+    <p>No recent activity</p>
+</div>
+{% endif %}

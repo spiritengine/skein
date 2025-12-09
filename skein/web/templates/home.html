@@ -1,0 +1,110 @@
+{% extends "base.html" %}
+
+{% block title %}SKEIN - Dashboard{% endblock %}
+
+{% block content %}
+<h1>Dashboard</h1>
+
+<div class="stats">
+    <div class="stat">
+        <div class="stat-value">{{ sites|length }}</div>
+        <div class="stat-label">Sites</div>
+    </div>
+    <div class="stat">
+        <div class="stat-value">{{ total_folios }}</div>
+        <div class="stat-label">Folios</div>
+    </div>
+    <div class="stat">
+        <div class="stat-value">{{ active_agents }}</div>
+        <div class="stat-label">Active Agents</div>
+    </div>
+</div>
+
+<div class="grid grid-2">
+    <div class="card">
+        <div class="card-header">
+            <h2 class="card-title">Sites</h2>
+            <a href="/sites" class="btn btn-secondary">View All</a>
+        </div>
+
+        {% if sites %}
+        <table>
+            <thead>
+                <tr>
+                    <th>Site</th>
+                    <th>Folios</th>
+                    <th>Purpose</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for site in sites[:5] %}
+                <tr>
+                    <td><a href="/sites/{{ site.site_id }}">{{ site.site_id }}</a></td>
+                    <td>{{ site_counts.get(site.site_id, {}).get('total', 0) }}</td>
+                    <td>{{ site.purpose[:50] }}{% if site.purpose|length > 50 %}...{% endif %}</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+        {% else %}
+        <div class="empty-state">
+            <div class="empty-state-icon">No sites yet</div>
+            <p>Create a site with: skein site create SITE_ID "description"</p>
+        </div>
+        {% endif %}
+    </div>
+
+    <div class="card">
+        <div class="card-header">
+            <h2 class="card-title">Recent Activity</h2>
+            <a href="/activity" class="btn btn-secondary">View All</a>
+        </div>
+
+        <div id="recent-activity" hx-get="/htmx/folios" hx-trigger="load" hx-swap="innerHTML">
+            <div class="loading"></div> Loading...
+        </div>
+    </div>
+</div>
+
+<div class="card">
+    <div class="card-header">
+        <h2 class="card-title">Folio Types by Site</h2>
+    </div>
+
+    {% if sites %}
+    <table>
+        <thead>
+            <tr>
+                <th>Site</th>
+                <th>Brief</th>
+                <th>Issue</th>
+                <th>Friction</th>
+                <th>Finding</th>
+                <th>Notion</th>
+                <th>Other</th>
+                <th>Total</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for site in sites %}
+            {% set counts = site_counts.get(site.site_id, {}).get('by_type', {}) %}
+            <tr>
+                <td><a href="/sites/{{ site.site_id }}">{{ site.site_id }}</a></td>
+                <td>{{ counts.get('brief', 0) }}</td>
+                <td>{{ counts.get('issue', 0) }}</td>
+                <td>{{ counts.get('friction', 0) }}</td>
+                <td>{{ counts.get('finding', 0) }}</td>
+                <td>{{ counts.get('notion', 0) }}</td>
+                <td>{{ counts.get('summary', 0) + counts.get('tender', 0) + counts.get('playbook', 0) + counts.get('mantle', 0) + counts.get('writ', 0) + counts.get('plan', 0) }}</td>
+                <td><strong>{{ site_counts.get(site.site_id, {}).get('total', 0) }}</strong></td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <div class="empty-state">
+        <p>No sites to display</p>
+    </div>
+    {% endif %}
+</div>
+{% endblock %}

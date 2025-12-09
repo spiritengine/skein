@@ -1,0 +1,22 @@
+{% if sites %}
+<table>
+    <thead>
+        <tr>
+            <th>Site</th>
+            <th>Folios</th>
+        </tr>
+    </thead>
+    <tbody>
+        {% for site in sites %}
+        <tr>
+            <td><a href="/sites/{{ site.site_id }}">{{ site.site_id }}</a></td>
+            <td>{{ site_stats.get(site.site_id, {}).get('total', 0) }}</td>
+        </tr>
+        {% endfor %}
+    </tbody>
+</table>
+{% else %}
+<div class="empty-state" style="padding: 2rem;">
+    <p>No sites yet</p>
+</div>
+{% endif %}
