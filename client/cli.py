@@ -3262,20 +3262,31 @@ def _torch_start(ctx):
 
 @cli.command("complete")
 @click.option("--summary", help="Optional retirement summary")
+@click.option("--yield-status", "yield_status", type=click.Choice(["complete", "partial", "blocked"]),
+              help="Yield status for chain (auto-detected from SKEIN_CHAIN_ID)")
+@click.option("--yield-outcome", "yield_outcome", help="What was accomplished (for yield)")
+@click.option("--yield-notes", "yield_notes", help="Notes for next agent in chain")
 @click.pass_context
-def complete(ctx, summary):
+def complete(ctx, summary, yield_status, yield_outcome, yield_notes):
     """
     Complete torch - Retire from roster.
 
     Usage:
         skein complete
         skein complete --summary "Completed auth audit. 3 issues filed."
+
+    If SKEIN_CHAIN_ID is set, will prompt for yield sign-off:
+        skein complete --yield-status complete --yield-outcome "Fixed the bug"
     """
     base_url = get_base_url(ctx.obj.get("url"))
     agent_id = get_agent_id(ctx.obj.get("agent"), base_url)
 
     if agent_id == "unknown":
         raise click.ClickException("Must set SKEIN_AGENT_ID or use --agent flag")
+
+    # Check if we're in a chain (yield required)
+    chain_id = os.environ.get("SKEIN_CHAIN_ID")
+    task_id = os.environ.get("SKEIN_CHAIN_TASK")
 
     # Get roster info
     try:
@@ -3285,9 +3296,10 @@ def complete(ctx, summary):
         raise click.ClickException(f"Agent {agent_id} not found in roster")
 
     # Get final work summary
+    agent_folios = []
     try:
         all_folios = make_request("GET", "/folios", base_url, agent_id)
-        agent_folios = [f for f in all_folios if f.get("author") == agent_id or f.get("weaver") == agent_id]
+        agent_folios = [f for f in all_folios if f.get("created_by") == agent_id]
 
         final_work = {
             "issues": len([f for f in agent_folios if f.get("type") == "issue"]),
@@ -3296,16 +3308,97 @@ def complete(ctx, summary):
             "briefs": len([f for f in agent_folios if f.get("type") == "brief"]),
             "notions": len([f for f in agent_folios if f.get("type") == "notion"]),
             "frictions": len([f for f in agent_folios if f.get("type") == "friction"]),
-            "summaries": len([f for f in agent_folios if f.get("type") == "summary"])
+            "summaries": len([f for f in agent_folios if f.get("type") == "summary"]),
+            "tenders": len([f for f in agent_folios if f.get("type") == "tender"])
         }
     except:
         final_work = {}
 
+    # If in a chain, handle yield
+    yield_stored = False
+    if chain_id:
+        click.echo("="*60)
+        click.echo("YIELD - Chain Data Package")
+        click.echo("="*60)
+        click.echo()
+        click.echo(f"Chain: {chain_id}")
+        if task_id:
+            click.echo(f"Task: {task_id}")
+        click.echo()
+
+        # Show artifacts filed during session
+        artifact_ids = [f.get("folio_id") for f in agent_folios if f.get("folio_id")]
+        tender_ids = [f.get("folio_id") for f in agent_folios if f.get("type") == "tender"]
+
+        if artifact_ids:
+            click.echo("Artifacts filed this session:")
+            for folio in agent_folios[:10]:
+                folio_id = folio.get("folio_id", "")
+                folio_type = folio.get("type", "")
+                title = folio.get("title", "")[:40]
+                click.echo(f"  • {folio_id} ({folio_type}) - {title}")
+            if len(agent_folios) > 10:
+                click.echo(f"  ... and {len(agent_folios) - 10} more")
+            click.echo()
+
+        # Determine yield status
+        if not yield_status:
+            # Auto-detect: if tender exists, likely complete
+            if tender_ids:
+                yield_status = "complete"
+            else:
+                # Prompt for status
+                click.echo("Yield status required. Options:")
+                click.echo("  complete - Work finished successfully")
+                click.echo("  partial  - Some work done, more needed")
+                click.echo("  blocked  - Cannot proceed, needs intervention")
+                click.echo()
+                yield_status = click.prompt(
+                    "Status",
+                    type=click.Choice(["complete", "partial", "blocked"]),
+                    default="complete"
+                )
+
+        # Get outcome if not provided
+        if not yield_outcome:
+            yield_outcome = click.prompt(
+                "Outcome (what was accomplished)",
+                default=f"Completed task. Filed {len(artifact_ids)} artifact(s)."
+            )
+
+        # Build yield package
+        yield_data = {
+            "chain_id": chain_id,
+            "task_id": task_id or "unknown",
+            "yield_data": {
+                "status": yield_status,
+                "outcome": yield_outcome,
+                "artifacts": artifact_ids,
+                "notes": yield_notes
+            }
+        }
+
+        # Add tender_id if we have one
+        if tender_ids:
+            yield_data["tender_id"] = tender_ids[0]  # Primary tender
+
+        # Store the yield
+        try:
+            result = make_request("POST", "/yields", base_url, agent_id, json=yield_data)
+            sack_id = result.get("sack_id")
+            click.echo(f"✓ Yield stored: {sack_id}")
+            click.echo()
+            yield_stored = True
+        except Exception as e:
+            click.echo(f"Warning: Could not store yield: {e}", err=True)
+            click.echo()
+
     # Post summary if provided
+    summary_id = None
     if summary:
         # Find a site to post to (use most recent site they posted to)
         try:
-            recent_sites = list(set([f.get("site") for f in agent_folios if f.get("site")]))
+            recent_sites = list(set([f.get("site_id") for f in agent_folios if f.get("site_id")]))
             if recent_sites:
                 site_id = recent_sites[-1]
                 summary_data = {
@@ -3317,12 +3410,8 @@ def complete(ctx, summary):
                 }
                 result = make_request("POST", "/summary", base_url, agent_id, json=summary_data)
                 summary_id = result.get("folio_id")
-            else:
-                summary_id = None
         except:
-            summary_id = None
-    else:
-        summary_id = None
+            pass
 
     # Update status to retired
     try:
@@ -3330,7 +3419,9 @@ def complete(ctx, summary):
             "status": "retired",
             "metadata": {
                 "torched_at": datetime.now().isoformat(),
-                "work_summary": final_work
+                "work_summary": final_work,
+                "chain_id": chain_id,
+                "yield_stored": yield_stored
             }
         }
         make_request("PATCH", f"/roster/{agent_id}", base_url, agent_id, json=update_data)
@@ -4381,7 +4472,7 @@ def shard_tender(ctx, worktree_name, site, reviewer, summary, status, confidence
 # Web UI Command
 @cli.command()
 @click.option("--host", default="127.0.0.1", help="Host to bind to (default: 127.0.0.1)")
-@click.option("--port", "-p", default=8002, type=int, help="Port to listen on (default: 8002)")
+@click.option("--port", "-p", default=8003, type=int, help="Port to listen on (default: 8003)")
 @click.option("--open", "open_browser", is_flag=True, help="Open browser after starting")
 def web(host, port, open_browser):
     """Launch the SKEIN web UI.
@@ -4389,7 +4480,7 @@ def web(host, port, open_browser):
     Opens a browser-based interface for viewing sites, folios, and activity.
 
     Example:
-        skein web              # Start on localhost:8002
+        skein web              # Start on localhost:8003
         skein web --port 8080  # Start on custom port
         skein web --open       # Start and open browser
     """
@@ -4397,6 +4488,15 @@ def web(host, port, open_browser):
         from skein.web import run_server
     except ImportError as e:
         raise click.ClickException(f"Web UI not available: {e}")
+
+    # Check if port is available before proceeding
+    import socket
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        sock.bind((host, port))
+        sock.close()
+    except OSError:
+        raise click.ClickException(f"Port {port} is already in use. Try a different port with --port")
 
     click.echo("=" * 60)
     click.echo("SKEIN Web UI")
@@ -4417,7 +4517,7 @@ def web(host, port, open_browser):
 # Alias: 'skein ui' as shortcut for 'skein web'
 @cli.command(name="ui", hidden=True)
 @click.option("--host", default="127.0.0.1", help="Host to bind to")
-@click.option("--port", "-p", default=8002, type=int, help="Port to listen on")
+@click.option("--port", "-p", default=8003, type=int, help="Port to listen on")
 @click.option("--open", "open_browser", is_flag=True, help="Open browser")
 @click.pass_context
 def ui_shortcut(ctx, host, port, open_browser):

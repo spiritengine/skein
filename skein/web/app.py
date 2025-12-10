@@ -323,7 +323,7 @@ def create_app() -> FastAPI:
     return app
 
 
-def run_server(host: str = "127.0.0.1", port: int = 8002, reload: bool = False):
+def run_server(host: str = "127.0.0.1", port: int = 8003, reload: bool = False):
     """Run the SKEIN web server."""
     app = create_app()
     logger.info(f"Starting SKEIN Web UI on http://{host}:{port}")
