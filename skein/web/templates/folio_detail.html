@@ -20,6 +20,12 @@
         {% if folio.assigned_to %}
         <span>assigned to {{ folio.assigned_to }}</span>
         {% endif %}
+        {% if folio.target_agent %}
+        <div>
+            <span style="color: var(--text-secondary);">Target agent:</span>
+            <span>{{ folio.target_agent }}</span>
+        </div>
+        {% endif %}
     </div>
 </section>
 

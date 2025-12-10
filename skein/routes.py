@@ -416,7 +416,6 @@ async def post_to_site(
         status="open",  # Temporary: will be removed after migration
         assigned_to=None,  # Temporary: will be removed after migration
         target_agent=folio_create.target_agent,
-        successor_name=folio_create.successor_name,
         omlet=folio_create.omlet,
         archived=False,
         metadata=folio_create.metadata

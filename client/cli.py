@@ -920,9 +920,8 @@ def brief():
 @click.argument("content")
 @click.option("--title", required=True, help="Brief title (required)")
 @click.option("--target", help="Target agent")
-@click.option("--successor-name", help="Suggested name for successor agent")
 @click.pass_context
-def brief_create(ctx, site_id, content, title, target, successor_name):
+def brief_create(ctx, site_id, content, title, target):
     """Create a handoff brief."""
     validate_positional_args(site_id, content, command_name="brief create")
     base_url = get_base_url(ctx.obj.get("url"))
@@ -937,15 +936,10 @@ def brief_create(ctx, site_id, content, title, target, successor_name):
         "metadata": {"questions_enabled": True}
     }
 
-    if successor_name:
-        data["successor_name"] = successor_name
-
     result = make_request("POST", "/folios", base_url, agent_id, json=data)
     brief_id = result["folio_id"]
 
     click.echo(f"Created brief: {brief_id}")
-    if successor_name:
-        click.echo(f"Successor name: {successor_name}")
     click.echo(f"\nHANDOFF: {brief_id}")
 
 
@@ -1072,22 +1066,6 @@ def ignite(ctx, brief_id):
 
     predecessor = brief_data.get("created_by")
     site_id = brief_data.get("site_id")
-    successor_name = brief_data.get("successor_name")
-
-    # Auto-register with suggested name if provided
-    if successor_name:
-        try:
-            reg_data = {
-                "agent_id": agent_id,
-                "name": successor_name,
-                "capabilities": [],
-                "metadata": {}
-            }
-            make_request("POST", "/roster/register", base_url, agent_id, json=reg_data)
-            click.echo(f"✓ Registered as: {successor_name}\n")
-        except:
-            # Registration might fail if already registered, that's ok
-            pass
 
     # Create succession thread
     succession_data = {
@@ -1276,10 +1254,6 @@ def find(ctx, pattern, site, type, status, assigned, since, sort, limit, show_al
 
                 click.echo(f"    {f['folio_id']} {status_str} {date_str}")
                 click.echo(f"      {f.get('title', 'No title')[:80]}{'...' if len(f.get('title', '')) > 80 else ''}")
-
-                # Show successor_name if present (useful for briefs)
-                if f.get('successor_name'):
-                    click.echo(f"      Successor: {f['successor_name']}")
 
                 # Show content preview
                 content = f.get('content', '')
@@ -2237,10 +2211,6 @@ def survey(ctx, site_ids, type, status, output_json):
 
                     click.echo(f"    {f['folio_id']} {status_str} {date_str}")
                     click.echo(f"      {f['title'][:80]}{'...' if len(f['title']) > 80 else ''}")
-
-                    # Show successor_name if present (useful for briefs)
-                    if f.get('successor_name'):
-                        click.echo(f"      Successor: {f['successor_name']}")
 
                     # Show content preview (first 100 chars, single line)
                     content = f.get('content', '')

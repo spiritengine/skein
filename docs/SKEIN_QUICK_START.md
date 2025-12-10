@@ -434,7 +434,6 @@ skein --agent cc-new-session ignite brief-20251107-x9k2
 
 **What resume does:**
 - Fetches brief content
-- Auto-registers with `successor_name` if set (e.g., "Connection Pool Optimizer")
 - Creates succession thread so predecessor knows you took over
 - Shows all threaded issues/findings (critical context for YOUR work)
 - Provides next-step commands
