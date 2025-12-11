@@ -10,7 +10,7 @@ import os
 import json
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 try:
     import git
@@ -546,6 +546,164 @@ def get_tender_metadata(worktree_name: str) -> Optional[Dict]:
         metadata["error"] = str(e)
 
     return metadata
+
+
+def get_shard_diff(worktree_name: str) -> Optional[str]:
+    """
+    Get diff between master and shard branch.
+
+    Args:
+        worktree_name: Worktree directory name (e.g., 'opus-security-architect-20251109-001')
+
+    Returns:
+        Git diff output as string, or None if no changes or shard not found
+    """
+    shard_info = get_shard_status(worktree_name)
+    if not shard_info:
+        return None
+
+    try:
+        repo = _get_repo()
+        branch = shard_info["branch_name"]
+
+        # Get diff between master and shard branch
+        diff_output = repo.git.diff(f"master..{branch}")
+        return diff_output if diff_output.strip() else None
+
+    except Exception as e:
+        raise ShardError(f"Failed to get diff: {e}")
+
+
+def merge_shard(worktree_name: str) -> Dict[str, Any]:
+    """
+    Merge shard branch into master and cleanup worktree.
+
+    Checks for uncommitted changes and merge conflicts before proceeding.
+    If clean: checks out master, merges branch with --no-ff, cleans up worktree and branch.
+
+    Args:
+        worktree_name: Worktree directory name (e.g., 'opus-security-architect-20251109-001')
+
+    Returns:
+        Dict with:
+            - success: bool
+            - message: str
+            - uncommitted: list of uncommitted files (if dirty)
+            - conflicts: list of conflicting files (if conflicts)
+    """
+    shard_info = get_shard_status(worktree_name)
+    if not shard_info:
+        raise ShardError(f"SHARD not found: {worktree_name}")
+
+    worktree_path = Path(shard_info["worktree_path"])
+    branch_name = shard_info["branch_name"]
+
+    # Check if current working directory is inside the worktree being merged
+    try:
+        current_dir = Path.cwd()
+        if worktree_path in current_dir.parents or current_dir == worktree_path:
+            raise ShardError(
+                f"Cannot merge from inside the worktree.\n"
+                f"Your shell is currently in: {current_dir}\n"
+                f"Please change directory first: cd {PROJECT_ROOT}"
+            )
+    except OSError:
+        pass
+
+    repo = _get_repo()
+
+    # Check for uncommitted changes in the worktree
+    git_info = get_shard_git_info(worktree_name)
+    if git_info.get("working_tree") == "dirty":
+        uncommitted = git_info.get("uncommitted", [])
+        return {
+            "success": False,
+            "message": "Cannot merge: worktree has uncommitted changes",
+            "uncommitted": uncommitted,
+            "conflicts": []
+        }
+
+    # Check for merge conflicts
+    if git_info.get("merge_status") == "conflict":
+        # Get list of conflicting files
+        try:
+            merge_base = repo.git.merge_base("master", branch_name)
+            merge_output = repo.git.merge_tree(merge_base, "master", branch_name)
+            # Parse merge-tree output to find conflicting files
+            # Format: "changed in both\n  base   ... filename\n  our    ...\n  their  ...\n@@ ... <<<<<<< .our"
+            conflict_files = []
+            lines = merge_output.split("\n")
+            i = 0
+            while i < len(lines):
+                line = lines[i]
+                # Look for "changed in both" sections which indicate conflicts
+                if line.strip() == "changed in both":
+                    # Next line has the base file info: "  base   100644 SHA filename"
+                    if i + 1 < len(lines):
+                        base_line = lines[i + 1]
+                        parts = base_line.split()
+                        if len(parts) >= 4:
+                            filename = " ".join(parts[3:])
+                            # Check if this section has actual conflict markers
+                            # Scan ahead for <<<<<<
+                            j = i + 4  # Skip base, our, their lines
+                            while j < len(lines) and not lines[j].startswith("changed in both") and not lines[j].startswith("merged"):
+                                if "<<<<<<<" in lines[j]:
+                                    if filename not in conflict_files:
+                                        conflict_files.append(filename)
+                                    break
+                                j += 1
+                i += 1
+        except:
+            conflict_files = ["(unable to determine conflicting files)"]
+
+        return {
+            "success": False,
+            "message": "Cannot merge: branch has conflicts with master",
+            "uncommitted": [],
+            "conflicts": conflict_files
+        }
+
+    # All checks passed - perform the merge
+    try:
+        # Store original branch to restore if needed
+        original_branch = repo.active_branch.name
+
+        # Checkout master
+        repo.git.checkout("master")
+
+        # Merge with --no-ff to preserve branch history
+        try:
+            repo.git.merge("--no-ff", branch_name, "-m", f"Merge {branch_name}")
+        except Exception as merge_error:
+            # If merge fails, abort and restore
+            try:
+                repo.git.merge("--abort")
+            except:
+                pass
+            repo.git.checkout(original_branch)
+            raise ShardError(f"Merge failed: {merge_error}")
+
+        # Cleanup worktree and branch
+        try:
+            cleanup_shard(worktree_name, keep_branch=False)
+        except ShardError as cleanup_error:
+            return {
+                "success": True,
+                "message": f"✓ Merged {branch_name} into master\n⚠ Warning: cleanup failed: {cleanup_error}",
+                "uncommitted": [],
+                "conflicts": []
+            }
+
+        return {
+            "success": True,
+            "message": f"✓ Merged {branch_name} into master and cleaned up worktree",
+            "uncommitted": [],
+            "conflicts": []
+        }
+
+    except Exception as e:
+        raise ShardError(f"Merge failed: {e}")
 
 
 def detect_shard_environment() -> Optional[Dict[str, str]]:
