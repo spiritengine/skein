@@ -161,3 +161,31 @@ class Screenshot(BaseModel):
     file_path: str
     file_size: int
     metadata: Dict[str, Any] = Field(default_factory=dict)
+
+
+# Yield/Sack Models (chain data passing)
+
+class YieldCreate(BaseModel):
+    """Data passed when an agent yields."""
+    status: str  # complete, blocked, failed, etc.
+    outcome: str = ""  # Summary of what was accomplished
+    artifacts: List[str] = Field(default_factory=list)  # File paths, folio IDs, etc.
+    notes: Optional[str] = None  # Additional context
+
+
+class Yield(BaseModel):
+    """A yield stored in the chain's sack."""
+    sack_id: str
+    chain_id: str
+    task_id: str
+    agent_id: Optional[str] = None
+    timestamp: datetime
+    status: str
+    outcome: str = ""
+    artifacts: List[str] = Field(default_factory=list)
+    notes: Optional[str] = None
+    duration_seconds: Optional[int] = None
+    tokens_used: Optional[int] = None
+    shard_path: Optional[str] = None
+    tender_id: Optional[str] = None
+    metadata: Dict[str, Any] = Field(default_factory=dict)

@@ -33,6 +33,16 @@ def generate_thread_id() -> str:
     return f"thread-{date_str}-{random_suffix}"
 
 
+def generate_yield_id() -> str:
+    """
+    Generate yield/sack ID with format: sack-{YYYYMMDD}-{4char}
+    Example: sack-20251210-x7m2
+    """
+    date_str = datetime.now().strftime("%Y%m%d")
+    random_suffix = ''.join(random.choices(string.ascii_lowercase + string.digits, k=4))
+    return f"sack-{date_str}-{random_suffix}"
+
+
 def parse_mentions(content: str) -> Set[str]:
     """
     Parse @mentions from content.

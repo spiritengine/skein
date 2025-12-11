@@ -289,12 +289,37 @@ TITLE_EXAMPLES = {
     'summary': 'e.g., "Completed OAuth integration" or "Session retrospective: agent coordination"',
 }
 
+# Patterns for shard/worktree IDs:
+# - 65af2039-20251205-001 (8-char hex prefix)
+# - bucket-1210-20251210-001 (name-based)
+# - eaa09237-20251207-154442 (hex-date-timestamp)
+SHARD_ID_PATTERN = re.compile(
+    r'^[a-f0-9]{8}-\d{8}-\d{3,6}:\s*|'  # 8-char hex: 65af2039-20251205-001:
+    r'^[a-z]+-\d{4}-\d{8}-\d{3}:\s*',    # name-based: bucket-1210-20251210-001:
+    re.IGNORECASE
+)
+
+# Folio type prefixes that are redundant (the type field already says this)
+TYPE_PREFIX_PATTERN = re.compile(
+    r'^(tender|brief|issue|finding|friction|notion|summary|writ|playbook|mantle|plan):\s*',
+    re.IGNORECASE
+)
+
+# Status markers often copied from content (handles markdown bold or plain)
+STATUS_MARKER_PATTERN = re.compile(r'(\*\*)?Status:(\*\*)?\s*\w+\.?\s*', re.IGNORECASE)
+
 
 def validate_folio_title(title: str, folio_type: str) -> str:
     """
     Validate and clean folio title. Returns cleaned title or raises HTTPException.
 
     Poka-yoke design: make it hard to create bad titles.
+
+    Cleans:
+    - Markdown cruft (headers, bold markers)
+    - Shard/worktree IDs (e.g., "65af2039-20251205-001:")
+    - Redundant type prefixes (e.g., "Tender:")
+    - Status markers (e.g., "**Status:** complete")
     """
     # Must have a title
     if not title or not title.strip():
@@ -308,8 +333,22 @@ def validate_folio_title(title: str, folio_type: str) -> str:
 
     # Strip markdown cruft
     title = re.sub(r'^#+\s*', '', title)  # Leading headers
-    title = re.sub(r'^\*\*|^__', '', title)  # Leading bold
-    title = re.sub(r'\*\*$|__$', '', title)  # Trailing bold
+    title = re.sub(r'^\*\*(.+?)\*\*', r'\1', title)  # Bold wrapper (keep content)
+    title = re.sub(r'^__(.+?)__', r'\1', title)  # Underscore bold wrapper
+    title = title.strip()
+
+    # Strip status markers (must be before stripping bold, uses markdown)
+    title = STATUS_MARKER_PATTERN.sub('', title)
+
+    # Strip redundant type prefixes FIRST (they come before shard IDs)
+    title = TYPE_PREFIX_PATTERN.sub('', title)
+
+    # Strip shard/worktree IDs from start (after type prefix is removed)
+    title = SHARD_ID_PATTERN.sub('', title)
+
+    # Clean up any remaining type prefixes (in case of "## Tender: shard-id: ...")
+    title = TYPE_PREFIX_PATTERN.sub('', title)
+
     title = title.strip()
 
     # Check for generic/lazy titles
