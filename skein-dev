@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+# skein-dev - Run SKEIN CLI from the local worktree code
+#
+# This wrapper enables testing CLI changes in shard worktrees without
+# needing to reinstall the package. It uses `python -m client.cli` which
+# imports from the current directory rather than the system-installed package.
+#
+# Usage:
+#   ./skein-dev --help               # Run from worktree root
+#   ./skein-dev folio issue-123      # Same commands as `skein`
+#
+# For shard agents: If your task involves CLI changes, use this script
+# instead of `skein` to test your modifications.
+
+set -e
+
+# Find the worktree root (where pyproject.toml lives)
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# If called from PATH, find the nearest pyproject.toml
+if [[ -f "$SCRIPT_DIR/pyproject.toml" ]]; then
+    WORKTREE_ROOT="$SCRIPT_DIR"
+elif [[ -f "./pyproject.toml" ]]; then
+    WORKTREE_ROOT="$(pwd)"
+else
+    # Walk up to find worktree root
+    dir="$(pwd)"
+    while [[ "$dir" != "/" ]]; do
+        if [[ -f "$dir/pyproject.toml" ]] && [[ -d "$dir/client" ]]; then
+            WORKTREE_ROOT="$dir"
+            break
+        fi
+        dir="$(dirname "$dir")"
+    done
+
+    if [[ -z "$WORKTREE_ROOT" ]]; then
+        echo "Error: Could not find SKEIN worktree root (no pyproject.toml with client/ directory)" >&2
+        exit 1
+    fi
+fi
+
+# Run the CLI module from the worktree, ensuring local code takes precedence
+cd "$WORKTREE_ROOT"
+exec python -m client.cli "$@"

@@ -29,6 +29,30 @@ python tests/test_skein.py
 python tests/test_cli_validation.py
 ```
 
+## Testing CLI Changes in Shard Worktrees
+
+When working in a shard worktree (e.g., via Spindle's `permission="shard"`), the system-installed `skein` command uses the main repo's code, not your worktree's code. To test CLI changes locally:
+
+**Option 1: Use the skein-dev wrapper**
+```bash
+./skein-dev --help                    # Uses worktree's client/cli.py
+./skein-dev folio issue-123          # Same commands as skein
+```
+
+**Option 2: Use make cli-dev**
+```bash
+make cli-dev ARGS="--help"
+make cli-dev ARGS="folio issue-123"
+```
+
+**Option 3: Run Python module directly**
+```bash
+python -m client.cli --help
+python -m client.cli folio issue-123
+```
+
+All three methods import from the current directory, ensuring your worktree's code is used instead of the installed package.
+
 ## Pull Request Process
 
 1. Reference any related issues

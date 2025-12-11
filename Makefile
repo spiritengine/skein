@@ -57,6 +57,10 @@ test:  ## Run SKEIN tests
 	@echo "🧪 Running SKEIN tests..."
 	@pytest tests/ -v 2>/dev/null || echo "No tests found"
 
+cli-dev:  ## Run CLI from local worktree code (for testing shard changes)
+	@echo "🔧 Running local CLI..."
+	@python -m client.cli $(ARGS)
+
 health:  ## Check SKEIN server health
 	@echo "🏥 Checking SKEIN health..."
 	@curl -s http://localhost:8001/health || echo "❌ SKEIN server not responding"
