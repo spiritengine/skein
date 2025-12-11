@@ -4036,23 +4036,12 @@ def shard_list(ctx, active, filter_agent, output_json):
             if not shards:
                 click.echo("No SHARDs found")
             else:
-                for shard in shards:
-                    git_info = shard_worktree.get_shard_git_info(shard['worktree_name'])
+                for shard_item in shards:
+                    click.echo(shard_item['worktree_name'])
 
-                    # Build compact status line
-                    name = shard['worktree_name']
-                    commits = git_info.get('commits_ahead', 0)
-                    working = git_info.get('working_tree', 'unknown')
-                    merge = git_info.get('merge_status', 'unknown')
-
-                    # Format: name  +N  status  [conflict]
-                    parts = [f"{name:<35}"]
-                    parts.append(f"+{commits:<3}")
-                    parts.append(working)
-                    if merge == "conflict":
-                        parts.append("conflict")
-
-                    click.echo("  ".join(parts))
+            click.echo()
+            click.echo("Tip: Use `skein shard triage` for actionable overview with status and tender info")
+            return
 
     except shard_worktree.ShardError as e:
         raise click.ClickException(str(e))
@@ -4495,6 +4484,440 @@ def shard_tender(ctx, worktree_name, site, reviewer, summary, status, confidence
 
     except Exception as e:
         raise click.ClickException(f"Failed to create tender folio: {e}")
+
+
+@shard.command("triage")
+@click.option("--json", "output_json", is_flag=True, help="Output as JSON")
+@click.pass_context
+def shard_triage(ctx, output_json):
+    """
+    Triage all SHARDs - actionable overview with status, conflicts, and tender info.
+
+    Shows all shards with:
+    - Commit count and diffstat (+/-)
+    - Merge status (clean/CONFLICT/uncommitted)
+    - Tender confidence if exists
+
+    Example:
+        skein shard triage
+        skein shard triage --json
+    """
+    base_url = get_base_url(ctx.obj.get("url"))
+    agent_id = get_agent_id(ctx.obj.get("agent"), base_url)
+
+    shard_worktree = get_shard_worktree_module()
+
+    try:
+        shards = shard_worktree.list_shards(active_only=True)
+
+        if not shards:
+            click.echo("No SHARDs found")
+            return
+
+        # Fetch all tender folios to match against shards
+        tender_map = {}  # worktree_name -> tender info
+        try:
+            all_folios = make_request("GET", "/folios", base_url, agent_id, params={"type": "tender"})
+            for folio in all_folios:
+                metadata = folio.get("metadata", {})
+                if isinstance(metadata, str):
+                    try:
+                        import json as json_module
+                        metadata = json_module.loads(metadata)
+                    except:
+                        continue
+                wt_name = metadata.get("worktree_name")
+                if wt_name:
+                    tender_map[wt_name] = {
+                        "folio_id": folio.get("folio_id"),
+                        "confidence": metadata.get("confidence"),
+                        "status": metadata.get("status"),
+                        "summary": folio.get("title", "")[:50]
+                    }
+        except:
+            pass  # Tender lookup is optional
+
+        # Build triage data
+        triage_data = []
+        for shard_item in shards:
+            wt_name = shard_item["worktree_name"]
+            git_info = shard_worktree.get_shard_git_info(wt_name)
+
+            commits = git_info.get("commits_ahead", 0)
+            merge = git_info.get("merge_status", "unknown")
+            uncommitted = git_info.get("uncommitted", [])
+
+            # Parse diffstat for +/-
+            diffstat = git_info.get("diffstat", "")
+            insertions = 0
+            deletions = 0
+            if diffstat:
+                import re
+                ins_match = re.search(r"(\d+) insertions?\(\+\)", diffstat)
+                del_match = re.search(r"(\d+) deletions?\(-\)", diffstat)
+                if ins_match:
+                    insertions = int(ins_match.group(1))
+                if del_match:
+                    deletions = int(del_match.group(1))
+
+            # Determine status icon
+            if uncommitted:
+                status_icon = "○"  # uncommitted
+                status_text = "uncommitted"
+            elif merge == "conflict":
+                status_icon = "⚠"  # conflict
+                status_text = "CONFLICT"
+            elif commits == 0:
+                status_icon = "·"  # empty
+                status_text = "empty"
+            else:
+                status_icon = "✓"  # clean
+                status_text = "clean"
+
+            # Get tender info
+            tender = tender_map.get(wt_name)
+            confidence = tender.get("confidence") if tender else None
+
+            entry = {
+                "worktree_name": wt_name,
+                "commits": commits,
+                "insertions": insertions,
+                "deletions": deletions,
+                "status": status_text,
+                "status_icon": status_icon,
+                "confidence": confidence,
+                "tender_id": tender.get("folio_id") if tender else None,
+            }
+            triage_data.append(entry)
+
+        if output_json:
+            import json as json_module
+            click.echo(json_module.dumps(triage_data, indent=2))
+        else:
+            click.echo(f"SHARDS ({len(triage_data)} total):\n")
+            for entry in triage_data:
+                name = entry["worktree_name"]
+                commits = entry["commits"]
+                ins = entry["insertions"]
+                dels = entry["deletions"]
+                status = entry["status"]
+                icon = entry["status_icon"]
+                conf = entry["confidence"]
+
+                diffstat_str = f"+{ins}/-{dels}" if (ins or dels) else "---"
+                parts = [
+                    f"  {icon}",
+                    f"{name:<35}",
+                    f"{commits:>2} commits",
+                    f"{diffstat_str:>12}",
+                    f"{status:<12}",
+                ]
+                if conf is not None:
+                    parts.append(f"confidence:{conf}")
+                elif entry["tender_id"]:
+                    parts.append("(tendered)")
+                else:
+                    parts.append("(no tender)")
+
+                click.echo("  ".join(parts))
+
+            click.echo("\nUse `skein shard review <name>` for details on a specific shard")
+
+    except shard_worktree.ShardError as e:
+        raise click.ClickException(str(e))
+    except Exception as e:
+        raise click.ClickException(f"Failed to triage SHARDs: {e}")
+
+
+@shard.command("review")
+@click.argument("worktree_name")
+@click.option("--json", "output_json", is_flag=True, help="Output as JSON")
+@click.pass_context
+def shard_review(ctx, worktree_name, output_json):
+    """
+    Deep review of a single SHARD for merge decision.
+
+    Shows:
+    - Branch and tender info
+    - Specific conflict files (if any)
+    - Full change list with diffstat
+    - Tender summary and confidence
+
+    Example:
+        skein shard review my-shard-001
+    """
+    base_url = get_base_url(ctx.obj.get("url"))
+    agent_id = get_agent_id(ctx.obj.get("agent"), base_url)
+
+    shard_worktree = get_shard_worktree_module()
+
+    try:
+        shard_info = shard_worktree.get_shard_status(worktree_name)
+        if not shard_info:
+            raise click.ClickException(f"SHARD not found: {worktree_name}")
+
+        git_info = shard_worktree.get_shard_git_info(worktree_name)
+
+        # Look up tender folio
+        tender_info = None
+        try:
+            all_folios = make_request("GET", "/folios", base_url, agent_id, params={"type": "tender"})
+            for folio in all_folios:
+                metadata = folio.get("metadata", {})
+                if isinstance(metadata, str):
+                    try:
+                        import json as json_module
+                        metadata = json_module.loads(metadata)
+                    except:
+                        continue
+                if metadata.get("worktree_name") == worktree_name:
+                    tender_info = {
+                        "folio_id": folio.get("folio_id"),
+                        "confidence": metadata.get("confidence"),
+                        "status": metadata.get("status"),
+                        "summary": folio.get("title", ""),
+                    }
+                    break
+        except:
+            pass
+
+        # Get conflict file list if there are conflicts
+        conflict_files = []
+        merge_status = git_info.get("merge_status", "unknown")
+        if merge_status == "conflict":
+            try:
+                from skein import shard as shard_module
+                repo = shard_module._get_repo()
+                branch = shard_info["branch_name"]
+                merge_base = repo.git.merge_base("master", branch)
+                master_files = set(repo.git.diff("--name-only", merge_base, "master").strip().split("\n"))
+                branch_files = set(repo.git.diff("--name-only", merge_base, branch).strip().split("\n"))
+                conflict_files = sorted(list(master_files & branch_files - {''}))
+            except:
+                pass
+
+        # Build review data
+        review_data = {
+            "worktree_name": worktree_name,
+            "branch_name": shard_info["branch_name"],
+            "worktree_path": shard_info["worktree_path"],
+            "commits_ahead": git_info.get("commits_ahead", 0),
+            "merge_status": merge_status,
+            "uncommitted": git_info.get("uncommitted", []),
+            "commit_log": git_info.get("commit_log", []),
+            "diffstat": git_info.get("diffstat", ""),
+            "conflict_files": conflict_files,
+            "tender": tender_info,
+        }
+
+        if output_json:
+            import json as json_module
+            click.echo(json_module.dumps(review_data, indent=2))
+        else:
+            click.echo(f"SHARD: {worktree_name}")
+            click.echo(f"Branch: {shard_info['branch_name']}")
+
+            if tender_info:
+                conf_str = f"{tender_info['confidence']}/10" if tender_info.get('confidence') else "unrated"
+                click.echo(f"Tender: {tender_info['folio_id']} (confidence: {conf_str})")
+            else:
+                click.echo("Tender: (none)")
+            click.echo()
+
+            uncommitted = git_info.get("uncommitted", [])
+            if uncommitted:
+                click.echo("UNCOMMITTED CHANGES:")
+                for line in uncommitted[:10]:
+                    click.echo(f"  {line}")
+                if len(uncommitted) > 10:
+                    click.echo(f"  ... and {len(uncommitted) - 10} more")
+                click.echo()
+
+            if conflict_files:
+                click.echo("CONFLICTS WITH MASTER:")
+                for f in conflict_files[:15]:
+                    click.echo(f"  {f}")
+                if len(conflict_files) > 15:
+                    click.echo(f"  ... and {len(conflict_files) - 15} more")
+                click.echo()
+
+            commit_log = git_info.get("commit_log", [])
+            if commit_log:
+                click.echo(f"CHANGES ({len(commit_log)} commits):")
+                for sha, msg in commit_log[:10]:
+                    click.echo(f"  {sha} {msg}")
+                click.echo()
+
+                diffstat = git_info.get("diffstat", "")
+                if diffstat:
+                    click.echo("FILES:")
+                    for line in diffstat.split("\n")[:15]:
+                        click.echo(f"  {line}")
+                    click.echo()
+            else:
+                click.echo("No unique commits")
+                click.echo()
+
+            if tender_info and tender_info.get("summary"):
+                click.echo("TENDER SUMMARY:")
+                click.echo(f"  {tender_info['summary']}")
+                click.echo()
+
+            # Actions hint
+            if uncommitted:
+                click.echo("Actions: Commit changes first, then merge or tender")
+            elif merge_status == "conflict":
+                click.echo("Actions: Use `skein shard apply` to work on it locally")
+            elif commit_log:
+                click.echo(f"Actions: `skein shard merge {worktree_name}` or `skein shard cleanup {worktree_name}`")
+
+    except shard_worktree.ShardError as e:
+        raise click.ClickException(str(e))
+    except Exception as e:
+        raise click.ClickException(f"Failed to review SHARD: {e}")
+
+
+@shard.command("stash")
+@click.argument("description")
+@click.option("--agent", "stash_agent", help="Agent ID for the new SHARD")
+@click.pass_context
+def shard_stash(ctx, description, stash_agent):
+    """
+    Stash uncommitted changes into a new SHARD.
+
+    Creates a new shard worktree, moves your uncommitted changes there,
+    and leaves your current branch clean.
+
+    Example:
+        skein shard stash "WIP: auth refactor"
+    """
+    shard_worktree = get_shard_worktree_module()
+
+    try:
+        from skein import shard as shard_module
+        repo = shard_module._get_repo()
+
+        # Check for uncommitted changes
+        status = repo.git.status("--porcelain")
+        if not status.strip():
+            raise click.ClickException("No uncommitted changes to stash")
+
+        # Generate agent ID if not provided
+        if not stash_agent:
+            from datetime import datetime
+            stash_agent = f"stash-{datetime.now().strftime('%m%d')}"
+
+        # Create the shard
+        new_shard = shard_worktree.spawn_shard(stash_agent, description=description)
+        worktree_path = new_shard["worktree_path"]
+        worktree_name = new_shard["worktree_name"]
+
+        # Git stash, then apply in new worktree
+        repo.git.stash("push", "-m", f"shard-stash: {description}")
+
+        try:
+            # Apply stash in the new worktree using subprocess
+            import subprocess
+            result = subprocess.run(
+                ["git", "stash", "apply", "--index"],
+                cwd=worktree_path,
+                capture_output=True,
+                text=True
+            )
+            if result.returncode != 0:
+                raise Exception(result.stderr)
+
+            # Drop the stash since we applied it
+            repo.git.stash("drop")
+
+            click.echo(f"✓ Stashed changes to SHARD: {worktree_name}")
+            click.echo(f"  Path: {worktree_path}")
+            click.echo(f"  Description: {description}")
+            click.echo()
+            click.echo(f"Your current branch is now clean.")
+            click.echo(f"To continue work: cd {worktree_path}")
+
+        except Exception as e:
+            # If apply fails, restore the stash
+            try:
+                repo.git.stash("pop")
+            except:
+                pass
+            try:
+                shard_worktree.cleanup_shard(worktree_name, keep_branch=False)
+            except:
+                pass
+            raise click.ClickException(f"Failed to apply stash to new shard: {e}")
+
+    except shard_worktree.ShardError as e:
+        raise click.ClickException(str(e))
+    except Exception as e:
+        if "ClickException" in str(type(e).__name__):
+            raise
+        raise click.ClickException(f"Failed to stash: {e}")
+
+
+@shard.command("apply")
+@click.argument("worktree_name")
+@click.option("--no-confirm", is_flag=True, help="Skip confirmation prompt")
+@click.pass_context
+def shard_apply(ctx, worktree_name, no_confirm):
+    """
+    Apply SHARD changes as uncommitted changes to current branch.
+
+    Takes the diff between master and the shard branch and applies it
+    as uncommitted changes. Useful for cherry-picking from stale shards.
+
+    Example:
+        skein shard apply my-shard-001
+    """
+    shard_worktree = get_shard_worktree_module()
+
+    try:
+        shard_info = shard_worktree.get_shard_status(worktree_name)
+        if not shard_info:
+            raise click.ClickException(f"SHARD not found: {worktree_name}")
+
+        from skein import shard as shard_module
+        repo = shard_module._get_repo()
+        branch = shard_info["branch_name"]
+
+        # Check for existing uncommitted changes
+        status = repo.git.status("--porcelain")
+        if status.strip() and not no_confirm:
+            click.echo("Warning: You have uncommitted changes.")
+            if not click.confirm("Continue?"):
+                raise click.ClickException("Aborted")
+
+        # Get the diff (master..branch)
+        diff = repo.git.diff("master", branch)
+        if not diff.strip():
+            click.echo(f"No changes in shard {worktree_name}")
+            return
+
+        git_info = shard_worktree.get_shard_git_info(worktree_name)
+        commits = git_info.get("commits_ahead", 0)
+
+        click.echo(f"Applying changes from: {worktree_name} ({commits} commits)")
+
+        if not no_confirm:
+            if not click.confirm("Apply as uncommitted changes?"):
+                raise click.ClickException("Aborted")
+
+        # Apply the diff
+        try:
+            repo.git.apply(input=diff)
+            click.echo(f"✓ Applied changes from {worktree_name}")
+            click.echo("  Review with `git status` and `git diff`")
+        except Exception as e:
+            raise click.ClickException(f"Failed to apply: {e}")
+
+    except shard_worktree.ShardError as e:
+        raise click.ClickException(str(e))
+    except Exception as e:
+        if "ClickException" in str(type(e).__name__):
+            raise
+        raise click.ClickException(f"Failed to apply SHARD: {e}")
 
 
 # Web UI Command
