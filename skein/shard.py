@@ -367,6 +367,104 @@ def get_shard_status(worktree_name: str) -> Optional[Dict[str, str]]:
     return None
 
 
+def get_shard_age_days(shard_info: Dict[str, str]) -> Optional[int]:
+    """
+    Calculate age of a SHARD in days from its date string.
+
+    Args:
+        shard_info: SHARD info dict with 'date' key (YYYYMMDD format)
+
+    Returns:
+        Age in days, or None if date parsing fails
+    """
+    date_str = shard_info.get("date", "")
+    if not date_str or len(date_str) != 8:
+        return None
+
+    try:
+        shard_date = datetime.strptime(date_str, "%Y%m%d")
+        today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+        delta = today - shard_date
+        return delta.days
+    except ValueError:
+        return None
+
+
+def get_review_queue(stale_days: int = 7) -> Dict[str, List[Dict]]:
+    """
+    Get all SHARDs organized by review status for QM visibility.
+
+    Groups shards into:
+    - ready: Has commits, clean working tree, no conflicts (ready to merge)
+    - needs_commit: Has uncommitted changes
+    - conflicts: Would have merge conflicts with master
+    - stale: No commits and older than stale_days
+
+    Args:
+        stale_days: Number of days without commits before a shard is considered stale
+
+    Returns:
+        Dict with keys: 'ready', 'needs_commit', 'conflicts', 'stale'
+        Each contains list of shard dicts with added 'git_info' and 'age_days' fields
+    """
+    queue = {
+        "ready": [],
+        "needs_commit": [],
+        "conflicts": [],
+        "stale": []
+    }
+
+    shards = list_shards()
+
+    for shard in shards:
+        # Get git info for status determination
+        git_info = get_shard_git_info(shard["worktree_name"])
+        age_days = get_shard_age_days(shard)
+
+        # Build enriched shard info
+        enriched = {
+            **shard,
+            "git_info": git_info,
+            "age_days": age_days,
+            "commits_ahead": git_info.get("commits_ahead", 0),
+            "working_tree": git_info.get("working_tree", "unknown"),
+            "merge_status": git_info.get("merge_status", "unknown"),
+            "diffstat": git_info.get("diffstat", ""),
+        }
+
+        # Categorize by status
+        working_tree = git_info.get("working_tree", "unknown")
+        merge_status = git_info.get("merge_status", "unknown")
+        commits_ahead = git_info.get("commits_ahead", 0)
+
+        # Check for uncommitted changes first (most actionable)
+        if working_tree == "dirty":
+            queue["needs_commit"].append(enriched)
+        # Then check for merge conflicts
+        elif merge_status == "conflict":
+            queue["conflicts"].append(enriched)
+        # Check if ready (has commits, clean, no conflicts)
+        elif commits_ahead > 0 and working_tree == "clean" and merge_status == "clean":
+            queue["ready"].append(enriched)
+        # Check if stale (no commits, old)
+        elif commits_ahead == 0 and age_days is not None and age_days >= stale_days:
+            queue["stale"].append(enriched)
+        # Everything else goes to ready if it has commits
+        elif commits_ahead > 0:
+            queue["ready"].append(enriched)
+        # No commits but not old enough to be stale - skip or add to a default
+        else:
+            # Fresh shards with no commits yet - could be actively worked on
+            # Include in ready with a note that they have no commits
+            queue["ready"].append(enriched)
+
+    # Sort each category by age (oldest first)
+    for category in queue:
+        queue[category].sort(key=lambda x: x.get("age_days") or 0, reverse=True)
+
+    return queue
+
+
 def get_shard_git_info(worktree_name: str) -> Dict:
     """
     Get git information for a SHARD: commits ahead, working tree status, merge status.

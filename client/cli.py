@@ -4374,6 +4374,121 @@ def shard_resume(ctx, worktree_name, message):
         click.echo(f"  Warning: Failed to update SKEIN thread: {e}", err=True)
 
 
+@shard.command("review")
+@click.option("--stale-days", default=7, type=int, help="Days without commits to consider stale (default: 7)")
+@click.option("--json", "output_json", is_flag=True, help="Output as JSON")
+@click.pass_context
+def shard_review(ctx, stale_days, output_json):
+    """
+    Show SHARD review queue for QM visibility.
+
+    Groups shards by status:
+    - READY: Has commits, clean working tree, no conflicts (merge candidates)
+    - NEEDS_COMMIT: Has uncommitted changes
+    - CONFLICTS: Would have merge conflicts with master
+    - STALE: No commits and older than --stale-days
+
+    Examples:
+        skein shard review
+        skein shard review --stale-days 3
+        skein shard review --json
+    """
+    shard_worktree = get_shard_worktree_module()
+
+    try:
+        queue = shard_worktree.get_review_queue(stale_days=stale_days)
+
+        if output_json:
+            click.echo(json.dumps(queue, indent=2))
+            return
+
+        # Calculate totals
+        total = sum(len(v) for v in queue.values())
+        if total == 0:
+            click.echo("No SHARDs found")
+            return
+
+        # Header with summary
+        click.echo("=" * 60)
+        click.echo("SHARD Review Queue")
+        click.echo("=" * 60)
+        click.echo(f"Total: {total} shards")
+        click.echo(f"  Ready: {len(queue['ready'])}  |  Needs commit: {len(queue['needs_commit'])}  |  Conflicts: {len(queue['conflicts'])}  |  Stale: {len(queue['stale'])}")
+        click.echo()
+
+        def format_shard_line(shard):
+            """Format a single shard for display."""
+            name = shard['worktree_name']
+            commits = shard.get('commits_ahead', 0)
+            age = shard.get('age_days')
+            age_str = f"{age}d" if age is not None else "?"
+
+            # Extract project from worktree path if possible
+            path = shard.get('worktree_path', '')
+            project = "?"
+            if "/projects/" in path:
+                parts = path.split("/projects/")[1].split("/")
+                if parts:
+                    project = parts[0]
+
+            # Diffstat summary (files changed)
+            diffstat = shard.get('diffstat', '')
+            files_changed = 0
+            insertions = 0
+            deletions = 0
+            if diffstat:
+                # Parse last line of diffstat: "N files changed, X insertions(+), Y deletions(-)"
+                lines = diffstat.strip().split('\n')
+                if lines:
+                    last_line = lines[-1]
+                    if 'changed' in last_line:
+                        import re
+                        m = re.search(r'(\d+) files? changed', last_line)
+                        if m:
+                            files_changed = int(m.group(1))
+                        m = re.search(r'(\d+) insertions?', last_line)
+                        if m:
+                            insertions = int(m.group(1))
+                        m = re.search(r'(\d+) deletions?', last_line)
+                        if m:
+                            deletions = int(m.group(1))
+
+            diff_str = ""
+            if files_changed > 0:
+                diff_str = f"{files_changed}f +{insertions}/-{deletions}"
+
+            return f"  {name:<40} {age_str:>4}  +{commits:<2}  {project:<15} {diff_str}"
+
+        # Show each category
+        categories = [
+            ("READY", "ready", "Merge candidates - clean and ready"),
+            ("NEEDS_COMMIT", "needs_commit", "Have uncommitted changes"),
+            ("CONFLICTS", "conflicts", "Would conflict with master"),
+            ("STALE", "stale", f"No commits, older than {stale_days} days"),
+        ]
+
+        for label, key, description in categories:
+            shards = queue[key]
+            if not shards:
+                continue
+
+            click.echo(f"--- {label} ({len(shards)}) - {description} ---")
+            for shard in shards:
+                click.echo(format_shard_line(shard))
+            click.echo()
+
+        # Show helpful commands
+        click.echo("Commands:")
+        click.echo("  skein shard show <name>    # View details")
+        click.echo("  skein shard diff <name>    # View changes")
+        click.echo("  skein shard merge <name>   # Merge to master")
+
+    except shard_worktree.ShardError as e:
+        raise click.ClickException(str(e))
+    except Exception as e:
+        raise click.ClickException(f"Failed to get review queue: {e}")
+
+
 @shard.command("tender")
 @click.argument("worktree_name")
 @click.option("--site", help="Site to post tender folio (default: derived from project)")
