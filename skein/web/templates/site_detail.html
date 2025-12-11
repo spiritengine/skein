@@ -1,84 +1,48 @@
 {% extends "base.html" %}
-
-{% block title %}{{ site.site_id }} - SKEIN{% endblock %}
+{% block title %}SKEIN - {{ site.site_id }}{% endblock %}
 
 {% block content %}
-<div class="breadcrumb">
-    <a href="/">Home</a> / <a href="/sites">Sites</a> / <span>{{ site.site_id }}</span>
-</div>
+<section>
+    <p class="breadcrumb"><a href="/sites">Sites</a> / {{ site.site_id }}</p>
+    <h1>{{ site.site_id }}</h1>
+    {% if site.description %}
+    <p class="subtitle">{{ site.description }}</p>
+    {% endif %}
+</section>
 
-<h1>{{ site.site_id }}</h1>
-<p style="color: var(--text-secondary); margin-bottom: 1.5rem;">{{ site.purpose }}</p>
-
-<div class="filters">
-    <div class="filter-group">
-        <label for="type-filter">Type:</label>
-        <select id="type-filter"
-                hx-get="/sites/{{ site.site_id }}"
-                hx-trigger="change"
-                hx-target="body"
-                hx-push-url="true"
-                name="type">
-            <option value="">All Types</option>
+<section>
+    <div class="filters">
+        <label>Type:</label>
+        <select hx-get="/sites/{{ site.site_id }}" hx-target="body" hx-push-url="true" name="type" onchange="this.form.submit()">
+            <option value="">All</option>
             {% for t in available_types %}
             <option value="{{ t }}" {% if current_type == t %}selected{% endif %}>{{ t }}</option>
             {% endfor %}
         </select>
-    </div>
-
-    <div class="filter-group">
-        <label for="status-filter">Status:</label>
-        <select id="status-filter"
-                hx-get="/sites/{{ site.site_id }}"
-                hx-trigger="change"
-                hx-target="body"
-                hx-push-url="true"
-                name="status">
-            <option value="">All Statuses</option>
+        <label>Status:</label>
+        <select hx-get="/sites/{{ site.site_id }}" hx-target="body" hx-push-url="true" name="status" onchange="this.form.submit()">
+            <option value="">All</option>
             {% for s in available_statuses %}
             <option value="{{ s }}" {% if current_status == s %}selected{% endif %}>{{ s }}</option>
             {% endfor %}
         </select>
     </div>
 
-    {% if current_type or current_status %}
-    <a href="/sites/{{ site.site_id }}" class="btn btn-secondary">Clear Filters</a>
-    {% endif %}
-</div>
-
-<div class="card">
     {% if folios %}
-    <div id="folio-list">
+    <ul class="item-list">
         {% for folio in folios %}
-        <div class="folio-item">
-            <div class="folio-info">
-                <div class="folio-title">
-                    <a href="/folios/{{ folio.folio_id }}">{{ folio.title }}</a>
-                </div>
-                <div class="folio-meta">
-                    {{ folio.folio_id }} | Created by {{ folio.created_by }} | {{ folio.created_at.strftime('%Y-%m-%d %H:%M') }}
-                    {% if folio.assigned_to %} | Assigned to {{ folio.assigned_to }}{% endif %}
-                </div>
+        <li>
+            <a class="item-title" href="/folios/{{ folio.folio_id }}">{{ (folio.title or folio.folio_id) | clean_title(folio.folio_id) }}</a>
+            <div class="item-meta">
+                <span class="type-tag {{ folio.type }}">{{ folio.type }}</span>
+                · {{ folio.status or 'open' }}
+                · {{ folio.created_at.strftime('%b %d') if folio.created_at else '' }}
             </div>
-            <div class="folio-badges">
-                <span class="badge badge-{{ folio.type }}">{{ folio.type }}</span>
-                <span class="badge badge-{{ folio.status }}">{{ folio.status }}</span>
-            </div>
-        </div>
+        </li>
         {% endfor %}
-    </div>
+    </ul>
     {% else %}
-    <div class="empty-state">
-        <div class="empty-state-icon">No Folios</div>
-        <p>No folios match your filters.</p>
-        {% if current_type or current_status %}
-        <a href="/sites/{{ site.site_id }}" class="btn btn-secondary" style="margin-top: 1rem;">Clear Filters</a>
-        {% endif %}
-    </div>
+    <p>No folios{% if current_type or current_status %} matching filters{% endif %}.</p>
     {% endif %}
-</div>
-
-<div style="margin-top: 1rem; font-size: 0.875rem; color: var(--text-secondary);">
-    Showing {{ folios|length }} folio{% if folios|length != 1 %}s{% endif %}
-</div>
+</section>
 {% endblock %}

@@ -1,94 +1,61 @@
 {% extends "base.html" %}
-
-{% block title %}{{ folio.title }} - SKEIN{% endblock %}
+{% block title %}SKEIN - {{ folio.folio_id }}{% endblock %}
 
 {% block content %}
-<div class="breadcrumb">
-    <a href="/">Home</a> / <a href="/sites">Sites</a> / <a href="/sites/{{ folio.site_id }}">{{ folio.site_id }}</a> / <span>{{ folio.folio_id }}</span>
-</div>
+<section>
+    <p class="breadcrumb">
+        <a href="/sites">Sites</a> /
+        <a href="/sites/{{ folio.site_id }}">{{ folio.site_id }}</a> /
+        {{ folio.folio_id }}
+    </p>
 
-<div class="card">
-    <div class="card-header">
-        <h1 style="margin-bottom: 0;">{{ folio.title }}</h1>
-        <div class="folio-badges">
-            <span class="badge badge-{{ folio.type }}">{{ folio.type }}</span>
-            <span class="badge badge-{{ folio.status }}">{{ folio.status }}</span>
-        </div>
-    </div>
+    <h1><span class="type-marker {{ folio.type }}">{{ folio.type }}</span> {{ folio.folio_id }}</h1>
 
-    <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 1rem; margin-bottom: 1.5rem; font-size: 0.875rem;">
-        <div>
-            <span style="color: var(--text-secondary);">ID:</span>
-            <span>{{ folio.folio_id }}</span>
-        </div>
-        <div>
-            <span style="color: var(--text-secondary);">Site:</span>
-            <a href="/sites/{{ folio.site_id }}">{{ folio.site_id }}</a>
-        </div>
-        <div>
-            <span style="color: var(--text-secondary);">Created:</span>
-            <span>{{ folio.created_at.strftime('%Y-%m-%d %H:%M') }}</span>
-        </div>
-        <div>
-            <span style="color: var(--text-secondary);">Created by:</span>
-            <span>{{ folio.created_by }}</span>
-        </div>
+    <div class="folio-meta">
+        <span>{{ folio.created_at.strftime('%B %d, %Y at %H:%M') if folio.created_at else 'Unknown date' }}</span>
+        {% if folio.agent_id %}
+        <span>by {{ folio.agent_id }}</span>
+        {% endif %}
+        <span class="status-{{ folio.status or 'open' }}">{{ folio.status or 'open' }}</span>
         {% if folio.assigned_to %}
-        <div>
-            <span style="color: var(--text-secondary);">Assigned to:</span>
-            <span>{{ folio.assigned_to }}</span>
-        </div>
-        {% endif %}
-        {% if folio.target_agent %}
-        <div>
-            <span style="color: var(--text-secondary);">Target agent:</span>
-            <span>{{ folio.target_agent }}</span>
-        </div>
-        {% endif %}
-        {% if folio.successor_name %}
-        <div>
-            <span style="color: var(--text-secondary);">Successor name:</span>
-            <span>{{ folio.successor_name }}</span>
-        </div>
+        <span>assigned to {{ folio.assigned_to }}</span>
         {% endif %}
     </div>
+</section>
 
-    <h3>Content</h3>
+<section>
     <div class="folio-content">{{ folio.content }}</div>
 
-    {% if folio.metadata and folio.metadata|length > 0 %}
-    <h3 style="margin-top: 1.5rem;">Metadata</h3>
-    <div class="folio-content" style="max-height: 200px;">{{ folio.metadata | tojson(indent=2) }}</div>
-    {% endif %}
-</div>
+    {% for ref in cross_refs %}
+    <label for="sn-{{ loop.index }}" class="margin-toggle sidenote-number"></label>
+    <input type="checkbox" id="sn-{{ loop.index }}" class="margin-toggle"/>
+    <span class="sidenote">
+        <a href="/folios/{{ ref.folio_id }}">{{ ref.folio_id }}</a><br>
+        {{ ref.content[:80] }}{% if ref.content|length > 80 %}...{% endif %}
+    </span>
+    {% endfor %}
+</section>
 
 {% if threads %}
-<div class="card">
-    <h2 class="card-title">Threads</h2>
-
-    <div class="timeline">
+<section>
+    <h2>Thread History</h2>
+    <ul class="item-list">
         {% for thread in threads %}
-        <div class="timeline-item">
-            <div class="timeline-time">{{ thread.created_at.strftime('%Y-%m-%d %H:%M') }}</div>
-            <div class="timeline-content">
-                <span class="badge badge-type">{{ thread.type }}</span>
-                {% if thread.weaver %}
-                <span style="color: var(--text-secondary); font-size: 0.875rem;">by {{ thread.weaver }}</span>
-                {% endif %}
-                {% if thread.content %}
-                <div style="margin-top: 0.25rem;">{{ thread.content }}</div>
-                {% endif %}
-                <div style="font-size: 0.75rem; color: var(--text-secondary); margin-top: 0.25rem;">
-                    {{ thread.from_id }} -> {{ thread.to_id }}
-                </div>
-            </div>
-        </div>
+        <li>
+            <span class="activity-time">{{ thread.created_at.strftime('%b %d %H:%M') if thread.created_at else '' }}</span>
+            <strong>{{ thread.verb }}</strong>
+            {% if thread.from_id != folio.folio_id %}
+            from <a href="/folios/{{ thread.from_id }}">{{ thread.from_id }}</a>
+            {% endif %}
+            {% if thread.to_id != folio.folio_id %}
+            to <a href="/folios/{{ thread.to_id }}">{{ thread.to_id }}</a>
+            {% endif %}
+            {% if thread.note %}
+            <span class="item-meta">{{ thread.note }}</span>
+            {% endif %}
+        </li>
         {% endfor %}
-    </div>
-</div>
+    </ul>
+</section>
 {% endif %}
-
-<div style="margin-top: 1rem;">
-    <a href="/sites/{{ folio.site_id }}" class="btn btn-secondary">Back to Site</a>
-</div>
 {% endblock %}

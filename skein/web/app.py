@@ -13,10 +13,26 @@ from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
+import re
+
 from ..storage import JSONStore, LogDatabase, get_data_dir_for_project
 from ..utils import get_current_status, get_current_assignment
 
 logger = logging.getLogger(__name__)
+
+
+def clean_title(title: str, fallback: str = "") -> str:
+    """Clean up a folio title for display."""
+    if not title:
+        return fallback
+    # Strip markdown headers
+    title = re.sub(r'^#+\s*', '', title)
+    # Strip leading ** or __
+    title = re.sub(r'^\*\*|^__', '', title)
+    # Truncate
+    if len(title) > 80:
+        title = title[:77] + "..."
+    return title or fallback
 
 # Template directory
 TEMPLATE_DIR = Path(__file__).parent / "templates"
@@ -70,35 +86,37 @@ def create_app() -> FastAPI:
 
     templates = Jinja2Templates(directory=str(TEMPLATE_DIR))
 
+    # Add custom filters
+    templates.env.filters['clean_title'] = clean_title
+
     # Mount static files if directory exists
     if STATIC_DIR.exists():
         app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
     @app.get("/", response_class=HTMLResponse)
     async def home(request: Request, store: JSONStore = Depends(get_store)):
-        """Home page - dashboard with sites overview."""
+        """Home page - activity feed."""
         sites = store.get_sites()
         folios = store.get_folios()
         agents = store.get_agents()
 
-        # Count folios per site
-        site_counts = {}
-        for site in sites:
-            site_id = site.site_id
-            site_folios = [f for f in folios if f.site_id == site_id]
-            site_counts[site_id] = {
-                "total": len(site_folios),
-                "by_type": {}
-            }
-            for folio in site_folios:
-                ftype = folio.type
-                site_counts[site_id]["by_type"][ftype] = site_counts[site_id]["by_type"].get(ftype, 0) + 1
+        # Filter to open only, compute status
+        open_folios = []
+        for f in folios:
+            status = get_current_status(f.folio_id, store) or f.status or "open"
+            if status != "closed":
+                f.status = status
+                open_folios.append(f)
+
+        # Sort by created_at, newest first
+        open_folios.sort(key=lambda f: f.created_at, reverse=True)
+        folios = open_folios[:50]
 
         return templates.TemplateResponse("home.html", {
             "request": request,
-            "sites": sites,
-            "site_counts": site_counts,
-            "total_folios": len(folios),
+            "folios": folios,
+            "total_folios": len(store.get_folios()),
+            "total_sites": len(sites),
             "active_agents": len([a for a in agents if a.status == "active"]),
             "project_id": get_project_id()
         })
@@ -216,11 +234,26 @@ def create_app() -> FastAPI:
         # Get site info
         site = store.get_site(folio.site_id)
 
+        # Find cross-references (folio IDs mentioned in content)
+        import re
+        cross_refs = []
+        # Match patterns like brief-20251208-0jt9, issue-20251207-akrj, etc.
+        folio_id_pattern = r'\b(brief|issue|friction|finding|notion|summary|tender|plan|playbook|mantle|writ)-\d{8}-[a-z0-9]{4}\b'
+        mentioned_ids = re.findall(folio_id_pattern, folio.content, re.IGNORECASE) if folio.content else []
+        # Get full matches
+        full_matches = re.findall(r'\b(?:brief|issue|friction|finding|notion|summary|tender|plan|playbook|mantle|writ)-\d{8}-[a-z0-9]{4}\b', folio.content, re.IGNORECASE) if folio.content else []
+        for ref_id in set(full_matches):
+            if ref_id != folio_id:  # Don't self-reference
+                ref_folio = store.get_folio(ref_id)
+                if ref_folio:
+                    cross_refs.append(ref_folio)
+
         return templates.TemplateResponse("folio_detail.html", {
             "request": request,
             "folio": folio,
             "site": site,
             "threads": threads,
+            "cross_refs": cross_refs,
             "project_id": get_project_id()
         })
 

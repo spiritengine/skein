@@ -4431,7 +4431,7 @@ def shard_tender(ctx, worktree_name, site, reviewer, summary, status, confidence
     folio_data = {
         "type": "tender",
         "site_id": site,
-        "title": f"{worktree_name}: {summary_text[:80]}",
+        "title": summary_text[:100] if summary_text else worktree_name,
         "content": content,
         "metadata": {
             "worktree_name": worktree_name,

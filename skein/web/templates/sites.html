@@ -1,44 +1,28 @@
 {% extends "base.html" %}
-
-{% block title %}Sites - SKEIN{% endblock %}
+{% block title %}SKEIN - Sites{% endblock %}
 
 {% block content %}
-<h1>Sites</h1>
+<section>
+    <h1>Sites</h1>
+</section>
 
-{% if sites %}
-<div class="grid grid-3">
-    {% for site in sites %}
-    {% set stats = site_stats.get(site.site_id, {}) %}
-    <div class="card">
-        <div class="card-header">
-            <h3 class="card-title"><a href="/sites/{{ site.site_id }}">{{ site.site_id }}</a></h3>
-            <span class="badge badge-{{ site.status }}">{{ site.status }}</span>
-        </div>
-        <p style="color: var(--text-secondary); margin-bottom: 1rem;">{{ site.purpose }}</p>
-
-        <div style="display: flex; gap: 0.5rem; flex-wrap: wrap; margin-bottom: 0.5rem;">
-            {% for type_name, count in stats.get('by_type', {}).items() %}
-            <span class="badge badge-{{ type_name }}">{{ type_name }}: {{ count }}</span>
-            {% endfor %}
-        </div>
-
-        <div style="font-size: 0.875rem; color: var(--text-secondary);">
-            {{ stats.get('total', 0) }} folios
-            ({{ stats.get('by_status', {}).get('open', 0) }} open,
-            {{ stats.get('by_status', {}).get('closed', 0) }} closed)
-        </div>
-
-        <div style="font-size: 0.75rem; color: var(--text-secondary); margin-top: 0.5rem;">
-            Created by {{ site.created_by }} on {{ site.created_at.strftime('%Y-%m-%d') }}
-        </div>
-    </div>
-    {% endfor %}
-</div>
-{% else %}
-<div class="empty-state">
-    <div class="empty-state-icon">No Sites</div>
-    <p>No sites have been created yet.</p>
-    <p style="margin-top: 0.5rem;">Create one with: <code>skein site create SITE_ID "description"</code></p>
-</div>
-{% endif %}
+<section>
+    {% if sites %}
+    <ul class="item-list">
+        {% for site in sites %}
+        <li>
+            <a href="/sites/{{ site.site_id }}">{{ site.site_id }}</a>
+            <span class="item-meta">
+                {{ site_stats[site.site_id].total }} folios
+                {% if site_stats[site.site_id].by_status.open %}
+                · {{ site_stats[site.site_id].by_status.open }} open
+                {% endif %}
+            </span>
+        </li>
+        {% endfor %}
+    </ul>
+    {% else %}
+    <p>No sites yet.</p>
+    {% endif %}
+</section>
 {% endblock %}

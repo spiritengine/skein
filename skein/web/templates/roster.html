@@ -1,19 +1,15 @@
 {% extends "base.html" %}
-
-{% block title %}Roster - SKEIN{% endblock %}
+{% block title %}SKEIN - Roster{% endblock %}
 
 {% block content %}
-<h1>Agent Roster</h1>
+<section>
+    <h1>Agent Roster</h1>
+</section>
 
-<div class="filters">
-    <div class="filter-group">
-        <label for="status-filter">Status:</label>
-        <select id="status-filter"
-                hx-get="/roster"
-                hx-trigger="change"
-                hx-target="body"
-                hx-push-url="true"
-                name="status">
+<section>
+    <div class="filters">
+        <label>Status:</label>
+        <select hx-get="/roster" hx-target="body" hx-push-url="true" name="status">
             <option value="">All</option>
             <option value="active" {% if current_status == 'active' %}selected{% endif %}>Active</option>
             <option value="orienting" {% if current_status == 'orienting' %}selected{% endif %}>Orienting</option>
@@ -21,49 +17,33 @@
         </select>
     </div>
 
-    {% if current_status %}
-    <a href="/roster" class="btn btn-secondary">Clear Filter</a>
-    {% endif %}
-</div>
-
-{% if agents %}
-<div class="card">
+    {% if agents %}
     <table>
         <thead>
             <tr>
-                <th>Agent ID</th>
-                <th>Name</th>
-                <th>Type</th>
+                <th>Agent</th>
                 <th>Status</th>
                 <th>Registered</th>
-                <th>Description</th>
+                <th>Assignment</th>
             </tr>
         </thead>
         <tbody>
             {% for agent in agents %}
             <tr>
                 <td>{{ agent.agent_id }}</td>
-                <td>{{ agent.name or '-' }}</td>
-                <td>{{ agent.agent_type or '-' }}</td>
-                <td><span class="badge badge-{{ agent.status }}">{{ agent.status }}</span></td>
-                <td>{{ agent.registered_at.strftime('%Y-%m-%d %H:%M') }}</td>
-                <td>{{ (agent.description or '')[:50] }}{% if (agent.description or '')|length > 50 %}...{% endif %}</td>
+                <td>{{ agent.status or 'unknown' }}</td>
+                <td>{{ agent.registered_at.strftime('%b %d %H:%M') if agent.registered_at else '' }}</td>
+                <td>
+                    {% if agent.assignment %}
+                    <a href="/folios/{{ agent.assignment }}">{{ agent.assignment }}</a>
+                    {% endif %}
+                </td>
             </tr>
             {% endfor %}
         </tbody>
     </table>
-</div>
-
-<div style="margin-top: 1rem; font-size: 0.875rem; color: var(--text-secondary);">
-    Showing {{ agents|length }} agent{% if agents|length != 1 %}s{% endif %}
-</div>
-{% else %}
-<div class="empty-state">
-    <div class="empty-state-icon">No Agents</div>
-    <p>No agents {% if current_status %}with status "{{ current_status }}" {% endif %}found.</p>
-    {% if current_status %}
-    <a href="/roster" class="btn btn-secondary" style="margin-top: 1rem;">Clear Filter</a>
+    {% else %}
+    <p>No agents{% if current_status %} with status "{{ current_status }}"{% endif %}.</p>
     {% endif %}
-</div>
-{% endif %}
+</section>
 {% endblock %}
