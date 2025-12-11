@@ -4907,6 +4907,9 @@ def shard_apply(ctx, worktree_name, no_confirm):
         # Apply the diff using subprocess (git apply reads from stdin)
         try:
             import subprocess
+            # Ensure trailing newline (git apply requires it)
+            if not diff.endswith('\n'):
+                diff += '\n'
             result = subprocess.run(
                 ["git", "apply"],
                 input=diff,
