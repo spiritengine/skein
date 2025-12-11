@@ -1614,14 +1614,14 @@ def activity(ctx, since, output_json):
 @cli.command()
 @click.argument("site_id")
 @click.argument("title")
-@click.option("--content", "-c", help="Longer description (title used if not provided)")
+@click.option("--details", "-d", help="Additional details (title used if not provided)")
 @click.pass_context
-def friction(ctx, site_id, title, content):
+def friction(ctx, site_id, title, details):
     """Log a friction (problem/blocker).
 
     Example:
         skein friction skein-dev "Must restart server after config changes"
-        skein friction skein-dev "Confusing error messages" -c "When X happens, the error says Y but should say Z"
+        skein friction skein-dev "Confusing error messages" -d "When X happens, error says Y but should say Z"
     """
     validate_positional_args(site_id, title, command_name="friction")
     base_url = get_base_url(ctx.obj.get("url"))
@@ -1631,7 +1631,7 @@ def friction(ctx, site_id, title, content):
         "type": "friction",
         "site_id": site_id,
         "title": title,
-        "content": content or title,
+        "content": details or title,
         "metadata": {}
     }
 
@@ -1642,14 +1642,14 @@ def friction(ctx, site_id, title, content):
 @cli.command()
 @click.argument("site_id")
 @click.argument("title")
-@click.option("--content", "-c", help="Longer description (title used if not provided)")
+@click.option("--details", "-d", help="Additional details (title used if not provided)")
 @click.pass_context
-def notion(ctx, site_id, title, content):
+def notion(ctx, site_id, title, details):
     """Post a notion (rough idea not fully formed).
 
     Example:
         skein notion skein-dev "Could use websockets for real-time updates"
-        skein notion skein-dev "Consider caching user prefs" -c "Detailed thoughts on implementation..."
+        skein notion skein-dev "Consider caching user prefs" -d "Detailed thoughts on implementation..."
     """
     validate_positional_args(site_id, title, command_name="notion")
     base_url = get_base_url(ctx.obj.get("url"))
@@ -1659,7 +1659,7 @@ def notion(ctx, site_id, title, content):
         "type": "notion",
         "site_id": site_id,
         "title": title,
-        "content": content or title,
+        "content": details or title,
         "metadata": {}
     }
 
@@ -1670,14 +1670,14 @@ def notion(ctx, site_id, title, content):
 @cli.command()
 @click.argument("site_id")
 @click.argument("title")
-@click.option("--content", "-c", help="Longer description (title used if not provided)")
+@click.option("--details", "-d", help="Additional details (title used if not provided)")
 @click.pass_context
-def finding(ctx, site_id, title, content):
+def finding(ctx, site_id, title, details):
     """Post a finding (discovery during investigation).
 
     Example:
         skein finding skein-dev "Redis caching reduces latency by 40%"
-        skein finding skein-dev "Users prefer dark mode 3:1" -c "Survey results and methodology..."
+        skein finding skein-dev "Users prefer dark mode 3:1" -d "Survey results and methodology..."
     """
     validate_positional_args(site_id, title, command_name="finding")
     base_url = get_base_url(ctx.obj.get("url"))
@@ -1687,7 +1687,7 @@ def finding(ctx, site_id, title, content):
         "type": "finding",
         "site_id": site_id,
         "title": title,
-        "content": content or title,
+        "content": details or title,
         "metadata": {}
     }
 
@@ -1760,14 +1760,14 @@ def mantle(ctx, site_id, content, name):
 @cli.command()
 @click.argument("site_id")
 @click.argument("title")
-@click.option("--content", "-c", help="Longer description (title used if not provided)")
+@click.option("--details", "-d", help="Additional details (title used if not provided)")
 @click.pass_context
-def summary(ctx, site_id, title, content):
+def summary(ctx, site_id, title, details):
     """Post a summary (completed work findings).
 
     Example:
         skein summary skein-dev "Completed OAuth integration"
-        skein summary skein-dev "Session retrospective: agent coordination" -c "Detailed notes..."
+        skein summary skein-dev "Session retrospective: agent coordination" -d "Detailed notes..."
     """
     validate_positional_args(site_id, title, command_name="summary")
     base_url = get_base_url(ctx.obj.get("url"))
@@ -1777,7 +1777,7 @@ def summary(ctx, site_id, title, content):
         "type": "summary",
         "site_id": site_id,
         "title": title,
-        "content": content or title,
+        "content": details or title,
         "metadata": {}
     }
 
@@ -4904,9 +4904,18 @@ def shard_apply(ctx, worktree_name, no_confirm):
             if not click.confirm("Apply as uncommitted changes?"):
                 raise click.ClickException("Aborted")
 
-        # Apply the diff
+        # Apply the diff using subprocess (git apply reads from stdin)
         try:
-            repo.git.apply(input=diff)
+            import subprocess
+            result = subprocess.run(
+                ["git", "apply"],
+                input=diff,
+                text=True,
+                capture_output=True,
+                cwd=shard_module.PROJECT_ROOT
+            )
+            if result.returncode != 0:
+                raise Exception(result.stderr or "git apply failed")
             click.echo(f"✓ Applied changes from {worktree_name}")
             click.echo("  Review with `git status` and `git diff`")
         except Exception as e:
