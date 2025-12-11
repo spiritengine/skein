@@ -4,6 +4,7 @@ SKEIN FastAPI routes.
 
 import logging
 import base64
+import re
 from datetime import datetime
 from typing import List, Optional, Dict, Any
 from pathlib import Path
@@ -18,11 +19,12 @@ from .models import (
     ThreadCreate, Thread,
     LogBatch, LogLine,
     FolioType,
-    ScreenshotCreate, Screenshot
+    ScreenshotCreate, Screenshot,
+    YieldCreate, Yield
 )
 from .storage import JSONStore, LogDatabase, get_data_dir_for_project
 from .utils import (
-    generate_folio_id, generate_thread_id, parse_mentions,
+    generate_folio_id, generate_thread_id, generate_yield_id, parse_mentions,
     get_current_status, get_current_assignment,
     auto_invalidate_cache,
     parse_relative_time,
@@ -270,6 +272,69 @@ async def get_site_folios(
     return folios
 
 
+# Title validation
+GENERIC_TITLES = {
+    'handoff', 'handoff brief', 'brief', 'untitled', 'test', 'title',
+    'issue', 'friction', 'finding', 'notion', 'summary', 'tender', 'writ',
+    'new folio', 'folio', 'update', 'fix', 'change', 'todo', 'task'
+}
+
+TITLE_EXAMPLES = {
+    'brief': 'e.g., "Implement OAuth for API endpoints" or "Fix race condition in websocket handler"',
+    'issue': 'e.g., "Agents crash when site_id contains spaces" or "Memory leak in long-running sessions"',
+    'friction': 'e.g., "Must restart server after config changes" or "Error messages don\'t show line numbers"',
+    'finding': 'e.g., "Redis caching reduces latency by 40%" or "Users prefer dark mode 3:1"',
+    'tender': 'e.g., "Auth refactor ready for review" or "New dashboard component complete"',
+    'notion': 'e.g., "Could use websockets for real-time updates" or "Consider caching user preferences"',
+    'summary': 'e.g., "Completed OAuth integration" or "Session retrospective: agent coordination"',
+}
+
+
+def validate_folio_title(title: str, folio_type: str) -> str:
+    """
+    Validate and clean folio title. Returns cleaned title or raises HTTPException.
+
+    Poka-yoke design: make it hard to create bad titles.
+    """
+    # Must have a title
+    if not title or not title.strip():
+        example = TITLE_EXAMPLES.get(folio_type, 'e.g., "Clear description of what this folio is about"')
+        raise HTTPException(
+            status_code=400,
+            detail=f"{folio_type.capitalize()} needs a title that describes what it's about.\n\n{example}"
+        )
+
+    title = title.strip()
+
+    # Strip markdown cruft
+    title = re.sub(r'^#+\s*', '', title)  # Leading headers
+    title = re.sub(r'^\*\*|^__', '', title)  # Leading bold
+    title = re.sub(r'\*\*$|__$', '', title)  # Trailing bold
+    title = title.strip()
+
+    # Check for generic/lazy titles
+    if title.lower() in GENERIC_TITLES:
+        example = TITLE_EXAMPLES.get(folio_type, 'e.g., "Clear description of what this folio is about"')
+        raise HTTPException(
+            status_code=400,
+            detail=f"\"{title}\" is too generic - what's this {folio_type} actually about?\n\n{example}"
+        )
+
+    # Check minimum length (avoid "ok", "done", etc.)
+    if len(title) < 10:
+        example = TITLE_EXAMPLES.get(folio_type, 'e.g., "Clear description of what this folio is about"')
+        raise HTTPException(
+            status_code=400,
+            detail=f"\"{title}\" is too brief ({len(title)} chars) - give a bit more detail so others know what this covers.\n\n{example}"
+        )
+
+    # Truncate if too long (but don't reject - just fix it)
+    if len(title) > 100:
+        title = title[:97] + "..."
+
+    return title
+
+
 @router.post("/sites/{site_id}/folios")
 async def post_to_site(
     site_id: str,
@@ -278,6 +343,9 @@ async def post_to_site(
     store: JSONStore = Depends(get_project_store)
 ):
     """Post a folio to a site."""
+    # Validate and clean title
+    folio_create.title = validate_folio_title(folio_create.title, folio_create.type)
+
     # Verify site exists
     site = store.get_site(site_id)
     if not site:
@@ -1231,3 +1299,182 @@ async def generate_name(
     )
 
     return {"name": name}
+
+
+# Yield/Sack Endpoints (chain data passing)
+
+class YieldRequest(BaseModel):
+    """Request to store a yield in a chain's sack."""
+    chain_id: str
+    task_id: str
+    yield_data: YieldCreate
+    # Optional enrichment (usually added by Mill, not agent)
+    duration_seconds: Optional[int] = None
+    tokens_used: Optional[int] = None
+    shard_path: Optional[str] = None
+    tender_id: Optional[str] = None
+
+
+@router.post("/yields")
+async def store_yield(
+    yield_request: YieldRequest,
+    x_agent_id: str = Header(None, alias="X-Agent-Id"),
+    log_db: LogDatabase = Depends(get_project_log_db)
+):
+    """
+    Store a yield in the chain's sack.
+
+    Called when an agent completes and yields their output.
+    The yield becomes part of the chain's sack, accessible to downstream tasks.
+    """
+    sack_id = generate_yield_id()
+
+    success = log_db.add_yield(
+        sack_id=sack_id,
+        chain_id=yield_request.chain_id,
+        task_id=yield_request.task_id,
+        agent_id=x_agent_id,
+        status=yield_request.yield_data.status,
+        outcome=yield_request.yield_data.outcome,
+        artifacts=yield_request.yield_data.artifacts,
+        notes=yield_request.yield_data.notes,
+        duration_seconds=yield_request.duration_seconds,
+        tokens_used=yield_request.tokens_used,
+        shard_path=yield_request.shard_path,
+        tender_id=yield_request.tender_id
+    )
+
+    if not success:
+        raise HTTPException(status_code=500, detail="Failed to store yield")
+
+    logger.info(f"Stored yield {sack_id} for chain {yield_request.chain_id}")
+
+    return {
+        "success": True,
+        "sack_id": sack_id,
+        "chain_id": yield_request.chain_id
+    }
+
+
+@router.get("/yields/chain/{chain_id}", response_model=List[Yield])
+async def get_chain_yields(
+    chain_id: str,
+    log_db: LogDatabase = Depends(get_project_log_db)
+):
+    """
+    Get all yields in a chain, ordered by execution.
+
+    Used by The Hand to inspect what happened in a chain.
+    """
+    yields_data = log_db.get_chain_yields(chain_id)
+
+    return [
+        Yield(
+            sack_id=y["sack_id"],
+            chain_id=y["chain_id"],
+            task_id=y["task_id"],
+            agent_id=y.get("agent_id"),
+            timestamp=datetime.fromisoformat(y["timestamp"]),
+            status=y["status"],
+            outcome=y.get("outcome") or "",
+            artifacts=y.get("artifacts") or [],
+            notes=y.get("notes"),
+            duration_seconds=y.get("duration_seconds"),
+            tokens_used=y.get("tokens_used"),
+            shard_path=y.get("shard_path"),
+            tender_id=y.get("tender_id"),
+            metadata=y.get("metadata") or {}
+        )
+        for y in yields_data
+    ]
+
+
+@router.get("/yields/{sack_id}", response_model=Yield)
+async def get_yield(
+    sack_id: str,
+    log_db: LogDatabase = Depends(get_project_log_db)
+):
+    """Get specific yield by ID."""
+    yield_data = log_db.get_yield(sack_id)
+
+    if not yield_data:
+        raise HTTPException(status_code=404, detail="Yield not found")
+
+    return Yield(
+        sack_id=yield_data["sack_id"],
+        chain_id=yield_data["chain_id"],
+        task_id=yield_data["task_id"],
+        agent_id=yield_data.get("agent_id"),
+        timestamp=datetime.fromisoformat(yield_data["timestamp"]),
+        status=yield_data["status"],
+        outcome=yield_data.get("outcome") or "",
+        artifacts=yield_data.get("artifacts") or [],
+        notes=yield_data.get("notes"),
+        duration_seconds=yield_data.get("duration_seconds"),
+        tokens_used=yield_data.get("tokens_used"),
+        shard_path=yield_data.get("shard_path"),
+        tender_id=yield_data.get("tender_id"),
+        metadata=yield_data.get("metadata") or {}
+    )
+
+
+@router.get("/yields/status/{status}", response_model=List[Yield])
+async def get_yields_by_status(
+    status: str,
+    log_db: LogDatabase = Depends(get_project_log_db)
+):
+    """
+    Get yields by status.
+
+    Useful for finding blocked work across all chains.
+    """
+    yields_data = log_db.get_yields_by_status(status)
+
+    return [
+        Yield(
+            sack_id=y["sack_id"],
+            chain_id=y["chain_id"],
+            task_id=y["task_id"],
+            agent_id=y.get("agent_id"),
+            timestamp=datetime.fromisoformat(y["timestamp"]),
+            status=y["status"],
+            outcome=y.get("outcome") or "",
+            artifacts=y.get("artifacts") or [],
+            notes=y.get("notes"),
+            duration_seconds=y.get("duration_seconds"),
+            tokens_used=y.get("tokens_used"),
+            shard_path=y.get("shard_path"),
+            tender_id=y.get("tender_id"),
+            metadata=y.get("metadata") or {}
+        )
+        for y in yields_data
+    ]
+
+
+@router.get("/yields/agent/{agent_id}", response_model=List[Yield])
+async def get_agent_yields(
+    agent_id: str,
+    log_db: LogDatabase = Depends(get_project_log_db)
+):
+    """Get all yields by a specific agent."""
+    yields_data = log_db.get_agent_yields(agent_id)
+
+    return [
+        Yield(
+            sack_id=y["sack_id"],
+            chain_id=y["chain_id"],
+            task_id=y["task_id"],
+            agent_id=y.get("agent_id"),
+            timestamp=datetime.fromisoformat(y["timestamp"]),
+            status=y["status"],
+            outcome=y.get("outcome") or "",
+            artifacts=y.get("artifacts") or [],
+            notes=y.get("notes"),
+            duration_seconds=y.get("duration_seconds"),
+            tokens_used=y.get("tokens_used"),
+            shard_path=y.get("shard_path"),
+            tender_id=y.get("tender_id"),
+            metadata=y.get("metadata") or {}
+        )
+        for y in yields_data
+    ]

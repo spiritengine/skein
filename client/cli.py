@@ -1613,19 +1613,25 @@ def activity(ctx, since, output_json):
 
 @cli.command()
 @click.argument("site_id")
-@click.argument("description")
+@click.argument("title")
+@click.option("--content", "-c", help="Longer description (title used if not provided)")
 @click.pass_context
-def friction(ctx, site_id, description):
-    """Log a friction (problem/blocker)."""
-    validate_positional_args(site_id, description, command_name="friction")
+def friction(ctx, site_id, title, content):
+    """Log a friction (problem/blocker).
+
+    Example:
+        skein friction skein-dev "Must restart server after config changes"
+        skein friction skein-dev "Confusing error messages" -c "When X happens, the error says Y but should say Z"
+    """
+    validate_positional_args(site_id, title, command_name="friction")
     base_url = get_base_url(ctx.obj.get("url"))
     agent_id = get_agent_id(ctx.obj.get("agent"), base_url)
 
     data = {
         "type": "friction",
         "site_id": site_id,
-        "title": description[:100],  # First 100 chars as title
-        "content": description,
+        "title": title,
+        "content": content or title,
         "metadata": {}
     }
 
@@ -1635,19 +1641,25 @@ def friction(ctx, site_id, description):
 
 @cli.command()
 @click.argument("site_id")
-@click.argument("description")
+@click.argument("title")
+@click.option("--content", "-c", help="Longer description (title used if not provided)")
 @click.pass_context
-def notion(ctx, site_id, description):
-    """Post a notion (rough idea not fully formed)."""
-    validate_positional_args(site_id, description, command_name="notion")
+def notion(ctx, site_id, title, content):
+    """Post a notion (rough idea not fully formed).
+
+    Example:
+        skein notion skein-dev "Could use websockets for real-time updates"
+        skein notion skein-dev "Consider caching user prefs" -c "Detailed thoughts on implementation..."
+    """
+    validate_positional_args(site_id, title, command_name="notion")
     base_url = get_base_url(ctx.obj.get("url"))
     agent_id = get_agent_id(ctx.obj.get("agent"), base_url)
 
     data = {
         "type": "notion",
         "site_id": site_id,
-        "title": description[:100],  # First 100 chars as title
-        "content": description,
+        "title": title,
+        "content": content or title,
         "metadata": {}
     }
 
@@ -1657,19 +1669,25 @@ def notion(ctx, site_id, description):
 
 @cli.command()
 @click.argument("site_id")
-@click.argument("description")
+@click.argument("title")
+@click.option("--content", "-c", help="Longer description (title used if not provided)")
 @click.pass_context
-def finding(ctx, site_id, description):
-    """Post a finding (discovery during investigation)."""
-    validate_positional_args(site_id, description, command_name="finding")
+def finding(ctx, site_id, title, content):
+    """Post a finding (discovery during investigation).
+
+    Example:
+        skein finding skein-dev "Redis caching reduces latency by 40%"
+        skein finding skein-dev "Users prefer dark mode 3:1" -c "Survey results and methodology..."
+    """
+    validate_positional_args(site_id, title, command_name="finding")
     base_url = get_base_url(ctx.obj.get("url"))
     agent_id = get_agent_id(ctx.obj.get("agent"), base_url)
 
     data = {
         "type": "finding",
         "site_id": site_id,
-        "title": description[:100],  # First 100 chars as title
-        "content": description,
+        "title": title,
+        "content": content or title,
         "metadata": {}
     }
 
@@ -1741,19 +1759,25 @@ def mantle(ctx, site_id, content, name):
 
 @cli.command()
 @click.argument("site_id")
-@click.argument("description")
+@click.argument("title")
+@click.option("--content", "-c", help="Longer description (title used if not provided)")
 @click.pass_context
-def summary(ctx, site_id, description):
-    """Post a summary (completed work findings)."""
-    validate_positional_args(site_id, description, command_name="summary")
+def summary(ctx, site_id, title, content):
+    """Post a summary (completed work findings).
+
+    Example:
+        skein summary skein-dev "Completed OAuth integration"
+        skein summary skein-dev "Session retrospective: agent coordination" -c "Detailed notes..."
+    """
+    validate_positional_args(site_id, title, command_name="summary")
     base_url = get_base_url(ctx.obj.get("url"))
     agent_id = get_agent_id(ctx.obj.get("agent"), base_url)
 
     data = {
         "type": "summary",
         "site_id": site_id,
-        "title": description[:100],  # First 100 chars as title
-        "content": description,
+        "title": title,
+        "content": content or title,
         "metadata": {}
     }
 
