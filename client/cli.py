@@ -2733,9 +2733,13 @@ def register(ctx, capabilities, name, agent_type, description):
 @cli.command()
 @click.option("--json", "output_json", is_flag=True)
 @click.option("--status", default="active", help="Filter: active (default), retired, or all")
+@click.option("--all", "show_all", is_flag=True, help="Include retired agents (same as --status all)")
 @click.pass_context
-def roster(ctx, output_json, status):
+def roster(ctx, output_json, status, show_all):
     """List registered agents."""
+    # --all flag overrides --status to show all
+    if show_all:
+        status = "all"
     base_url = get_base_url(ctx.obj.get("url"))
     agent_id = get_agent_id(ctx.obj.get("agent"), base_url)
 
