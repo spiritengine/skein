@@ -3931,9 +3931,18 @@ def get_shard_worktree_module():
 
 
 @cli.group()
-def shard():
+@click.option("--project", "project_path", help="Path to project (default: current directory)")
+@click.pass_context
+def shard(ctx, project_path):
     """SHARD agent coordination - worktree management for parallel agent work."""
-    pass
+    ctx.ensure_object(dict)
+    if project_path:
+        # Override the project root before any shard operations
+        shard_worktree = get_shard_worktree_module()
+        try:
+            shard_worktree.set_project_root(project_path)
+        except shard_worktree.ShardError as e:
+            raise click.ClickException(str(e))
 
 
 @shard.command("spawn")

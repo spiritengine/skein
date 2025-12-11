@@ -54,8 +54,28 @@ def _find_project_root() -> Path:
         "Not in a git repository. Run 'skein shard' commands from within a git repo."
     )
 
+# These are set at import time but can be overridden with set_project_root()
 PROJECT_ROOT = _find_project_root()
 WORKTREES_DIR = PROJECT_ROOT / "worktrees"
+
+
+def set_project_root(path: str) -> None:
+    """
+    Override the project root for shard operations.
+
+    Use this to operate on a different project than the current working directory.
+
+    Args:
+        path: Path to the project root (must be a git repository)
+    """
+    global PROJECT_ROOT, WORKTREES_DIR
+
+    project_path = Path(path).resolve()
+    if not (project_path / ".git").exists():
+        raise ShardError(f"Not a git repository: {path}")
+
+    PROJECT_ROOT = project_path
+    WORKTREES_DIR = PROJECT_ROOT / "worktrees"
 
 
 class ShardError(Exception):
