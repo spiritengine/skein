@@ -4911,6 +4911,70 @@ def shard_apply(ctx, worktree_name, no_confirm):
         raise click.ClickException(f"Failed to apply SHARD: {e}")
 
 
+@shard.command("test")
+@click.argument("worktree_name")
+@click.option("--rite", "rite_name", default="test", help="Rite to run (default: test)")
+@click.option("--verbose", "-v", is_flag=True, help="Show command output")
+@click.pass_context
+def shard_test(ctx, worktree_name, rite_name, verbose):
+    """
+    Run a rite in a SHARD's worktree.
+
+    Runs the specified rite (default: 'test') in the shard's worktree directory.
+    The rite must be defined in the project's .skein/rites.yaml.
+
+    Examples:
+        skein shard test my-shard-001           # Run 'test' rite
+        skein shard test my-shard-001 --rite lint  # Run 'lint' rite
+        skein shard test my-shard-001 -v        # Verbose output
+    """
+    shard_worktree = get_shard_worktree_module()
+
+    try:
+        shard_info = shard_worktree.get_shard_status(worktree_name)
+        if not shard_info:
+            raise click.ClickException(f"SHARD not found: {worktree_name}")
+
+        worktree_path = Path(shard_info["worktree_path"])
+        if not worktree_path.exists():
+            raise click.ClickException(f"SHARD worktree not found: {worktree_path}")
+
+        # Load rites config from the MAIN project (not worktree)
+        # Rites are project-level, shards just run them in their context
+        from skein import shard as shard_module
+        project_root = shard_module.PROJECT_ROOT
+
+        config = load_rites_config(project_root)
+        rites_dict = config.get("rites", {})
+
+        if rite_name not in rites_dict:
+            if not rites_dict:
+                raise click.ClickException(
+                    f"No rites defined. Create {project_root / '.skein' / 'rites.yaml'}"
+                )
+            available = ", ".join(rites_dict.keys())
+            raise click.ClickException(f"Unknown rite: {rite_name}\nAvailable: {available}")
+
+        rite_config = rites_dict[rite_name]
+
+        click.echo(f"▶ Running rite '{rite_name}' in shard: {worktree_name}")
+        click.echo(f"  Worktree: {worktree_path}")
+
+        success = run_rite_commands(rite_name, rite_config, worktree_path, verbose)
+
+        if success:
+            click.echo(f"✓ Rite '{rite_name}' completed in shard {worktree_name}")
+        else:
+            raise click.ClickException(f"Rite '{rite_name}' failed in shard {worktree_name}")
+
+    except shard_worktree.ShardError as e:
+        raise click.ClickException(str(e))
+    except Exception as e:
+        if "ClickException" in str(type(e).__name__):
+            raise
+        raise click.ClickException(f"Failed to run rite in shard: {e}")
+
+
 # Web UI Command
 @cli.command()
 @click.option("--host", default="127.0.0.1", help="Host to bind to (default: 127.0.0.1)")
@@ -4976,6 +5040,197 @@ def ui_shortcut(ctx, host, port, open_browser):
 def shards_shortcut(ctx, active, filter_agent, output_json):
     """Shortcut for 'skein shard list'."""
     ctx.invoke(shard_list, active=active, filter_agent=filter_agent, output_json=output_json)
+
+
+# =============================================================================
+# RITES - Named project operations
+# =============================================================================
+
+def load_rites_config(project_root: Optional[Path] = None) -> Dict[str, Any]:
+    """
+    Load rites configuration from .skein/rites.yaml.
+
+    Returns dict with 'rites' key containing named rite definitions.
+    """
+    if project_root is None:
+        project_root = find_project_root()
+
+    if not project_root:
+        return {"rites": {}}
+
+    rites_file = project_root / ".skein" / "rites.yaml"
+    if not rites_file.exists():
+        return {"rites": {}}
+
+    try:
+        import yaml
+        with open(rites_file) as f:
+            config = yaml.safe_load(f) or {}
+        return config
+    except ImportError:
+        raise click.ClickException("PyYAML required for rites. Run: pip install pyyaml")
+    except Exception as e:
+        raise click.ClickException(f"Failed to load rites config: {e}")
+
+
+def run_rite_commands(
+    rite_name: str,
+    rite_config: Dict[str, Any],
+    working_dir: Optional[Path] = None,
+    verbose: bool = False
+) -> bool:
+    """
+    Execute a rite's commands.
+
+    Args:
+        rite_name: Name of the rite being run
+        rite_config: Rite configuration dict with 'commands' key
+        working_dir: Directory to run commands in (default: current)
+        verbose: Show command output in real-time
+
+    Returns:
+        True if all commands succeeded, False otherwise
+    """
+    import subprocess
+
+    commands = rite_config.get("commands", [])
+    if not commands:
+        click.echo(f"Rite '{rite_name}' has no commands defined", err=True)
+        return False
+
+    if isinstance(commands, str):
+        commands = [commands]
+
+    cwd = str(working_dir) if working_dir else None
+
+    for i, cmd in enumerate(commands, 1):
+        if verbose:
+            click.echo(f"[{i}/{len(commands)}] {cmd}")
+
+        try:
+            result = subprocess.run(
+                cmd,
+                shell=True,
+                cwd=cwd,
+                capture_output=not verbose,
+                text=True
+            )
+
+            if result.returncode != 0:
+                if not verbose and result.stderr:
+                    click.echo(result.stderr, err=True)
+                if not verbose and result.stdout:
+                    click.echo(result.stdout)
+                click.echo(f"✗ Command failed (exit {result.returncode}): {cmd}", err=True)
+                return False
+
+        except Exception as e:
+            click.echo(f"✗ Failed to run command: {e}", err=True)
+            return False
+
+    return True
+
+
+@cli.command("rite")
+@click.argument("rite_name", required=False)
+@click.option("--verbose", "-v", is_flag=True, help="Show command output")
+@click.pass_context
+def rite_cmd(ctx, rite_name, verbose):
+    """
+    Run a named project operation (rite).
+
+    Rites are defined in .skein/rites.yaml:
+
+    \b
+        rites:
+          test:
+            description: "Run test suite"
+            commands:
+              - pytest
+          lint:
+            description: "Check code style"
+            commands:
+              - ruff check .
+
+    Examples:
+        skein rite test          # Run the test rite
+        skein rite test -v       # Run with verbose output
+        skein rite               # List available rites (same as 'skein rites')
+    """
+    # If no rite name, list rites
+    if rite_name is None:
+        ctx.invoke(rites_list)
+        return
+
+    # Run the rite
+    project_root = find_project_root()
+    if not project_root:
+        raise click.ClickException("Not in a SKEIN project (no .skein/ directory found)")
+
+    config = load_rites_config(project_root)
+    rites_dict = config.get("rites", {})
+
+    if rite_name not in rites_dict:
+        available = ", ".join(rites_dict.keys()) if rites_dict else "(none)"
+        raise click.ClickException(f"Unknown rite: {rite_name}\nAvailable: {available}")
+
+    rite_config = rites_dict[rite_name]
+    description = rite_config.get("description", "")
+
+    click.echo(f"▶ Running rite: {rite_name}")
+    if description and verbose:
+        click.echo(f"  {description}")
+
+    success = run_rite_commands(rite_name, rite_config, project_root, verbose)
+
+    if success:
+        click.echo(f"✓ Rite '{rite_name}' completed")
+    else:
+        raise click.ClickException(f"Rite '{rite_name}' failed")
+
+
+@cli.command("rites")
+@click.pass_context
+def rites_list(ctx):
+    """
+    List available rites for this project.
+
+    Rites are defined in .skein/rites.yaml.
+    """
+    project_root = find_project_root()
+    if not project_root:
+        raise click.ClickException("Not in a SKEIN project (no .skein/ directory found)")
+
+    config = load_rites_config(project_root)
+    rites_dict = config.get("rites", {})
+
+    if not rites_dict:
+        click.echo("No rites defined.")
+        click.echo(f"\nCreate {project_root / '.skein' / 'rites.yaml'} with:")
+        click.echo("""
+rites:
+  test:
+    description: "Run test suite"
+    commands:
+      - pytest
+  lint:
+    description: "Check code style"
+    commands:
+      - ruff check .
+""")
+        return
+
+    click.echo(f"Available rites ({len(rites_dict)}):\n")
+    for name, rite_config in rites_dict.items():
+        description = rite_config.get("description", "")
+        commands = rite_config.get("commands", [])
+        cmd_count = len(commands) if isinstance(commands, list) else 1
+
+        click.echo(f"  {name}")
+        if description:
+            click.echo(f"    {description}")
+        click.echo(f"    ({cmd_count} command{'s' if cmd_count != 1 else ''})")
+        click.echo()
 
 
 def main():
