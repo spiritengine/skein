@@ -792,29 +792,15 @@ def sites(ctx, tag, output_json):
 # Issues Commands
 # ============================================================================
 
-@cli.command()
+@cli.command(hidden=True)
 @click.argument("site_id")
 @click.argument("title")
 @click.option("--content", help="Issue description")
 @click.option("--assign", help="Assign to agent")
 @click.pass_context
 def issue(ctx, site_id, title, content, assign):
-    """File an issue."""
-    validate_positional_args(site_id, title, command_name="issue")
-    base_url = get_base_url(ctx.obj.get("url"))
-    agent_id = get_agent_id(ctx.obj.get("agent"), base_url)
-
-    data = {
-        "type": "issue",
-        "site_id": site_id,
-        "title": title,
-        "content": content or title,
-        "assigned_to": assign,
-        "metadata": {}
-    }
-
-    result = make_request("POST", "/folios", base_url, agent_id, json=data)
-    click.echo(f"Created issue: {result['folio_id']}")
+    """File an issue (deprecated: use 'skein post issue')."""
+    ctx.invoke(post_issue, site_id=site_id, title=title, content=content, assign=assign)
 
 
 @cli.command()
@@ -915,32 +901,15 @@ def brief():
     pass
 
 
-@brief.command("create")
+@brief.command("create", hidden=True)
 @click.argument("site_id")
 @click.argument("content")
 @click.option("--title", required=True, help="Brief title (required)")
 @click.option("--target", help="Target agent")
 @click.pass_context
 def brief_create(ctx, site_id, content, title, target):
-    """Create a handoff brief."""
-    validate_positional_args(site_id, content, command_name="brief create")
-    base_url = get_base_url(ctx.obj.get("url"))
-    agent_id = get_agent_id(ctx.obj.get("agent"), base_url)
-
-    data = {
-        "type": "brief",
-        "site_id": site_id,
-        "title": title,
-        "content": content,
-        "target_agent": target,
-        "metadata": {"questions_enabled": True}
-    }
-
-    result = make_request("POST", "/folios", base_url, agent_id, json=data)
-    brief_id = result["folio_id"]
-
-    click.echo(f"Created brief: {brief_id}")
-    click.echo(f"\nHANDOFF: {brief_id}")
+    """Create a handoff brief (deprecated: use 'skein post brief')."""
+    ctx.invoke(post_brief, site_id=site_id, content=content, title=title, target=target)
 
 
 @brief.command("get")
@@ -1586,22 +1555,88 @@ def activity(ctx, since, output_json):
 
 
 # ============================================================================
-# Frictions Commands
+# Post Commands (Unified posting interface)
 # ============================================================================
 
-@cli.command()
+@cli.group()
+def post():
+    """Post folios (unified posting interface)."""
+    pass
+
+
+@post.command("issue")
+@click.argument("site_id")
+@click.argument("title")
+@click.option("--content", help="Issue description")
+@click.option("--assign", help="Assign to agent")
+@click.pass_context
+def post_issue(ctx, site_id, title, content, assign):
+    """Post an issue.
+
+    Example:
+        skein post issue skein-dev "Fix login bug" --content "Users can't login with OAuth"
+    """
+    validate_positional_args(site_id, title, command_name="post issue")
+    base_url = get_base_url(ctx.obj.get("url"))
+    agent_id = get_agent_id(ctx.obj.get("agent"), base_url)
+
+    data = {
+        "type": "issue",
+        "site_id": site_id,
+        "title": title,
+        "content": content or title,
+        "assigned_to": assign,
+        "metadata": {}
+    }
+
+    result = make_request("POST", "/folios", base_url, agent_id, json=data)
+    click.echo(f"Created issue: {result['folio_id']}")
+
+
+@post.command("brief")
+@click.argument("site_id")
+@click.argument("content")
+@click.option("--title", required=True, help="Brief title (required)")
+@click.option("--target", help="Target agent")
+@click.pass_context
+def post_brief(ctx, site_id, content, title, target):
+    """Post a handoff brief.
+
+    Example:
+        skein post brief skein-dev "Implement dark mode toggle" --title "Dark mode feature"
+    """
+    validate_positional_args(site_id, content, command_name="post brief")
+    base_url = get_base_url(ctx.obj.get("url"))
+    agent_id = get_agent_id(ctx.obj.get("agent"), base_url)
+
+    data = {
+        "type": "brief",
+        "site_id": site_id,
+        "title": title,
+        "content": content,
+        "target_agent": target,
+        "metadata": {"questions_enabled": True}
+    }
+
+    result = make_request("POST", "/folios", base_url, agent_id, json=data)
+    brief_id = result["folio_id"]
+
+    click.echo(f"Created brief: {brief_id}")
+    click.echo(f"\nHANDOFF: {brief_id}")
+
+
+@post.command("friction")
 @click.argument("site_id")
 @click.argument("title")
 @click.option("--details", "-d", help="Additional details (title used if not provided)")
 @click.pass_context
-def friction(ctx, site_id, title, details):
+def post_friction(ctx, site_id, title, details):
     """Log a friction (problem/blocker).
 
     Example:
-        skein friction skein-dev "Must restart server after config changes"
-        skein friction skein-dev "Confusing error messages" -d "When X happens, error says Y but should say Z"
+        skein post friction skein-dev "Must restart server after config changes"
     """
-    validate_positional_args(site_id, title, command_name="friction")
+    validate_positional_args(site_id, title, command_name="post friction")
     base_url = get_base_url(ctx.obj.get("url"))
     agent_id = get_agent_id(ctx.obj.get("agent"), base_url)
 
@@ -1617,19 +1652,18 @@ def friction(ctx, site_id, title, details):
     click.echo(f"Logged friction: {result['folio_id']}")
 
 
-@cli.command()
+@post.command("notion")
 @click.argument("site_id")
 @click.argument("title")
 @click.option("--details", "-d", help="Additional details (title used if not provided)")
 @click.pass_context
-def notion(ctx, site_id, title, details):
+def post_notion(ctx, site_id, title, details):
     """Post a notion (rough idea not fully formed).
 
     Example:
-        skein notion skein-dev "Could use websockets for real-time updates"
-        skein notion skein-dev "Consider caching user prefs" -d "Detailed thoughts on implementation..."
+        skein post notion skein-dev "Could use websockets for real-time updates"
     """
-    validate_positional_args(site_id, title, command_name="notion")
+    validate_positional_args(site_id, title, command_name="post notion")
     base_url = get_base_url(ctx.obj.get("url"))
     agent_id = get_agent_id(ctx.obj.get("agent"), base_url)
 
@@ -1645,19 +1679,18 @@ def notion(ctx, site_id, title, details):
     click.echo(f"Posted notion: {result['folio_id']}")
 
 
-@cli.command()
+@post.command("finding")
 @click.argument("site_id")
 @click.argument("title")
 @click.option("--details", "-d", help="Additional details (title used if not provided)")
 @click.pass_context
-def finding(ctx, site_id, title, details):
+def post_finding(ctx, site_id, title, details):
     """Post a finding (discovery during investigation).
 
     Example:
-        skein finding skein-dev "Redis caching reduces latency by 40%"
-        skein finding skein-dev "Users prefer dark mode 3:1" -d "Survey results and methodology..."
+        skein post finding skein-dev "Redis caching reduces latency by 40%"
     """
-    validate_positional_args(site_id, title, command_name="finding")
+    validate_positional_args(site_id, title, command_name="post finding")
     base_url = get_base_url(ctx.obj.get("url"))
     agent_id = get_agent_id(ctx.obj.get("agent"), base_url)
 
@@ -1673,81 +1706,18 @@ def finding(ctx, site_id, title, details):
     click.echo(f"Posted finding: {result['folio_id']}")
 
 
-@cli.command()
-@click.argument("site_id")
-@click.argument("content")
-@click.option("--name", help="Mantle name/title")
-@click.pass_context
-def mantle(ctx, site_id, content, name):
-    """Create a mantle (role template for agent orientation).
-
-    Mantles are orientation documents used by `skein ignite --mantle`.
-    They contain prompts, instructions, and context for a specific role.
-
-    Examples:
-        skein mantle skein-development "You are a researcher..."
-        skein mantle opus-agents "# Quartermaster\\n\\nYou oversee..." --name quartermaster
-    """
-    validate_positional_args(site_id, content, command_name="mantle")
-    base_url = get_base_url(ctx.obj.get("url"))
-    agent_id = get_agent_id(ctx.obj.get("agent"), base_url)
-
-    data = {
-        "type": "mantle",
-        "site_id": site_id,
-        "title": name or content[:100],  # Use name if provided, else first 100 chars
-        "content": content,
-        "metadata": {}
-    }
-
-    result = make_request("POST", "/folios", base_url, agent_id, json=data)
-    click.echo(f"Created mantle: {result['folio_id']}")
-
-
-@cli.command()
-@click.argument("site_id")
-@click.argument("content")
-@click.option("--name", help="Mantle name/title")
-@click.pass_context
-def mantle(ctx, site_id, content, name):
-    """Create a mantle (role template for agent orientation).
-
-    Mantles are orientation documents used by `skein ignite --mantle`.
-    They contain prompts, instructions, and context for a specific role.
-
-    Examples:
-        skein mantle skein-development "You are a researcher..."
-        skein mantle opus-agents "# Quartermaster\\n\\nYou oversee..." --name quartermaster
-    """
-    validate_positional_args(site_id, content, command_name="mantle")
-    base_url = get_base_url(ctx.obj.get("url"))
-    agent_id = get_agent_id(ctx.obj.get("agent"), base_url)
-
-    data = {
-        "type": "mantle",
-        "site_id": site_id,
-        "title": name or content[:100],  # Use name if provided, else first 100 chars
-        "content": content,
-        "metadata": {}
-    }
-
-    result = make_request("POST", "/folios", base_url, agent_id, json=data)
-    click.echo(f"Created mantle: {result['folio_id']}")
-
-
-@cli.command()
+@post.command("summary")
 @click.argument("site_id")
 @click.argument("title")
 @click.option("--details", "-d", help="Additional details (title used if not provided)")
 @click.pass_context
-def summary(ctx, site_id, title, details):
+def post_summary(ctx, site_id, title, details):
     """Post a summary (completed work findings).
 
     Example:
-        skein summary skein-dev "Completed OAuth integration"
-        skein summary skein-dev "Session retrospective: agent coordination" -d "Detailed notes..."
+        skein post summary skein-dev "Completed OAuth integration"
     """
-    validate_positional_args(site_id, title, command_name="summary")
+    validate_positional_args(site_id, title, command_name="post summary")
     base_url = get_base_url(ctx.obj.get("url"))
     agent_id = get_agent_id(ctx.obj.get("agent"), base_url)
 
@@ -1761,6 +1731,112 @@ def summary(ctx, site_id, title, details):
 
     result = make_request("POST", "/folios", base_url, agent_id, json=data)
     click.echo(f"Posted summary: {result['folio_id']}")
+
+
+# ============================================================================
+# Frictions Commands
+# ============================================================================
+
+@cli.command(hidden=True)
+@click.argument("site_id")
+@click.argument("title")
+@click.option("--details", "-d", help="Additional details (title used if not provided)")
+@click.pass_context
+def friction(ctx, site_id, title, details):
+    """Log a friction (deprecated: use 'skein post friction')."""
+    ctx.invoke(post_friction, site_id=site_id, title=title, details=details)
+
+
+@cli.command(hidden=True)
+@click.argument("site_id")
+@click.argument("title")
+@click.option("--details", "-d", help="Additional details (title used if not provided)")
+@click.pass_context
+def notion(ctx, site_id, title, details):
+    """Post a notion (deprecated: use 'skein post notion')."""
+    ctx.invoke(post_notion, site_id=site_id, title=title, details=details)
+
+
+@cli.command(hidden=True)
+@click.argument("site_id")
+@click.argument("title")
+@click.option("--details", "-d", help="Additional details (title used if not provided)")
+@click.pass_context
+def finding(ctx, site_id, title, details):
+    """Post a finding (deprecated: use 'skein post finding')."""
+    ctx.invoke(post_finding, site_id=site_id, title=title, details=details)
+
+
+@cli.command()
+@click.argument("site_id")
+@click.argument("content")
+@click.option("--name", help="Mantle name/title")
+@click.pass_context
+def mantle(ctx, site_id, content, name):
+    """Create a mantle (role template for agent orientation).
+
+    Mantles are orientation documents used by `skein ignite --mantle`.
+    They contain prompts, instructions, and context for a specific role.
+
+    Examples:
+        skein mantle skein-development "You are a researcher..."
+        skein mantle opus-agents "# Quartermaster\\n\\nYou oversee..." --name quartermaster
+    """
+    validate_positional_args(site_id, content, command_name="mantle")
+    base_url = get_base_url(ctx.obj.get("url"))
+    agent_id = get_agent_id(ctx.obj.get("agent"), base_url)
+
+    data = {
+        "type": "mantle",
+        "site_id": site_id,
+        "title": name or content[:100],  # Use name if provided, else first 100 chars
+        "content": content,
+        "metadata": {}
+    }
+
+    result = make_request("POST", "/folios", base_url, agent_id, json=data)
+    click.echo(f"Created mantle: {result['folio_id']}")
+
+
+@cli.command()
+@click.argument("site_id")
+@click.argument("content")
+@click.option("--name", help="Mantle name/title")
+@click.pass_context
+def mantle(ctx, site_id, content, name):
+    """Create a mantle (role template for agent orientation).
+
+    Mantles are orientation documents used by `skein ignite --mantle`.
+    They contain prompts, instructions, and context for a specific role.
+
+    Examples:
+        skein mantle skein-development "You are a researcher..."
+        skein mantle opus-agents "# Quartermaster\\n\\nYou oversee..." --name quartermaster
+    """
+    validate_positional_args(site_id, content, command_name="mantle")
+    base_url = get_base_url(ctx.obj.get("url"))
+    agent_id = get_agent_id(ctx.obj.get("agent"), base_url)
+
+    data = {
+        "type": "mantle",
+        "site_id": site_id,
+        "title": name or content[:100],  # Use name if provided, else first 100 chars
+        "content": content,
+        "metadata": {}
+    }
+
+    result = make_request("POST", "/folios", base_url, agent_id, json=data)
+    click.echo(f"Created mantle: {result['folio_id']}")
+
+
+@cli.command(hidden=True)
+@click.argument("site_id")
+@click.argument("title")
+@click.option("--details", "-d", help="Additional details (title used if not provided)")
+@click.pass_context
+def summary(ctx, site_id, title, details):
+    """Post a summary (deprecated: use 'skein post summary')."""
+    ctx.invoke(post_summary, site_id=site_id, title=title, details=details)
 
 
 @cli.command()
