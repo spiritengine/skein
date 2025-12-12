@@ -1470,9 +1470,10 @@ def status(ctx, output_json):
     open_frictions = len([f for f in all_folios if f.get('type') == 'friction' and f.get('status', 'open') == 'open'])
     pending_briefs = len([f for f in all_folios if f.get('type') == 'brief' and f.get('status', 'open') == 'open'])
 
-    # Count issues/frictions closed today via status threads
+    # Count folios closed today via status threads
     closed_issues_today = 0
     closed_frictions_today = 0
+    closed_today_total = 0
     try:
         # Get status threads with content "closed" from today
         status_threads = make_request("GET", "/threads", base_url, agent_id,
@@ -1483,6 +1484,7 @@ def status(ctx, output_json):
             if thread.get('content') == 'closed':
                 folio_id = thread.get('to_id')
                 folio_type = folio_types.get(folio_id)
+                closed_today_total += 1
                 if folio_type == 'issue':
                     closed_issues_today += 1
                 elif folio_type == 'friction':
@@ -1520,6 +1522,7 @@ def status(ctx, output_json):
             "open_frictions": open_frictions,
             "closed_issues_today": closed_issues_today,
             "closed_frictions_today": closed_frictions_today,
+            "closed_today": closed_today_total,
             "pending_briefs": pending_briefs,
             "active_agents": len(recent_agents),
             "last_hour": type_counts
@@ -1536,6 +1539,7 @@ def status(ctx, output_json):
     click.echo(f"Issues:     {yellow}{open_issues:>3}{reset} open / {closed_issues_today} closed today")
     click.echo(f"Frictions:  {yellow}{open_frictions:>3}{reset} open / {closed_frictions_today} closed today")
     click.echo(f"Briefs:     {yellow}{pending_briefs:>3}{reset} pending")
+    click.echo(f"Closed today:   {yellow}{closed_today_total:>3}{reset}")
     click.echo()
     click.echo(f"Active agents:  {yellow}{len(recent_agents):>3}{reset}")
     click.echo()
