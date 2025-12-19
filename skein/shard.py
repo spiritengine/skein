@@ -202,9 +202,32 @@ def spawn_shard(
     }
 
 
+def _is_path_inside_worktree(path: Path, worktree_path: Path) -> bool:
+    """
+    Check if a path is inside a worktree directory.
+
+    Resolves both paths to handle symlinks and relative paths correctly.
+
+    Args:
+        path: Path to check
+        worktree_path: Worktree directory path
+
+    Returns:
+        True if path is inside or equal to worktree_path
+    """
+    try:
+        resolved_path = path.resolve()
+        resolved_worktree = worktree_path.resolve()
+        # Check if path equals worktree or is a child of it
+        return resolved_path == resolved_worktree or resolved_worktree in resolved_path.parents
+    except (OSError, ValueError):
+        return False
+
+
 def cleanup_shard(
     worktree_name: str,
-    keep_branch: bool = False
+    keep_branch: bool = False,
+    caller_cwd: Optional[str] = None
 ) -> bool:
     """
     Remove SHARD worktree and optionally delete branch.
@@ -212,6 +235,9 @@ def cleanup_shard(
     Args:
         worktree_name: Worktree directory name (e.g., 'opus-security-architect-20251109-001')
         keep_branch: If True, keep git branch after removing worktree
+        caller_cwd: Optional path to check for self-deletion. If provided, cleanup will
+            be refused if this path is inside the target worktree. This is used to prevent
+            agents from deleting their own worktree after cd-ing elsewhere.
 
     Returns:
         True if successful, False otherwise
@@ -224,12 +250,22 @@ def cleanup_shard(
     if not worktree_path.exists():
         raise ShardError(f"Worktree not found: {worktree_path}")
 
-    # Check if current working directory is inside the worktree being deleted
+    # Check if caller_cwd is inside the worktree being deleted
+    # This prevents agents from deleting their own worktree after cd-ing elsewhere
+    if caller_cwd:
+        caller_path = Path(caller_cwd)
+        if _is_path_inside_worktree(caller_path, worktree_path):
+            raise ShardError(
+                f"Cannot cleanup: caller_cwd is inside the target worktree.\n"
+                f"caller_cwd: {caller_cwd}\n"
+                f"This may indicate self-deletion attempt."
+            )
+
+    # Also check current working directory for backwards compatibility
     # If so, exit with error to prevent breaking the user's shell
     try:
         current_dir = Path.cwd()
-        # Check if current directory is inside the worktree path
-        if worktree_path in current_dir.parents or current_dir == worktree_path:
+        if _is_path_inside_worktree(current_dir, worktree_path):
             raise ShardError(
                 f"Cannot cleanup from inside the worktree.\n"
                 f"Your shell is currently in: {current_dir}\n"
@@ -574,7 +610,7 @@ def get_shard_diff(worktree_name: str) -> Optional[str]:
         raise ShardError(f"Failed to get diff: {e}")
 
 
-def merge_shard(worktree_name: str) -> Dict[str, Any]:
+def merge_shard(worktree_name: str, caller_cwd: Optional[str] = None) -> Dict[str, Any]:
     """
     Merge shard branch into master and cleanup worktree.
 
@@ -583,6 +619,9 @@ def merge_shard(worktree_name: str) -> Dict[str, Any]:
 
     Args:
         worktree_name: Worktree directory name (e.g., 'opus-security-architect-20251109-001')
+        caller_cwd: Optional path to check for self-deletion. If provided, merge will
+            be refused if this path is inside the target worktree. This is used to prevent
+            agents from merging their own worktree after cd-ing elsewhere.
 
     Returns:
         Dict with:
@@ -598,10 +637,21 @@ def merge_shard(worktree_name: str) -> Dict[str, Any]:
     worktree_path = Path(shard_info["worktree_path"])
     branch_name = shard_info["branch_name"]
 
-    # Check if current working directory is inside the worktree being merged
+    # Check if caller_cwd is inside the worktree being merged
+    # This prevents agents from merging their own worktree after cd-ing elsewhere
+    if caller_cwd:
+        caller_path = Path(caller_cwd)
+        if _is_path_inside_worktree(caller_path, worktree_path):
+            raise ShardError(
+                f"Cannot merge: caller_cwd is inside the target worktree.\n"
+                f"caller_cwd: {caller_cwd}\n"
+                f"This may indicate self-deletion attempt."
+            )
+
+    # Also check current working directory for backwards compatibility
     try:
         current_dir = Path.cwd()
-        if worktree_path in current_dir.parents or current_dir == worktree_path:
+        if _is_path_inside_worktree(current_dir, worktree_path):
             raise ShardError(
                 f"Cannot merge from inside the worktree.\n"
                 f"Your shell is currently in: {current_dir}\n"

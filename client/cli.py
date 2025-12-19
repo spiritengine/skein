@@ -4243,21 +4243,32 @@ def shard_diff(ctx, worktree_name, show_stat):
 @shard.command("cleanup")
 @click.argument("worktree_name")
 @click.option("--keep-branch", is_flag=True, help="Keep git branch after removing worktree")
+@click.option("--caller-cwd", "explicit_caller_cwd", default=None,
+              help="Original working directory of caller (for orchestration tools)")
 @click.confirmation_option(prompt="Are you sure you want to cleanup this SHARD?")
 @click.pass_context
-def shard_cleanup(ctx, worktree_name, keep_branch):
+def shard_cleanup(ctx, worktree_name, keep_branch, explicit_caller_cwd):
     """
     Remove SHARD worktree and optionally delete branch.
 
     Example:
         skein shard cleanup opus-security-architect-20251109-001
         skein shard cleanup opus-security-architect-20251109-001 --keep-branch
+
+    For orchestration tools (e.g., Spindle), pass --caller-cwd to prevent
+    agents from deleting their own worktree after cd-ing elsewhere.
     """
+    import os
+
     # Import shard_worktree from current project
     shard_worktree = get_shard_worktree_module()
 
+    # Use explicit caller_cwd if provided (from orchestration tools),
+    # otherwise fall back to current working directory
+    caller_cwd = explicit_caller_cwd if explicit_caller_cwd else os.getcwd()
+
     try:
-        shard_worktree.cleanup_shard(worktree_name, keep_branch=keep_branch)
+        shard_worktree.cleanup_shard(worktree_name, keep_branch=keep_branch, caller_cwd=caller_cwd)
 
         click.echo(f"✓ Cleaned up SHARD: {worktree_name}")
         if not keep_branch:
@@ -4273,8 +4284,10 @@ def shard_cleanup(ctx, worktree_name, keep_branch):
 
 @shard.command("merge")
 @click.argument("worktree_name")
+@click.option("--caller-cwd", "explicit_caller_cwd", default=None,
+              help="Original working directory of caller (for orchestration tools)")
 @click.pass_context
-def shard_merge(ctx, worktree_name):
+def shard_merge(ctx, worktree_name, explicit_caller_cwd):
     """
     Merge SHARD branch into master and cleanup.
 
@@ -4282,11 +4295,20 @@ def shard_merge(ctx, worktree_name):
 
     Example:
         skein shard merge beadle_0001-20251202-001
+
+    For orchestration tools (e.g., Spindle), pass --caller-cwd to prevent
+    agents from merging their own worktree after cd-ing elsewhere.
     """
+    import os
+
     shard_worktree = get_shard_worktree_module()
 
+    # Use explicit caller_cwd if provided (from orchestration tools),
+    # otherwise fall back to current working directory
+    caller_cwd = explicit_caller_cwd if explicit_caller_cwd else os.getcwd()
+
     try:
-        result = shard_worktree.merge_shard(worktree_name)
+        result = shard_worktree.merge_shard(worktree_name, caller_cwd=caller_cwd)
 
         if result["success"]:
             click.echo(result["message"])
