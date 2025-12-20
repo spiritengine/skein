@@ -11,6 +11,7 @@ Usage:
 
 import os
 import sys
+import re
 import json
 import click
 import requests
@@ -173,6 +174,38 @@ def make_request(method: str, endpoint: str, base_url: str, agent_id: str, **kwa
             except:
                 raise click.ClickException(f"API error: {e.response.text or str(e)}")
         raise click.ClickException(f"Connection error: {str(e)}")
+
+
+def make_title_from_content(content: str, max_length: int = 100) -> str:
+    """
+    Generate a clean title from content.
+
+    Strips markdown, normalizes whitespace, and truncates to max_length.
+    The API also validates, but this gives better UX by fixing client-side.
+    """
+    title = content
+
+    # Take first line/sentence as title candidate
+    title = title.split('\n')[0].strip()
+
+    # Strip markdown cruft
+    title = re.sub(r'^#+\s*', '', title)  # Leading headers
+    title = re.sub(r'\*\*(.+?)\*\*', r'\1', title)  # Bold **text**
+    title = re.sub(r'__(.+?)__', r'\1', title)  # Bold __text__
+    title = re.sub(r'\*(.+?)\*', r'\1', title)  # Italic *text*
+    title = re.sub(r'_([^_]+)_', r'\1', title)  # Italic _text_
+    title = re.sub(r'`([^`]+)`', r'\1', title)  # Code `text`
+    title = re.sub(r'~~(.+?)~~', r'\1', title)  # Strikethrough
+    title = re.sub(r'\[([^\]]+)\]\([^)]+\)', r'\1', title)  # Links
+
+    # Normalize whitespace
+    title = ' '.join(title.split())
+
+    # Truncate with ellipsis if needed
+    if len(title) > max_length:
+        title = title[:max_length - 3].rstrip() + "..."
+
+    return title
 
 
 @click.group()
@@ -1789,38 +1822,7 @@ def mantle(ctx, site_id, content, name):
     data = {
         "type": "mantle",
         "site_id": site_id,
-        "title": name or content[:100],  # Use name if provided, else first 100 chars
-        "content": content,
-        "metadata": {}
-    }
-
-    result = make_request("POST", "/folios", base_url, agent_id, json=data)
-    click.echo(f"Created mantle: {result['folio_id']}")
-
-
-@cli.command()
-@click.argument("site_id")
-@click.argument("content")
-@click.option("--name", help="Mantle name/title")
-@click.pass_context
-def mantle(ctx, site_id, content, name):
-    """Create a mantle (role template for agent orientation).
-
-    Mantles are orientation documents used by `skein ignite --mantle`.
-    They contain prompts, instructions, and context for a specific role.
-
-    Examples:
-        skein mantle skein-development "You are a researcher..."
-        skein mantle opus-agents "# Quartermaster\\n\\nYou oversee..." --name quartermaster
-    """
-    validate_positional_args(site_id, content, command_name="mantle")
-    base_url = get_base_url(ctx.obj.get("url"))
-    agent_id = get_agent_id(ctx.obj.get("agent"), base_url)
-
-    data = {
-        "type": "mantle",
-        "site_id": site_id,
-        "title": name or content[:100],  # Use name if provided, else first 100 chars
+        "title": name or make_title_from_content(content),
         "content": content,
         "metadata": {}
     }
@@ -1874,7 +1876,7 @@ def writ(ctx, site_id, decision, thread_id):
     data = {
         "type": "writ",
         "site_id": site_id,
-        "title": decision[:100],
+        "title": make_title_from_content(decision),
         "content": decision,
         "metadata": {"thread_id": thread_id} if thread_id else {}
     }
@@ -4826,7 +4828,7 @@ def shard_tender(ctx, worktree_name, site, reviewer, summary, status, confidence
     folio_data = {
         "type": "tender",
         "site_id": site,
-        "title": summary_text[:100] if summary_text else worktree_name,
+        "title": make_title_from_content(summary_text) if summary_text else f"Shard tender: {worktree_name}",
         "content": content,
         "metadata": {
             "worktree_name": worktree_name,
