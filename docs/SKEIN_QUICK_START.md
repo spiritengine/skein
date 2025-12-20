@@ -378,7 +378,7 @@ skein --agent AGENT brief create site-id "$(cat <<'EOF'
 ## Marginalia
 [Talked to Patrick, see Slack, etc.]
 EOF
-)" --successor-name "Connection Pool Optimizer"
+)"
 # Output:
 # Created brief: brief-20251107-x9k2
 # HANDOFF: brief-20251107-x9k2
@@ -389,9 +389,6 @@ EOF
 curl -X POST http://localhost:8000/skein/threads \
   -H "Content-Type: application/json" \
   -d '{"from_id": "brief-20251107-x9k2", "to_id": "issue-123", "type": "reference"}'
-
-# Predecessor names successor based on what the work needs
-# Examples: "Performance Optimizer", "Race Condition Fixer", "Auth Specialist"
 ```
 
 ### Retiring from Session
