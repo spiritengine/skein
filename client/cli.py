@@ -2015,6 +2015,301 @@ def show(ctx, folio_id, no_pager, output_json):
 
 @cli.command()
 @click.argument("folio_id")
+@click.option("--format", "-f", "output_format", type=click.Choice(["epub", "md", "markdown", "json"]), default="epub", help="Export format (default: epub)")
+@click.option("--output", "-o", help="Output file path (default: ./<folio_id>.<format>)")
+@click.pass_context
+def export(ctx, folio_id, output_format, output):
+    """Export a folio to various formats (epub, markdown, json).
+
+    Examples:
+        skein export brief-20251124-abc
+        skein export finding-20251120-xyz --format md
+        skein export issue-20251121-def --format epub -o research.epub
+    """
+    import zipfile
+    import uuid
+    from datetime import datetime as dt
+
+    base_url = get_base_url(ctx.obj.get("url"))
+    agent_id = get_agent_id(ctx.obj.get("agent"), base_url)
+
+    # Fetch the folio
+    folio_data = make_request("GET", f"/folios/{folio_id}", base_url, agent_id)
+
+    title = folio_data.get("title", folio_data.get("folio_id", "Untitled"))
+    content = folio_data.get("content", "")
+    ftype = folio_data.get("type", "folio")
+    created_at = folio_data.get("created_at", "")[:19].replace("T", " ")
+    created_by = folio_data.get("created_by", "unknown")
+    status = folio_data.get("status", "")
+
+    # Normalize format
+    if output_format == "markdown":
+        output_format = "md"
+
+    # Determine output path
+    if not output:
+        output = f"{folio_id}.{output_format}"
+
+    if output_format == "json":
+        with open(output, "w") as f:
+            json.dump(folio_data, f, indent=2, default=str)
+        click.echo(f"Exported to {output}")
+        return
+
+    if output_format == "md":
+        # Markdown format
+        md_content = f"# {title}\n\n"
+        md_content += f"**Type:** {ftype}  \n"
+        md_content += f"**ID:** {folio_id}  \n"
+        md_content += f"**Created:** {created_at}  \n"
+        md_content += f"**Author:** {created_by}  \n"
+        if status:
+            md_content += f"**Status:** {status}  \n"
+        md_content += "\n---\n\n"
+        md_content += content
+
+        with open(output, "w") as f:
+            f.write(md_content)
+        click.echo(f"Exported to {output}")
+        return
+
+    if output_format == "epub":
+        # Generate EPUB
+        book_id = f"skein-{folio_id}-{uuid.uuid4().hex[:6]}"
+
+        # Convert content to HTML
+        html_content = _content_to_epub_html(content, title)
+
+        with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as zf:
+            # mimetype (must be first and uncompressed)
+            zf.writestr("mimetype", "application/epub+zip", compress_type=zipfile.ZIP_STORED)
+
+            # container.xml
+            container_xml = '''<?xml version="1.0" encoding="UTF-8"?>
+<container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
+  <rootfiles>
+    <rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/>
+  </rootfiles>
+</container>'''
+            zf.writestr("META-INF/container.xml", container_xml)
+
+            # CSS
+            css_content = '''body {
+    font-family: Georgia, serif;
+    line-height: 1.6;
+    margin: 2em;
+    color: #333;
+}
+h1, h2, h3 { color: #222; margin-top: 1.5em; }
+h1 { font-size: 1.8em; border-bottom: 2px solid #333; padding-bottom: 0.3em; }
+h2 { font-size: 1.4em; border-bottom: 1px solid #666; padding-bottom: 0.2em; }
+h3 { font-size: 1.2em; }
+pre { background-color: #f4f4f4; padding: 1em; white-space: pre-wrap; word-wrap: break-word; }
+code { background-color: #f4f4f4; padding: 0.2em 0.4em; font-family: monospace; }
+table { border-collapse: collapse; margin: 1em 0; width: 100%; }
+th, td { border: 1px solid #ddd; padding: 0.5em; text-align: left; }
+th { background-color: #f4f4f4; font-weight: bold; }
+ul, ol { margin-left: 1.5em; }
+li { margin-bottom: 0.3em; }
+.metadata { color: #666; font-size: 0.9em; margin-bottom: 1em; }
+'''
+            zf.writestr("OEBPS/styles.css", css_content)
+
+            # Content XHTML with metadata
+            escaped_title = title.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+            content_xhtml = f'''<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml">
+<head>
+  <title>{escaped_title}</title>
+  <link rel="stylesheet" type="text/css" href="styles.css"/>
+</head>
+<body>
+<h1>{escaped_title}</h1>
+<div class="metadata">
+<p><strong>Type:</strong> {ftype} | <strong>ID:</strong> {folio_id}</p>
+<p><strong>Created:</strong> {created_at} | <strong>Author:</strong> {created_by}</p>
+{f'<p><strong>Status:</strong> {status}</p>' if status else ''}
+</div>
+<hr/>
+{html_content}
+</body>
+</html>'''
+            zf.writestr("OEBPS/content.xhtml", content_xhtml)
+
+            # content.opf
+            now = dt.now().strftime("%Y-%m-%dT%H:%M:%SZ")
+            content_opf = f'''<?xml version="1.0" encoding="UTF-8"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="BookId">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+    <dc:identifier id="BookId">{book_id}</dc:identifier>
+    <dc:title>{escaped_title}</dc:title>
+    <dc:creator>{created_by}</dc:creator>
+    <dc:language>en</dc:language>
+    <meta property="dcterms:modified">{now}</meta>
+  </metadata>
+  <manifest>
+    <item id="content" href="content.xhtml" media-type="application/xhtml+xml"/>
+    <item id="styles" href="styles.css" media-type="text/css"/>
+    <item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>
+  </manifest>
+  <spine>
+    <itemref idref="nav"/>
+    <itemref idref="content"/>
+  </spine>
+</package>'''
+            zf.writestr("OEBPS/content.opf", content_opf)
+
+            # Navigation document
+            nav_xhtml = f'''<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops">
+<head>
+  <title>Navigation</title>
+  <link rel="stylesheet" type="text/css" href="styles.css"/>
+</head>
+<body>
+  <nav epub:type="toc" id="toc">
+    <h1>Table of Contents</h1>
+    <ol>
+      <li><a href="content.xhtml">{escaped_title}</a></li>
+    </ol>
+  </nav>
+</body>
+</html>'''
+            zf.writestr("OEBPS/nav.xhtml", nav_xhtml)
+
+        click.echo(f"Exported to {output}")
+        return
+
+
+def _content_to_epub_html(content, title):
+    """Convert markdown-like content to HTML for epub export."""
+    import re
+
+    def escape_xml(text):
+        return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
+
+    def format_inline(text):
+        text = escape_xml(text)
+        text = re.sub(r'\*\*(.+?)\*\*', r'<strong>\1</strong>', text)
+        text = re.sub(r'(?<!\*)\*([^*]+?)\*(?!\*)', r'<em>\1</em>', text)
+        text = re.sub(r'`(.+?)`', r'<code>\1</code>', text)
+        return text
+
+    lines = content.split('\n')
+    html_parts = []
+    in_code_block = False
+    in_list = False
+    list_type = None
+    table_rows = []
+
+    for line in lines:
+        stripped = line.strip()
+
+        # Code blocks
+        if stripped.startswith('```'):
+            if in_code_block:
+                html_parts.append('</code></pre>')
+                in_code_block = False
+            else:
+                html_parts.append('<pre><code>')
+                in_code_block = True
+            continue
+
+        if in_code_block:
+            html_parts.append(escape_xml(line))
+            continue
+
+        # Close list if not a list item
+        is_list_item = (stripped.startswith('- ') or stripped.startswith('* ') or
+                       (stripped and stripped[0].isdigit() and '. ' in stripped))
+        if in_list and not is_list_item and stripped:
+            html_parts.append(f'</{list_type}>')
+            in_list = False
+            list_type = None
+
+        # Empty lines - close table if any
+        if not stripped:
+            if table_rows:
+                html_parts.append(_build_table(table_rows))
+                table_rows = []
+            continue
+
+        # Headers
+        if line.startswith('### '):
+            html_parts.append(f'<h3>{escape_xml(line[4:])}</h3>')
+            continue
+        if line.startswith('## '):
+            html_parts.append(f'<h2>{escape_xml(line[3:])}</h2>')
+            continue
+        if line.startswith('# '):
+            html_parts.append(f'<h1>{escape_xml(line[2:])}</h1>')
+            continue
+
+        # Tables
+        if '|' in line and stripped.startswith('|') and stripped.endswith('|'):
+            cells = [c.strip() for c in line.split('|')[1:-1]]
+            if '---' in line:
+                continue
+            table_rows.append(cells)
+            continue
+
+        # Lists
+        if stripped.startswith('- ') or stripped.startswith('* '):
+            if not in_list:
+                html_parts.append('<ul>')
+                in_list = True
+                list_type = 'ul'
+            html_parts.append(f'<li>{format_inline(stripped[2:])}</li>')
+            continue
+
+        if stripped and stripped[0].isdigit() and '. ' in stripped:
+            if not in_list:
+                html_parts.append('<ol>')
+                in_list = True
+                list_type = 'ol'
+            item_content = stripped.split('. ', 1)[1] if '. ' in stripped else stripped
+            html_parts.append(f'<li>{format_inline(item_content)}</li>')
+            continue
+
+        # Regular paragraph
+        if stripped:
+            html_parts.append(f'<p>{format_inline(line)}</p>')
+
+    # Close open elements
+    if in_list:
+        html_parts.append(f'</{list_type}>')
+    if table_rows:
+        html_parts.append(_build_table(table_rows))
+    if in_code_block:
+        html_parts.append('</code></pre>')
+
+    return '\n'.join(html_parts)
+
+
+def _build_table(rows):
+    """Build HTML table from rows."""
+    if not rows:
+        return ''
+
+    def format_inline(text):
+        import re
+        text = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        text = re.sub(r'\*\*(.+?)\*\*', r'<strong>\1</strong>', text)
+        return text
+
+    html = ['<table>']
+    html.append('<tr>' + ''.join(f'<th>{format_inline(c)}</th>' for c in rows[0]) + '</tr>')
+    for row in rows[1:]:
+        html.append('<tr>' + ''.join(f'<td>{format_inline(c)}</td>' for c in row) + '</tr>')
+    html.append('</table>')
+    return '\n'.join(html)
+
+
+@cli.command()
+@click.argument("folio_id")
 @click.option("--title", "-t", help="New title for the folio")
 @click.option("--content", "-c", help="New content for the folio")
 @click.option("--status", "-s", help="New status (e.g., open, closed, investigating)")
