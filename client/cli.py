@@ -2989,49 +2989,48 @@ def update(ctx, resource_id, status_value):
 
 
 @cli.command()
-@click.argument("resource_id")
-@click.argument("note_positional", required=False, default=None)
+@click.argument("resource_ids", nargs=-1, required=True)
 @click.option("--link", help="Link to solution (folio ID)")
 @click.option("--note", help="Note about the fix")
 @click.pass_context
-def close(ctx, resource_id, note_positional, link, note):
-    """Close an issue/friction (sets status to closed).
+def close(ctx, resource_ids, link, note):
+    """Close one or more issues/frictions (sets status to closed).
 
     Examples:
         skein close issue-123
-        skein close issue-123 "Fixed the bug"
+        skein close issue-123 --note "Fixed the bug"
+        skein close issue-123 folio-456 folio-789 --note "batch close"
         skein close issue-123 --link summary-456
         skein close friction-789 --link summary-456 --note "Fixed by adding validation"
     """
-    # Allow note as positional or --note flag
-    note = note or note_positional
     base_url = get_base_url(ctx.obj.get("url"))
     agent_id = get_agent_id(ctx.obj.get("agent"), base_url)
 
     if agent_id == "unknown":
         raise click.ClickException("Must set SKEIN_AGENT_ID or use --agent flag to close")
 
-    # Create status thread (closed)
-    status_data = {
-        "from_id": resource_id,
-        "to_id": resource_id,
-        "type": "status",
-        "content": "closed"
-    }
-    make_request("POST", "/threads", base_url, agent_id, json=status_data)
-    click.echo(f"Closed {resource_id}")
-
-    # Create reference thread if --link provided
-    if link:
-        ref_content = note if note else "Resolved"
-        ref_data = {
+    for resource_id in resource_ids:
+        # Create status thread (closed)
+        status_data = {
             "from_id": resource_id,
-            "to_id": link,
-            "type": "reference",
-            "content": ref_content
+            "to_id": resource_id,
+            "type": "status",
+            "content": "closed"
         }
-        make_request("POST", "/threads", base_url, agent_id, json=ref_data)
-        click.echo(f"Linked to {link}: {ref_content}")
+        make_request("POST", "/threads", base_url, agent_id, json=status_data)
+        click.echo(f"Closed {resource_id}")
+
+        # Create reference thread if --link provided
+        if link:
+            ref_content = note if note else "Resolved"
+            ref_data = {
+                "from_id": resource_id,
+                "to_id": link,
+                "type": "reference",
+                "content": ref_content
+            }
+            make_request("POST", "/threads", base_url, agent_id, json=ref_data)
+            click.echo(f"Linked to {link}: {ref_content}")
 
 
 @cli.command()
