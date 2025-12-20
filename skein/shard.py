@@ -18,11 +18,29 @@ except ImportError:
     git = None
 
 
+class ShardError(Exception):
+    """Base exception for SHARD operations."""
+    pass
+
+
 # Project root detection
 # Note: We need to find the git repo root for the project the user is currently
 # working in (based on current working directory), not where this shard.py file lives.
+# Priority: SKEIN_PROJECT env var > cwd-based git repo detection
 def _find_project_root() -> Path:
-    """Find the git project root for the current working directory."""
+    """Find the git project root, checking SKEIN_PROJECT env var first."""
+    # Check SKEIN_PROJECT env var first
+    env_project = os.environ.get("SKEIN_PROJECT")
+    if env_project:
+        project_path = Path(env_project).resolve()
+        if (project_path / ".git").exists():
+            return project_path
+        # If SKEIN_PROJECT is set but invalid, raise an error
+        raise ShardError(
+            f"SKEIN_PROJECT env var points to non-git directory: {env_project}"
+        )
+
+    # Fall back to cwd-based detection
     current = Path.cwd()  # Start from current working directory
 
     # Walk up until we find a .git directory (real repo root, not worktree)
@@ -51,12 +69,31 @@ def _find_project_root() -> Path:
 
     # Fallback: couldn't find git repo
     raise ShardError(
-        "Not in a git repository. Run 'skein shard' commands from within a git repo."
+        "Not in a git repository. Run 'skein shard' commands from within a git repo, "
+        "or set SKEIN_PROJECT env var."
     )
 
-# These are set at import time but can be overridden with set_project_root()
-PROJECT_ROOT = _find_project_root()
-WORKTREES_DIR = PROJECT_ROOT / "worktrees"
+# Lazy-initialized project root. None means not yet resolved.
+# Use get_project_root() to access - never access directly.
+_PROJECT_ROOT: Optional[Path] = None
+_WORKTREES_DIR: Optional[Path] = None
+
+
+def get_project_root() -> Path:
+    """Get the project root, resolving lazily if needed."""
+    global _PROJECT_ROOT, _WORKTREES_DIR
+    if _PROJECT_ROOT is None:
+        _PROJECT_ROOT = _find_project_root()
+        _WORKTREES_DIR = _PROJECT_ROOT / "worktrees"
+    return _PROJECT_ROOT
+
+
+def get_worktrees_dir() -> Path:
+    """Get the worktrees directory, resolving project root lazily if needed."""
+    global _WORKTREES_DIR
+    if _WORKTREES_DIR is None:
+        get_project_root()  # This sets _WORKTREES_DIR
+    return _WORKTREES_DIR
 
 
 def set_project_root(path: str) -> None:
@@ -68,19 +105,14 @@ def set_project_root(path: str) -> None:
     Args:
         path: Path to the project root (must be a git repository)
     """
-    global PROJECT_ROOT, WORKTREES_DIR
+    global _PROJECT_ROOT, _WORKTREES_DIR
 
     project_path = Path(path).resolve()
     if not (project_path / ".git").exists():
         raise ShardError(f"Not a git repository: {path}")
 
-    PROJECT_ROOT = project_path
-    WORKTREES_DIR = PROJECT_ROOT / "worktrees"
-
-
-class ShardError(Exception):
-    """Base exception for SHARD operations."""
-    pass
+    _PROJECT_ROOT = project_path
+    _WORKTREES_DIR = _PROJECT_ROOT / "worktrees"
 
 
 def _get_repo() -> 'git.Repo':
@@ -89,9 +121,9 @@ def _get_repo() -> 'git.Repo':
         raise ShardError("GitPython not installed. Run: pip install GitPython")
 
     try:
-        return git.Repo(PROJECT_ROOT)
+        return git.Repo(get_project_root())
     except git.InvalidGitRepositoryError:
-        raise ShardError(f"Not a git repository: {PROJECT_ROOT}")
+        raise ShardError(f"Not a git repository: {get_project_root()}")
 
 
 def _get_next_sequence(agent_id: str, date: str) -> int:
@@ -108,12 +140,13 @@ def _get_next_sequence(agent_id: str, date: str) -> int:
     Returns:
         Next sequence number (e.g., 1, 2, 3...)
     """
-    if not WORKTREES_DIR.exists():
+    worktrees_dir = get_worktrees_dir()
+    if not worktrees_dir.exists():
         return 1
 
     pattern_prefix = f"{agent_id}-{date}-"
     existing = [
-        d.name for d in WORKTREES_DIR.iterdir()
+        d.name for d in worktrees_dir.iterdir()
         if d.is_dir() and d.name.startswith(pattern_prefix)
     ]
 
@@ -159,8 +192,9 @@ def spawn_shard(
     Raises:
         ShardError: If worktree creation fails
     """
+    worktrees_dir = get_worktrees_dir()
     # Ensure worktrees directory exists
-    WORKTREES_DIR.mkdir(exist_ok=True)
+    worktrees_dir.mkdir(exist_ok=True)
 
     # Generate date and sequence
     date = datetime.now().strftime("%Y%m%d")
@@ -169,7 +203,7 @@ def spawn_shard(
     # Generate names
     worktree_name = f"{agent_id}-{date}-{seq:03d}"
     branch_name = f"shard-{agent_id}-{date}-{seq:03d}"
-    worktree_path = WORKTREES_DIR / worktree_name
+    worktree_path = worktrees_dir / worktree_name
 
     # Generate shard_id (could be more sophisticated, for now use worktree_name)
     # In future, could use random suffix like SKEIN folio IDs
@@ -245,7 +279,7 @@ def cleanup_shard(
     Raises:
         ShardError: If cleanup fails
     """
-    worktree_path = WORKTREES_DIR / worktree_name
+    worktree_path = get_worktrees_dir() / worktree_name
 
     if not worktree_path.exists():
         raise ShardError(f"Worktree not found: {worktree_path}")
@@ -269,7 +303,7 @@ def cleanup_shard(
             raise ShardError(
                 f"Cannot cleanup from inside the worktree.\n"
                 f"Your shell is currently in: {current_dir}\n"
-                f"Please change directory first: cd {PROJECT_ROOT}"
+                f"Please change directory first: cd {get_project_root()}"
             )
     except OSError:
         # If we can't determine current directory (e.g., it's already deleted),
@@ -373,9 +407,10 @@ def _parse_worktree_info(worktree_path: str) -> Optional[Dict[str, str]]:
         SHARD info dict or None if not a SHARD worktree
     """
     path = Path(worktree_path)
+    worktrees_dir = get_worktrees_dir()
 
     # Check if this is in our worktrees directory
-    if not str(path).endswith(tuple(os.listdir(WORKTREES_DIR) if WORKTREES_DIR.exists() else [])):
+    if not str(path).endswith(tuple(os.listdir(worktrees_dir) if worktrees_dir.exists() else [])):
         # Try simpler check
         if "worktrees/" not in str(path):
             return None
@@ -655,7 +690,7 @@ def merge_shard(worktree_name: str, caller_cwd: Optional[str] = None) -> Dict[st
             raise ShardError(
                 f"Cannot merge from inside the worktree.\n"
                 f"Your shell is currently in: {current_dir}\n"
-                f"Please change directory first: cd {PROJECT_ROOT}"
+                f"Please change directory first: cd {get_project_root()}"
             )
     except OSError:
         pass
@@ -788,8 +823,8 @@ def detect_shard_environment() -> Optional[Dict[str, str]]:
     if not worktree_root:
         return None
 
-    # Check if this worktree is in our WORKTREES_DIR
-    if not str(worktree_root).startswith(str(WORKTREES_DIR)):
+    # Check if this worktree is in our worktrees directory
+    if not str(worktree_root).startswith(str(get_worktrees_dir())):
         return None
 
     # Get worktree name
