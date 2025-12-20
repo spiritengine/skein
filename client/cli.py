@@ -4276,16 +4276,18 @@ def get_shard_worktree_module():
 
 
 @cli.group()
-@click.option("--project", "project_path", help="Path to project (default: current directory)")
+@click.option("--project", "project_path", help="Path to project (default: SKEIN_PROJECT env or current directory)")
 @click.pass_context
 def shard(ctx, project_path):
     """SHARD agent coordination - worktree management for parallel agent work."""
     ctx.ensure_object(dict)
-    if project_path:
+    # Check for project path: --project flag takes priority, then SKEIN_PROJECT env var
+    effective_project = project_path or os.environ.get("SKEIN_PROJECT")
+    if effective_project:
         # Override the project root before any shard operations
         shard_worktree = get_shard_worktree_module()
         try:
-            shard_worktree.set_project_root(project_path)
+            shard_worktree.set_project_root(effective_project)
         except shard_worktree.ShardError as e:
             raise click.ClickException(str(e))
 
