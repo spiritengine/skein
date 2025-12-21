@@ -268,6 +268,7 @@ def cleanup_shard(
 
     Args:
         worktree_name: Worktree directory name (e.g., 'opus-security-architect-20251109-001')
+            Can also be a full path, which will be normalized to just the name.
         keep_branch: If True, keep git branch after removing worktree
         caller_cwd: Optional path to check for self-deletion. If provided, cleanup will
             be refused if this path is inside the target worktree. This is used to prevent
@@ -279,7 +280,30 @@ def cleanup_shard(
     Raises:
         ShardError: If cleanup fails
     """
-    worktree_path = get_worktrees_dir() / worktree_name
+    worktrees_dir = get_worktrees_dir()
+
+    # Normalize worktree_name: if user passes a full path, extract just the name
+    # This prevents Path('/base') / '/full/path' from returning just '/full/path'
+    worktree_name = Path(worktree_name).name
+
+    # Validate: worktree_name must not be empty or the worktrees directory itself
+    if not worktree_name or worktree_name == worktrees_dir.name:
+        raise ShardError(
+            f"Invalid worktree name: '{worktree_name}'\n"
+            f"Expected a specific worktree name like 'agent-20251109-001'"
+        )
+
+    worktree_path = worktrees_dir / worktree_name
+
+    # Safety check: ensure the path is actually inside worktrees_dir
+    # (should always be true after normalization, but belt-and-suspenders)
+    try:
+        worktree_path.resolve().relative_to(worktrees_dir.resolve())
+    except ValueError:
+        raise ShardError(
+            f"Invalid worktree path: {worktree_path}\n"
+            f"Worktree must be inside: {worktrees_dir}"
+        )
 
     if not worktree_path.exists():
         raise ShardError(f"Worktree not found: {worktree_path}")
@@ -446,11 +470,14 @@ def get_shard_status(worktree_name: str) -> Optional[Dict[str, str]]:
     Get status of a specific SHARD.
 
     Args:
-        worktree_name: Worktree directory name
+        worktree_name: Worktree directory name (or full path, which will be normalized)
 
     Returns:
         SHARD info dict or None if not found
     """
+    # Normalize: extract just the name if a full path was passed
+    worktree_name = Path(worktree_name).name
+
     shards = list_shards()
     for shard in shards:
         if shard["worktree_name"] == worktree_name:
