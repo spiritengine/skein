@@ -3080,9 +3080,10 @@ def register(ctx, capabilities, name, agent_type, description):
 @click.option("--json", "output_json", is_flag=True)
 @click.option("--status", default="active", help="Filter: active (default), retired, or all")
 @click.option("--all", "show_all", is_flag=True, help="Include retired agents (same as --status all)")
+@click.option("--verbose", "-v", is_flag=True, help="Show detailed agent info")
 @click.pass_context
-def roster(ctx, output_json, status, show_all):
-    """List registered agents."""
+def roster(ctx, output_json, status, show_all, verbose):
+    """List registered agents with activity info."""
     # --all flag overrides --status to show all
     if show_all:
         status = "all"
@@ -3094,7 +3095,8 @@ def roster(ctx, output_json, status, show_all):
     if status != "all":
         params["status"] = status
 
-    agents = make_request("GET", "/roster", base_url, agent_id, params=params)
+    # Use enriched endpoint for rich activity data
+    agents = make_request("GET", "/roster/enriched", base_url, agent_id, params=params)
 
     if output_json:
         click.echo(json.dumps(agents, indent=2))
@@ -3105,22 +3107,65 @@ def roster(ctx, output_json, status, show_all):
             else:
                 click.echo(f"No {status} agents")
         else:
+            # Count by activity status
+            active_count = sum(1 for a in agents if a.get("activity_status") == "active")
+            idle_count = sum(1 for a in agents if a.get("activity_status") == "idle")
+            torching_count = sum(1 for a in agents if a.get("activity_status") == "torching")
+
+            # Header with summary
             if status == "all":
                 click.echo(f"Roster ({len(agents)} agent(s)):\n")
             else:
-                click.echo(f"Roster ({len(agents)} {status} agent(s)):\n")
-            for a in agents:
-                click.echo(f"  {a['agent_id']}")
-                if a.get("name") and a.get("name") != a.get("agent_id"):
-                    click.echo(f"    Name: {a['name']}")
-                if a.get("agent_type"):
-                    click.echo(f"    Type: {a['agent_type']}")
-                if a.get("description"):
-                    click.echo(f"    Description: {a['description']}")
-                if a.get("capabilities"):
-                    click.echo(f"    Capabilities: {', '.join(a['capabilities'])}")
-                click.echo(f"    Registered: {a['registered_at']}")
-                click.echo()
+                summary_parts = []
+                if active_count > 0:
+                    summary_parts.append(f"{active_count} active")
+                if idle_count > 0:
+                    summary_parts.append(f"{idle_count} idle")
+                if torching_count > 0:
+                    summary_parts.append(f"{torching_count} torching")
+                summary = ", ".join(summary_parts) if summary_parts else "none"
+                click.echo(f"Roster ({len(agents)} {status}): {summary}\n")
+
+            if verbose:
+                # Verbose mode: detailed view
+                for a in agents:
+                    click.echo(f"  {a['agent_id']}")
+                    if a.get("name") and a.get("name") != a.get("agent_id"):
+                        click.echo(f"    Name: {a['name']}")
+                    if a.get("agent_type"):
+                        click.echo(f"    Type: {a['agent_type']}")
+                    click.echo(f"    Status: {a.get('activity_status', 'unknown')}  ({a.get('last_activity_relative', 'no activity')})")
+                    if a.get("working_site"):
+                        click.echo(f"    Site: {a['working_site']}")
+                    if a.get("folio_count", 0) > 0:
+                        last_type = a.get("last_folio_type", "folio")
+                        click.echo(f"    Folios: {a['folio_count']} (last: {last_type})")
+                    click.echo()
+            else:
+                # Compact tabular view
+                # Calculate column widths
+                name_width = max(len(a.get("name") or a["agent_id"]) for a in agents)
+                name_width = min(max(name_width, 12), 20)  # 12-20 chars
+                type_width = 12
+                time_width = 10
+                status_width = 8
+                site_width = 20
+
+                for a in agents:
+                    # Use name if different from agent_id, otherwise agent_id
+                    display_name = a.get("name") or a["agent_id"]
+                    if len(display_name) > name_width:
+                        display_name = display_name[:name_width-1] + "…"
+
+                    agent_type = (a.get("agent_type") or "-")[:type_width]
+                    time_rel = (a.get("last_activity_relative") or "-")[:time_width]
+                    activity = a.get("activity_status", "idle")[:status_width]
+                    site = a.get("working_site") or "(no site)"
+                    if len(site) > site_width:
+                        site = site[:site_width-1] + "…"
+
+                    # Format: name  type  time  status  site
+                    click.echo(f"  {display_name:<{name_width}}  {agent_type:<{type_width}}  {time_rel:<{time_width}}  {activity:<{status_width}}  {site}")
 
 
 @cli.command("ignite")
