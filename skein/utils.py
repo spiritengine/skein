@@ -180,6 +180,53 @@ def auto_invalidate_cache(thread_type: str, folio_id: str):
         invalidate_assignment_cache(folio_id)
 
 
+def format_relative_time(dt: datetime) -> str:
+    """
+    Format a datetime as a human-readable relative time string.
+
+    Examples:
+        - just now
+        - 2m ago
+        - 1h ago
+        - 5h ago
+        - 1d ago
+        - 3d ago
+
+    Args:
+        dt: The datetime to format (can be timezone-aware or naive)
+
+    Returns:
+        Human-readable relative time string
+    """
+    from datetime import timezone
+
+    now = datetime.now(timezone.utc)
+
+    # Make dt timezone-aware if needed (assume UTC for naive)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+
+    delta = now - dt
+    total_seconds = delta.total_seconds()
+
+    if total_seconds < 0:
+        return "just now"  # Future dates show as "just now"
+
+    if total_seconds < 60:
+        return "just now"
+
+    minutes = int(total_seconds // 60)
+    if minutes < 60:
+        return f"{minutes}m ago"
+
+    hours = int(total_seconds // 3600)
+    if hours < 24:
+        return f"{hours}h ago"
+
+    days = int(total_seconds // 86400)
+    return f"{days}d ago"
+
+
 def parse_relative_time(time_str: str) -> datetime:
     """
     Parse relative time strings like '1day', '2hours', '30min' to datetime.

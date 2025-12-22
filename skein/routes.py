@@ -130,6 +130,108 @@ async def get_roster(
     return store.get_agents(status=status)
 
 
+class AgentActivity(BaseModel):
+    """Agent info enriched with activity data for QM dashboards."""
+    agent_id: str
+    name: Optional[str] = None
+    agent_type: Optional[str] = None
+    status: str = "active"
+    registered_at: datetime
+    # Activity fields
+    last_activity: Optional[datetime] = None
+    last_activity_relative: Optional[str] = None
+    activity_status: str = "idle"  # active, idle, torching
+    working_site: Optional[str] = None
+    folio_count: int = 0
+    last_folio_type: Optional[str] = None
+
+
+@router.get("/roster/enriched", response_model=List[AgentActivity])
+async def get_roster_enriched(
+    status: Optional[str] = Query(None, description="Filter by status: active, retired"),
+    store: JSONStore = Depends(get_project_store)
+):
+    """
+    Get registered agents with activity data for QM work.
+
+    Returns enriched agent info including:
+    - Human-readable relative time since registration/activity
+    - Activity status (active/idle/torching) based on recent folio activity
+    - Working site they're posting to
+    - Folio count and last folio type
+    """
+    from .utils import format_relative_time
+    from datetime import timedelta, timezone
+
+    agents = store.get_agents(status=status)
+    all_folios = store.get_folios()
+
+    enriched = []
+    now = datetime.now(timezone.utc)
+
+    for agent in agents:
+        # Get all folios created by this agent
+        agent_folios = [f for f in all_folios if f.created_by == agent.agent_id]
+
+        # Sort by created_at descending to get most recent
+        agent_folios.sort(key=lambda f: f.created_at, reverse=True)
+
+        # Determine activity info
+        last_activity = None
+        last_activity_relative = None
+        working_site = None
+        last_folio_type = None
+        folio_count = len(agent_folios)
+
+        if agent_folios:
+            most_recent = agent_folios[0]
+            last_activity = most_recent.created_at
+            last_activity_relative = format_relative_time(most_recent.created_at)
+            working_site = most_recent.site_id
+            last_folio_type = most_recent.type
+
+        # Determine activity status
+        # - torching: agent status is "torching" or "retired"
+        # - active: has posted within last 30 minutes
+        # - idle: otherwise
+        activity_status = "idle"
+
+        if agent.status in ("torching", "retired"):
+            activity_status = "torching"
+        elif last_activity:
+            # Make last_activity timezone-aware if needed
+            if last_activity.tzinfo is None:
+                last_activity_aware = last_activity.replace(tzinfo=timezone.utc)
+            else:
+                last_activity_aware = last_activity
+
+            if now - last_activity_aware < timedelta(minutes=30):
+                activity_status = "active"
+
+        # Use registration time if no activity
+        if not last_activity_relative:
+            last_activity_relative = format_relative_time(agent.registered_at)
+
+        enriched.append(AgentActivity(
+            agent_id=agent.agent_id,
+            name=agent.name,
+            agent_type=agent.agent_type,
+            status=agent.status,
+            registered_at=agent.registered_at,
+            last_activity=last_activity,
+            last_activity_relative=last_activity_relative,
+            activity_status=activity_status,
+            working_site=working_site,
+            folio_count=folio_count,
+            last_folio_type=last_folio_type,
+        ))
+
+    # Sort by most recent activity first (active agents at top)
+    enriched.sort(key=lambda a: a.last_activity or a.registered_at, reverse=True)
+
+    return enriched
+
+
 @router.get("/roster/{agent_id}", response_model=AgentInfo)
 async def get_agent(agent_id: str, store: JSONStore = Depends(get_project_store)):
     """Get specific agent."""
