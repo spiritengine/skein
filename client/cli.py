@@ -3470,12 +3470,40 @@ def ready(ctx):
         skein --agent NAME ready
 
     Transitions agent from 'orienting' to 'active' status.
+    The agent must have been registered during 'skein ignite'.
     """
     base_url = get_base_url(ctx.obj.get("url"))
     agent_id = ctx.obj.get("agent")
 
     if not agent_id:
         raise click.ClickException("Must use --agent flag. Run 'skein ignite' first to get your assigned name.")
+
+    # Verify agent was registered during ignite with "orienting" status
+    try:
+        agent = make_request("GET", f"/roster/{agent_id}", base_url, agent_id)
+    except Exception as e:
+        error_msg = str(e)
+        if "404" in error_msg or "not found" in error_msg.lower():
+            raise click.ClickException(
+                f"Agent '{agent_id}' not found. You must run 'skein ignite' first to get your assigned name."
+            )
+        raise click.ClickException(f"Failed to verify agent: {error_msg}")
+
+    current_status = agent.get("status", "unknown")
+    if current_status != "orienting":
+        if current_status == "active":
+            raise click.ClickException(
+                f"Agent '{agent_id}' is already active. No need to run 'ready' again."
+            )
+        elif current_status == "retired":
+            raise click.ClickException(
+                f"Agent '{agent_id}' has already retired. Start a new session with 'skein ignite'."
+            )
+        else:
+            raise click.ClickException(
+                f"Agent '{agent_id}' has status '{current_status}' - expected 'orienting'. "
+                "Run 'skein ignite' to get a new agent assignment."
+            )
 
     # Update agent status from orienting to active
     data = {
