@@ -195,25 +195,32 @@ def _get_repo() -> 'git.Repo':
         raise ShardError(f"Not a git repository: {get_project_root()}")
 
 
-def _get_next_sequence(agent_id: str, date: str) -> int:
+# Maximum sequence number per name per day (3 digits = 001-999)
+MAX_SEQUENCE_NUMBER = 999
+
+
+def _get_next_sequence(name: str, date: str) -> int:
     """
-    Get next sequence number for agent on given date.
+    Get next sequence number for name on given date.
 
     Looks for existing worktrees matching pattern and returns next seq.
-    Pattern: worktrees/{agent_id}-{date}-{seq}/
+    Pattern: worktrees/{name}-{date}-{seq}/
 
     Args:
-        agent_id: Agent identifier
+        name: Shard name identifier
         date: Date string (YYYYMMDD)
 
     Returns:
         Next sequence number (e.g., 1, 2, 3...)
+
+    Raises:
+        ShardError: If sequence limit (999) would be exceeded
     """
     worktrees_dir = get_worktrees_dir()
     if not worktrees_dir.exists() or not worktrees_dir.is_dir():
         return 1
 
-    pattern_prefix = f"{agent_id}-{date}-"
+    pattern_prefix = f"{name}-{date}-"
     existing = [
         d.name for d in worktrees_dir.iterdir()
         if d.is_dir() and d.name.startswith(pattern_prefix)
@@ -222,17 +229,29 @@ def _get_next_sequence(agent_id: str, date: str) -> int:
     if not existing:
         return 1
 
-    # Extract sequence numbers
+    # Extract sequence numbers (filter invalid: negative, zero, or >999)
     sequences = []
-    for name in existing:
-        # name format: agent-id-date-seq
+    for worktree_name in existing:
+        # name format: name-date-seq
         try:
-            seq_str = name.split("-")[-1]
-            sequences.append(int(seq_str))
+            seq_str = worktree_name.split("-")[-1]
+            seq = int(seq_str)
+            # Only count valid sequences (1-999)
+            if 1 <= seq <= MAX_SEQUENCE_NUMBER:
+                sequences.append(seq)
         except (ValueError, IndexError):
             continue
 
-    return max(sequences) + 1 if sequences else 1
+    next_seq = max(sequences) + 1 if sequences else 1
+
+    if next_seq > MAX_SEQUENCE_NUMBER:
+        raise ShardError(
+            f"Sequence limit exceeded for '{name}' on {date}.\n"
+            f"Maximum {MAX_SEQUENCE_NUMBER} shards per name per day.\n"
+            f"Consider using a different name or cleaning up old shards."
+        )
+
+    return next_seq
 
 
 def spawn_shard(
@@ -331,10 +350,32 @@ def _is_path_inside_worktree(path: Path, worktree_path: Path) -> bool:
         True if path is inside or equal to worktree_path (or if we can't verify)
     """
     try:
+        # Check BOTH unresolved and resolved paths to prevent symlink bypass.
+        # An attacker could create a symlink inside worktree pointing outside,
+        # then cd to the symlink target. We need to catch this.
+
+        # Check 1: Is the literal (unresolved) path inside worktree?
+        # This catches symlinks created inside the worktree
+        try:
+            unresolved_inside = (
+                path == worktree_path or
+                worktree_path in path.parents
+            )
+        except (ValueError, TypeError):
+            unresolved_inside = False
+
+        # Check 2: Does the resolved path point inside worktree?
+        # This catches when we're physically inside the worktree
         resolved_path = path.resolve()
         resolved_worktree = worktree_path.resolve()
-        # Check if path equals worktree or is a child of it
-        return resolved_path == resolved_worktree or resolved_worktree in resolved_path.parents
+        resolved_inside = (
+            resolved_path == resolved_worktree or
+            resolved_worktree in resolved_path.parents
+        )
+
+        # Block if EITHER check indicates we're inside
+        return unresolved_inside or resolved_inside
+
     except (OSError, ValueError):
         # FAIL CLOSED: if we can't verify, assume inside to prevent deletion
         return True
@@ -466,9 +507,9 @@ def list_shards(active_only: bool = True) -> List[Dict[str, str]]:
         - worktree_name
         - worktree_path
         - branch_name
-        - agent_id (extracted from name)
-        - date (extracted from name)
-        - seq (extracted from name)
+        - name (the shard name)
+        - date (extracted from worktree name)
+        - seq (extracted from worktree name)
     """
     # Get all worktrees from git using GitPython
     try:
@@ -597,7 +638,8 @@ def get_shard_age_days(shard_info: Dict[str, str]) -> Optional[int]:
         shard_date = datetime.strptime(date_str, "%Y%m%d")
         today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
         delta = today - shard_date
-        return delta.days
+        # Return 0 for future dates (negative age) - handles clock skew
+        return max(0, delta.days)
     except ValueError:
         return None
 
@@ -947,8 +989,9 @@ def merge_shard(
             "conflicts": []
         }
 
-    # Check for merge conflicts
-    if git_info.get("merge_status") == "conflict":
+    # Check for merge conflicts or unknown status (fail safe)
+    merge_status = git_info.get("merge_status", "unknown")
+    if merge_status != "clean":
         # Get list of conflicting files
         try:
             merge_base = repo.git.merge_base("master", branch_name)
@@ -981,9 +1024,14 @@ def merge_shard(
         except:
             conflict_files = ["(unable to determine conflicting files)"]
 
+        error_msg = (
+            "Cannot merge: branch has conflicts with master"
+            if merge_status == "conflict"
+            else f"Cannot merge: merge status is '{merge_status}' (must be 'clean')"
+        )
         return {
             "success": False,
-            "message": "Cannot merge: branch has conflicts with master",
+            "message": error_msg,
             "uncommitted": [],
             "conflicts": conflict_files
         }
@@ -1055,7 +1103,7 @@ def detect_shard_environment() -> Optional[Dict[str, str]]:
 
     Returns:
         SHARD info dict if in a SHARD, None otherwise
-        Dict contains: worktree_name, worktree_path, branch_name, agent_id, date, seq
+        Dict contains: worktree_name, worktree_path, branch_name, name, date, seq
     """
     cwd = Path.cwd()
 
@@ -1095,7 +1143,7 @@ if __name__ == "__main__":
 
     if len(sys.argv) < 2:
         print("Usage:")
-        print("  python shard_worktree.py spawn <agent-id> [brief-id] [description]")
+        print("  python shard_worktree.py spawn <name> [brief-id] [description]")
         print("  python shard_worktree.py list")
         print("  python shard_worktree.py cleanup <worktree-name> [--keep-branch]")
         sys.exit(1)
@@ -1104,15 +1152,15 @@ if __name__ == "__main__":
 
     if command == "spawn":
         if len(sys.argv) < 3:
-            print("Error: agent-id required")
+            print("Error: name required")
             sys.exit(1)
 
-        agent_id = sys.argv[2]
+        name = sys.argv[2]
         brief_id = sys.argv[3] if len(sys.argv) > 3 else None
         description = sys.argv[4] if len(sys.argv) > 4 else None
 
         try:
-            shard = spawn_shard(agent_id, brief_id, description)
+            shard = spawn_shard(name, brief_id, description)
             print(json.dumps(shard, indent=2))
         except ShardError as e:
             print(f"Error: {e}", file=sys.stderr)

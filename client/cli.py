@@ -4267,6 +4267,159 @@ def backup_cleanup(ctx, keep_last, older_than_days, dry_run):
         click.echo(f"\nKeeping {len(keeping)} backup(s)")
 
 
+@backup.command("enable")
+@click.option("--keep-last", type=int, default=30, help="Number of backups to keep (default: 30)")
+@click.pass_context
+def backup_enable(ctx, keep_last):
+    """Enable automated daily backups via systemd timer.
+
+    Installs and starts a user systemd timer that runs daily backups
+    with automatic cleanup.
+
+    Examples:
+        skein backup enable
+        skein backup enable --keep-last 14
+    """
+    import sys
+    import subprocess
+    from pathlib import Path
+
+    # Find project root
+    current = Path.cwd()
+    while current != current.parent:
+        if (current / '.skein').exists():
+            break
+        current = current.parent
+    else:
+        raise click.ClickException("Not in a SKEIN project")
+
+    # Find template files (in skein package's systemd dir)
+    skein_pkg = Path(__file__).parent.parent
+    service_template = skein_pkg / 'systemd' / 'skein-backup.service.template'
+    timer_template = skein_pkg / 'systemd' / 'skein-backup.timer.template'
+
+    if not service_template.exists() or not timer_template.exists():
+        raise click.ClickException(
+            f"Template files not found in {skein_pkg / 'systemd'}\n"
+            "Run from a proper SKEIN installation."
+        )
+
+    # Determine paths
+    python_bin = sys.executable
+    python_bin_dir = str(Path(python_bin).parent)
+    project_path = str(current)
+
+    # Read and substitute templates
+    service_content = service_template.read_text()
+    service_content = service_content.replace('__PYTHON__', python_bin)
+    service_content = service_content.replace('__PYTHON_BIN_DIR__', python_bin_dir)
+    service_content = service_content.replace('__SKEIN_PROJECT__', project_path)
+    service_content = service_content.replace('__KEEP_LAST__', str(keep_last))
+
+    timer_content = timer_template.read_text()
+
+    # Install to user systemd directory
+    systemd_dir = Path.home() / '.config' / 'systemd' / 'user'
+    systemd_dir.mkdir(parents=True, exist_ok=True)
+
+    service_path = systemd_dir / 'skein-backup.service'
+    timer_path = systemd_dir / 'skein-backup.timer'
+
+    service_path.write_text(service_content)
+    timer_path.write_text(timer_content)
+
+    click.echo(f"Installed systemd files:")
+    click.echo(f"  {service_path}")
+    click.echo(f"  {timer_path}")
+
+    # Reload and enable
+    try:
+        subprocess.run(['systemctl', '--user', 'daemon-reload'], check=True)
+        subprocess.run(['systemctl', '--user', 'enable', 'skein-backup.timer'], check=True)
+        subprocess.run(['systemctl', '--user', 'start', 'skein-backup.timer'], check=True)
+        click.echo("\n✓ Backup timer enabled and started")
+        click.echo(f"  Project: {project_path}")
+        click.echo(f"  Retention: keep last {keep_last} backups")
+        click.echo("\nCheck status with: skein backup status")
+    except subprocess.CalledProcessError as e:
+        raise click.ClickException(f"Failed to enable timer: {e}")
+    except FileNotFoundError:
+        raise click.ClickException("systemctl not found. Is systemd available?")
+
+
+@backup.command("disable")
+@click.pass_context
+def backup_disable(ctx):
+    """Disable automated backups.
+
+    Stops and disables the systemd backup timer.
+
+    Examples:
+        skein backup disable
+    """
+    import subprocess
+
+    try:
+        subprocess.run(['systemctl', '--user', 'stop', 'skein-backup.timer'], check=True)
+        subprocess.run(['systemctl', '--user', 'disable', 'skein-backup.timer'], check=True)
+        click.echo("✓ Backup timer disabled")
+    except subprocess.CalledProcessError as e:
+        raise click.ClickException(f"Failed to disable timer: {e}")
+    except FileNotFoundError:
+        raise click.ClickException("systemctl not found. Is systemd available?")
+
+
+@backup.command("status")
+@click.pass_context
+def backup_status(ctx):
+    """Show backup timer status.
+
+    Displays whether automated backups are enabled and when the next
+    backup is scheduled.
+
+    Examples:
+        skein backup status
+    """
+    import subprocess
+
+    try:
+        # Check timer status
+        result = subprocess.run(
+            ['systemctl', '--user', 'status', 'skein-backup.timer'],
+            capture_output=True,
+            text=True
+        )
+
+        if result.returncode == 0:
+            click.echo("Backup timer status:\n")
+            click.echo(result.stdout)
+        elif result.returncode == 3:
+            # Service exists but is stopped/inactive
+            click.echo("Backup timer is installed but not running.\n")
+            click.echo(result.stdout)
+            click.echo("\nTo enable: skein backup enable")
+        elif result.returncode == 4:
+            click.echo("Backup timer is not installed.")
+            click.echo("\nTo enable: skein backup enable")
+        else:
+            click.echo(result.stdout)
+            if result.stderr:
+                click.echo(result.stderr)
+
+        # Show next scheduled run if timer is active
+        list_result = subprocess.run(
+            ['systemctl', '--user', 'list-timers', 'skein-backup.timer'],
+            capture_output=True,
+            text=True
+        )
+        if list_result.returncode == 0 and 'skein-backup' in list_result.stdout:
+            click.echo("\nSchedule:")
+            click.echo(list_result.stdout)
+
+    except FileNotFoundError:
+        raise click.ClickException("systemctl not found. Is systemd available?")
+
+
 @cli.command("restore")
 @click.argument("backup_id")
 @click.option("--dry-run", is_flag=True, help="Show what would be restored without making changes")
@@ -4387,7 +4540,7 @@ def shard_spawn(ctx, spawn_agent, brief, description):
     try:
         # Create worktree
         shard_info = shard_worktree.spawn_shard(
-            agent_id=spawn_agent,
+            name=spawn_agent,
             brief_id=brief,
             description=description
         )
@@ -4420,7 +4573,7 @@ def shard_spawn(ctx, spawn_agent, brief, description):
             click.echo(f"Warning: Failed to create SKEIN thread: {e}", err=True)
 
         click.echo(f"✓ Spawned SHARD: {shard_info['shard_id']}")
-        click.echo(f"  Agent: {shard_info['agent_id']}")
+        click.echo(f"  Name: {shard_info['name']}")
         click.echo(f"  Branch: {shard_info['branch_name']}")
         click.echo(f"  Worktree: {shard_info['worktree_path']}")
         if shard_info.get('brief_id'):
@@ -4438,7 +4591,7 @@ def shard_spawn(ctx, spawn_agent, brief, description):
 
 @shard.command("list")
 @click.option("--active", is_flag=True, help="Show only active SHARDs")
-@click.option("--agent", "filter_agent", help="Filter by agent ID")
+@click.option("--agent", "filter_agent", help="Filter by shard name")
 @click.option("--json", "output_json", is_flag=True, help="Output as JSON")
 @click.pass_context
 def shard_list(ctx, active, filter_agent, output_json):
@@ -4457,7 +4610,7 @@ def shard_list(ctx, active, filter_agent, output_json):
 
         # Filter by agent if requested
         if filter_agent:
-            shards = [s for s in shards if s['agent_id'] == filter_agent]
+            shards = [s for s in shards if s['name'] == filter_agent]
 
         if output_json:
             import json
@@ -5025,7 +5178,7 @@ def shard_tender(ctx, worktree_name, site, reviewer, summary, status, confidence
             "status": status,
             "confidence": confidence,
             "reviewer": reviewer,
-            "agent_id": metadata.get("agent_id"),
+            "name": metadata.get("name"),
         }
     }
 
