@@ -24,7 +24,7 @@ import pytest
 
 # Import hypothesis for property-based testing
 try:
-    from hypothesis import given, settings, strategies as st, assume
+    from hypothesis import given, settings, strategies as st, assume, HealthCheck
     HYPOTHESIS_AVAILABLE = True
 except ImportError:
     HYPOTHESIS_AVAILABLE = False
@@ -1042,7 +1042,7 @@ if HYPOTHESIS_AVAILABLE:
         """Property-based tests using Hypothesis."""
 
         @given(agent_id=valid_agent_id)
-        @settings(max_examples=20, deadline=10000)
+        @settings(max_examples=20, deadline=10000, suppress_health_check=[HealthCheck.function_scoped_fixture])
         def test_spawn_cleanup_invariant(self, agent_id: str, shard_env: Path):
             """
             Property: For any valid agent_id, spawn then cleanup leaves repo unchanged.
@@ -1075,7 +1075,7 @@ if HYPOTHESIS_AVAILABLE:
                 pass
 
         @given(count=st.integers(min_value=1, max_value=5))
-        @settings(max_examples=5, deadline=30000)
+        @settings(max_examples=5, deadline=30000, suppress_health_check=[HealthCheck.function_scoped_fixture])
         def test_list_matches_spawned_count(self, count: int, shard_env: Path):
             """
             Property: list_shards returns exactly the shards that were spawned.
@@ -1105,7 +1105,7 @@ if HYPOTHESIS_AVAILABLE:
                         pass
 
         @given(agent_id=valid_agent_id)
-        @settings(max_examples=10, deadline=10000)
+        @settings(max_examples=10, deadline=10000, suppress_health_check=[HealthCheck.function_scoped_fixture])
         def test_shard_name_parsing_roundtrip(self, agent_id: str, shard_env: Path):
             """
             Property: Shard name can be parsed back to extract the original name.
