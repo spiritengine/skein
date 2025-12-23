@@ -7,10 +7,11 @@ Provides core functions for creating, cleaning up, and listing SHARDs.
 """
 
 import os
+import re
 import json
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 try:
     import git
@@ -21,6 +22,74 @@ except ImportError:
 class ShardError(Exception):
     """Base exception for SHARD operations."""
     pass
+
+
+# =============================================================================
+# NAME VALIDATION
+# =============================================================================
+
+# Maximum length for shard name (leaves room for date+seq in full worktree name)
+MAX_SHARD_NAME_LENGTH = 63
+
+# Pattern for valid shard names: alphanumeric start, alphanumeric/hyphen/underscore body
+VALID_NAME_PATTERN = re.compile(r'^[a-zA-Z0-9][a-zA-Z0-9_-]*$')
+
+# Reserved git names that cannot be used
+RESERVED_NAMES = frozenset({
+    'head', 'HEAD',
+    'master', 'main',
+    'refs', 'objects', 'hooks', 'info', 'logs',
+    'worktrees',  # Our own directory
+})
+
+
+def validate_shard_name(name: str) -> Tuple[bool, Optional[str]]:
+    """
+    Validate a shard name for use in git branches and filesystem paths.
+
+    Args:
+        name: The shard name to validate
+
+    Returns:
+        (is_valid, error_message) - error_message is None if valid
+    """
+    if not name:
+        return False, "name cannot be empty"
+
+    if not name.strip():
+        return False, "name cannot be only whitespace"
+
+    if len(name) > MAX_SHARD_NAME_LENGTH:
+        return False, f"name exceeds {MAX_SHARD_NAME_LENGTH} characters (got {len(name)})"
+
+    # Check for forbidden git patterns
+    if '..' in name:
+        return False, "name cannot contain consecutive dots (..)"
+
+    if name.endswith('.lock'):
+        return False, "name cannot end with .lock"
+
+    if '@{' in name:
+        return False, "name cannot contain @{ (git reflog notation)"
+
+    if name.startswith('.'):
+        return False, "name cannot start with a dot"
+
+    if name.startswith('-'):
+        return False, "name cannot start with a hyphen"
+
+    # Check reserved names
+    if name.lower() in {n.lower() for n in RESERVED_NAMES}:
+        return False, f"name '{name}' is reserved"
+
+    # Check allowed character pattern
+    if not VALID_NAME_PATTERN.match(name):
+        return False, (
+            "name must start with alphanumeric and contain only "
+            "alphanumeric characters, hyphens (-), and underscores (_)"
+        )
+
+    return True, None
 
 
 # Project root detection
@@ -141,7 +210,7 @@ def _get_next_sequence(agent_id: str, date: str) -> int:
         Next sequence number (e.g., 1, 2, 3...)
     """
     worktrees_dir = get_worktrees_dir()
-    if not worktrees_dir.exists():
+    if not worktrees_dir.exists() or not worktrees_dir.is_dir():
         return 1
 
     pattern_prefix = f"{agent_id}-{date}-"
@@ -167,47 +236,57 @@ def _get_next_sequence(agent_id: str, date: str) -> int:
 
 
 def spawn_shard(
-    agent_id: str,
+    name: str,
     brief_id: Optional[str] = None,
-    description: Optional[str] = None
+    description: Optional[str] = None,
+    project_root: Optional[str] = None
 ) -> Dict[str, str]:
     """
     Create SHARD: git branch + worktree for isolated agent work.
 
     Args:
-        agent_id: Agent identifier (e.g., 'opus-security-architect')
+        name: Descriptive name for this shard (e.g., 'fix-auth-bug', 'add-dark-mode')
         brief_id: Optional brief ID this SHARD relates to
         description: Optional work description
+        project_root: Optional path to git repo. If not provided, auto-detects.
 
     Returns:
         {
             'shard_id': 'shard-20251109-abc123',
-            'agent_id': 'opus-security-architect',
-            'branch_name': 'shard-opus-security-architect-20251109-001',
-            'worktree_path': '/abs/path/to/worktrees/opus-security-architect-20251109-001',
+            'name': 'fix-auth-bug',
+            'branch_name': 'shard-fix-auth-bug-20251109-001',
+            'worktree_path': '/abs/path/to/worktrees/fix-auth-bug-20251109-001',
             'brief_id': 'brief-123' or None,
             'created_at': '2025-11-09T12:00:00'
         }
 
     Raises:
-        ShardError: If worktree creation fails
+        ShardError: If worktree creation fails or name is invalid
     """
+    # Validate name
+    is_valid, error_msg = validate_shard_name(name)
+    if not is_valid:
+        raise ShardError(f"Invalid name: {error_msg}")
+
+    # Set project root if provided
+    if project_root:
+        set_project_root(project_root)
+
     worktrees_dir = get_worktrees_dir()
     # Ensure worktrees directory exists
     worktrees_dir.mkdir(exist_ok=True)
 
     # Generate date and sequence
     date = datetime.now().strftime("%Y%m%d")
-    seq = _get_next_sequence(agent_id, date)
+    seq = _get_next_sequence(name, date)
 
     # Generate names
-    worktree_name = f"{agent_id}-{date}-{seq:03d}"
-    branch_name = f"shard-{agent_id}-{date}-{seq:03d}"
+    worktree_name = f"{name}-{date}-{seq:03d}"
+    branch_name = f"shard-{name}-{date}-{seq:03d}"
     worktree_path = worktrees_dir / worktree_name
 
-    # Generate shard_id (could be more sophisticated, for now use worktree_name)
-    # In future, could use random suffix like SKEIN folio IDs
-    shard_id = f"shard-{date}-{worktree_name[:8]}"
+    # Generate shard_id - use worktree_name which includes name+date+seq for uniqueness
+    shard_id = f"shard-{worktree_name}"
 
     # Check if worktree already exists
     if worktree_path.exists():
@@ -225,7 +304,7 @@ def spawn_shard(
     # Return SHARD info
     return {
         "shard_id": shard_id,
-        "agent_id": agent_id,
+        "name": name,
         "branch_name": branch_name,
         "worktree_path": str(worktree_path.absolute()),
         "worktree_name": worktree_name,
@@ -241,13 +320,15 @@ def _is_path_inside_worktree(path: Path, worktree_path: Path) -> bool:
     Check if a path is inside a worktree directory.
 
     Resolves both paths to handle symlinks and relative paths correctly.
+    IMPORTANT: Fails closed - returns True if we can't verify, to prevent
+    accidental self-deletion on permission errors or broken symlinks.
 
     Args:
         path: Path to check
         worktree_path: Worktree directory path
 
     Returns:
-        True if path is inside or equal to worktree_path
+        True if path is inside or equal to worktree_path (or if we can't verify)
     """
     try:
         resolved_path = path.resolve()
@@ -255,24 +336,27 @@ def _is_path_inside_worktree(path: Path, worktree_path: Path) -> bool:
         # Check if path equals worktree or is a child of it
         return resolved_path == resolved_worktree or resolved_worktree in resolved_path.parents
     except (OSError, ValueError):
-        return False
+        # FAIL CLOSED: if we can't verify, assume inside to prevent deletion
+        return True
 
 
 def cleanup_shard(
     worktree_name: str,
     keep_branch: bool = False,
-    caller_cwd: Optional[str] = None
+    caller_cwd: Optional[str] = None,
+    project_root: Optional[str] = None
 ) -> bool:
     """
     Remove SHARD worktree and optionally delete branch.
 
     Args:
-        worktree_name: Worktree directory name (e.g., 'opus-security-architect-20251109-001')
+        worktree_name: Worktree directory name (e.g., 'fix-auth-bug-20251109-001')
             Can also be a full path, which will be normalized to just the name.
         keep_branch: If True, keep git branch after removing worktree
         caller_cwd: Optional path to check for self-deletion. If provided, cleanup will
             be refused if this path is inside the target worktree. This is used to prevent
             agents from deleting their own worktree after cd-ing elsewhere.
+        project_root: Optional path to git repo. If not provided, auto-detects.
 
     Returns:
         True if successful, False otherwise
@@ -280,6 +364,9 @@ def cleanup_shard(
     Raises:
         ShardError: If cleanup fails
     """
+    if project_root:
+        set_project_root(project_root)
+
     worktrees_dir = get_worktrees_dir()
 
     # Normalize worktree_name: if user passes a full path, extract just the name
@@ -355,7 +442,8 @@ def cleanup_shard(
             repo.git.branch("-D", branch_name)
         except Exception as e:
             # Don't raise error if branch deletion fails (branch might not exist)
-            print(f"Warning: Could not delete branch {branch_name}: {e}")
+            import sys
+            print(f"Warning: Could not delete branch {branch_name}: {e}", file=sys.stderr)
 
     # Prune stale worktree references
     try:
@@ -421,8 +509,8 @@ def _parse_worktree_info(worktree_path: str) -> Optional[Dict[str, str]]:
     """
     Parse worktree path into SHARD info.
 
-    Path format: /path/to/worktrees/{agent-id}-{date}-{seq}
-    Branch format: shard-{agent-id}-{date}-{seq}
+    Path format: /path/to/worktrees/{name}-{date}-{seq}
+    Branch format: shard-{name}-{date}-{seq}
 
     Args:
         worktree_path: Full path to worktree
@@ -434,14 +522,20 @@ def _parse_worktree_info(worktree_path: str) -> Optional[Dict[str, str]]:
     worktrees_dir = get_worktrees_dir()
 
     # Check if this is in our worktrees directory
-    if not str(path).endswith(tuple(os.listdir(worktrees_dir) if worktrees_dir.exists() else [])):
-        # Try simpler check
+    # Use path containment check rather than fragile string matching
+    try:
+        if worktrees_dir.exists() and worktrees_dir.is_dir():
+            path.relative_to(worktrees_dir)  # Raises ValueError if not contained
+        elif "worktrees/" not in str(path):
+            return None
+    except ValueError:
+        # Path is not inside worktrees_dir
         if "worktrees/" not in str(path):
             return None
 
     worktree_name = path.name
 
-    # Try to parse worktree name: {agent-id}-{date}-{seq}
+    # Try to parse worktree name: {name}-{date}-{seq}
     parts = worktree_name.rsplit("-", 2)
     if len(parts) < 3:
         return None
@@ -449,7 +543,7 @@ def _parse_worktree_info(worktree_path: str) -> Optional[Dict[str, str]]:
     try:
         seq = int(parts[-1])
         date = parts[-2]
-        agent_id = "-".join(parts[:-2])
+        name = "-".join(parts[:-2])
     except (ValueError, IndexError):
         return None
 
@@ -459,7 +553,7 @@ def _parse_worktree_info(worktree_path: str) -> Optional[Dict[str, str]]:
         "worktree_name": worktree_name,
         "worktree_path": str(path),
         "branch_name": branch_name,
-        "agent_id": agent_id,
+        "name": name,
         "date": date,
         "seq": f"{seq:03d}"
     }
@@ -621,10 +715,16 @@ def get_shard_git_info(worktree_name: str) -> Dict:
             pass
 
         # Working tree status (check for uncommitted changes)
+        # Must run git status FROM the worktree, not pass path to main repo
         try:
-            status = repo.git.status("--porcelain", worktree_path)
+            if git is None:
+                raise ShardError("GitPython not installed")
+            worktree_repo = git.Repo(worktree_path)
+            status = worktree_repo.git.status("--porcelain")
             result["working_tree"] = "dirty" if status.strip() else "clean"
-        except:
+        except ShardError:
+            pass  # Already handled
+        except Exception:
             pass
 
         # Merge status - check if branch can merge cleanly into master
@@ -662,11 +762,17 @@ def get_shard_git_info(worktree_name: str) -> Dict:
             pass
 
         # Uncommitted changes in worktree
+        # Must run git status FROM the worktree, not pass path to main repo
         try:
-            status = repo.git.status("--porcelain", worktree_path)
+            if git is None:
+                raise ShardError("GitPython not installed")
+            worktree_repo = git.Repo(worktree_path)
+            status = worktree_repo.git.status("--porcelain")
             if status.strip():
-                result["uncommitted"] = status.strip().split("\n")
-        except:
+                result["uncommitted"] = [f for f in status.strip().split("\n") if f]
+        except ShardError:
+            pass  # Already handled
+        except Exception:
             pass
 
     except Exception:
@@ -700,7 +806,7 @@ def get_tender_metadata(worktree_name: str) -> Optional[Dict]:
     metadata = {
         "worktree_name": worktree_name,
         "branch_name": shard_info["branch_name"],
-        "agent_id": shard_info["agent_id"],
+        "name": shard_info["name"],
         "worktree_path": str(worktree_path)
     }
 
@@ -770,7 +876,11 @@ def get_shard_diff(worktree_name: str) -> Optional[str]:
         raise ShardError(f"Failed to get diff: {e}")
 
 
-def merge_shard(worktree_name: str, caller_cwd: Optional[str] = None) -> Dict[str, Any]:
+def merge_shard(
+    worktree_name: str,
+    caller_cwd: Optional[str] = None,
+    project_root: Optional[str] = None
+) -> Dict[str, Any]:
     """
     Merge shard branch into master and cleanup worktree.
 
@@ -778,10 +888,11 @@ def merge_shard(worktree_name: str, caller_cwd: Optional[str] = None) -> Dict[st
     If clean: checks out master, merges branch with --no-ff, cleans up worktree and branch.
 
     Args:
-        worktree_name: Worktree directory name (e.g., 'opus-security-architect-20251109-001')
+        worktree_name: Worktree directory name (e.g., 'fix-auth-bug-20251109-001')
         caller_cwd: Optional path to check for self-deletion. If provided, merge will
             be refused if this path is inside the target worktree. This is used to prevent
             agents from merging their own worktree after cd-ing elsewhere.
+        project_root: Optional path to git repo. If not provided, auto-detects.
 
     Returns:
         Dict with:
@@ -790,6 +901,9 @@ def merge_shard(worktree_name: str, caller_cwd: Optional[str] = None) -> Dict[st
             - uncommitted: list of uncommitted files (if dirty)
             - conflicts: list of conflicting files (if conflicts)
     """
+    if project_root:
+        set_project_root(project_root)
+
     shard_info = get_shard_status(worktree_name)
     if not shard_info:
         raise ShardError(f"SHARD not found: {worktree_name}")
@@ -875,28 +989,33 @@ def merge_shard(worktree_name: str, caller_cwd: Optional[str] = None) -> Dict[st
         }
 
     # All checks passed - perform the merge
+    # Store original branch/commit to restore if needed
     try:
-        # Store original branch to restore if needed
-        original_branch = repo.active_branch.name
+        original_ref = repo.active_branch.name
+    except TypeError:
+        # Detached HEAD state - store the commit SHA instead
+        original_ref = repo.head.commit.hexsha
 
+    merge_succeeded = False
+    try:
         # Checkout master
         repo.git.checkout("master")
 
         # Merge with --no-ff to preserve branch history
         try:
             repo.git.merge("--no-ff", branch_name, "-m", f"Merge {branch_name}")
+            merge_succeeded = True
         except Exception as merge_error:
             # If merge fails, abort and restore
             try:
                 repo.git.merge("--abort")
-            except:
+            except Exception:
                 pass
-            repo.git.checkout(original_branch)
             raise ShardError(f"Merge failed: {merge_error}")
 
         # Cleanup worktree and branch
         try:
-            cleanup_shard(worktree_name, keep_branch=False)
+            cleanup_shard(worktree_name, keep_branch=False, caller_cwd=caller_cwd)
         except ShardError as cleanup_error:
             return {
                 "success": True,
@@ -912,8 +1031,19 @@ def merge_shard(worktree_name: str, caller_cwd: Optional[str] = None) -> Dict[st
             "conflicts": []
         }
 
+    except ShardError:
+        # Re-raise ShardErrors as-is
+        raise
     except Exception as e:
         raise ShardError(f"Merge failed: {e}")
+    finally:
+        # Restore original branch/commit if merge didn't succeed
+        # (If merge succeeded, we intentionally stay on master)
+        if not merge_succeeded:
+            try:
+                repo.git.checkout(original_ref)
+            except Exception:
+                pass  # Best effort restoration
 
 
 def detect_shard_environment() -> Optional[Dict[str, str]]:
