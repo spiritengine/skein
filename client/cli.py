@@ -71,16 +71,19 @@ def get_global_config() -> Dict[str, Any]:
         return {"server_url": "http://localhost:8001"}
 
 
-def get_agent_id(ctx_agent: Optional[str] = None, base_url: Optional[str] = None) -> str:
+def get_agent_id(ctx_agent: Optional[str] = None, base_url: Optional[str] = None) -> Optional[str]:
     """
     Get agent ID from sources in priority order:
     1. --agent flag (explicit override)
     2. SKEIN_AGENT_ID env var
-    3. "unknown" fallback
+    3. None (no agent specified)
+
+    Returns None if no agent is specified, allowing callers to distinguish
+    between "no agent provided" and an agent explicitly named something.
     """
     if ctx_agent:
         return ctx_agent
-    return os.getenv("SKEIN_AGENT_ID", "unknown")
+    return os.getenv("SKEIN_AGENT_ID")
 
 
 def get_base_url(ctx_url: Optional[str] = None) -> str:
@@ -138,7 +141,7 @@ def make_request(method: str, endpoint: str, base_url: str, agent_id: str, **kwa
     url = f"{base_url}/skein{endpoint}"
     headers = kwargs.pop("headers", {})
 
-    if agent_id != "unknown":
+    if agent_id is not None:
         headers["X-Agent-Id"] = agent_id
 
     # Add project ID from env var or project config
@@ -151,7 +154,7 @@ def make_request(method: str, endpoint: str, base_url: str, agent_id: str, **kwa
         headers["X-Project-Id"] = project_id
 
     # Warn if agent is still orienting when posting folios
-    if method == "POST" and endpoint == "/folios" and agent_id != "unknown":
+    if method == "POST" and endpoint == "/folios" and agent_id is not None:
         try:
             roster_url = f"{base_url}/skein/roster/{agent_id}"
             roster_resp = requests.get(roster_url, headers=headers)
@@ -1057,7 +1060,7 @@ def ignite(ctx, brief_id):
     base_url = get_base_url(ctx.obj.get("url"))
     agent_id = get_agent_id(ctx.obj.get("agent"), base_url)
 
-    if agent_id == "unknown":
+    if agent_id is None:
         raise click.ClickException("Must set SKEIN_AGENT_ID or use --agent flag to ignite work")
 
     # Get the brief
@@ -2817,7 +2820,7 @@ def inbox(ctx, unread, output_json):
     base_url = get_base_url(ctx.obj.get("url"))
     agent_id = get_agent_id(ctx.obj.get("agent"), base_url)
 
-    if agent_id == "unknown":
+    if agent_id is None:
         raise click.ClickException("Must set SKEIN_AGENT_ID or use --agent flag to check inbox")
 
     params = {}
@@ -2883,7 +2886,7 @@ def thread(ctx, from_id, to_id, thread_type, content):
         thread_type = to_id
         to_id = from_id
         from_id = agent_id
-        if from_id == "unknown":
+        if from_id is None:
             raise click.ClickException("Must set agent ID to use default FROM_ID")
 
     data = {
@@ -2917,7 +2920,7 @@ def reply(ctx, to_id, message):
     base_url = get_base_url(ctx.obj.get("url"))
     agent_id = get_agent_id(ctx.obj.get("agent"), base_url)
 
-    if agent_id == "unknown":
+    if agent_id is None:
         raise click.ClickException("Must set SKEIN_AGENT_ID or use --agent flag to reply")
 
     data = {
@@ -2976,7 +2979,7 @@ def update(ctx, resource_id, status_value):
     base_url = get_base_url(ctx.obj.get("url"))
     agent_id = get_agent_id(ctx.obj.get("agent"), base_url)
 
-    if agent_id == "unknown":
+    if agent_id is None:
         raise click.ClickException("Must set SKEIN_AGENT_ID or use --agent flag to set status")
 
     data = {
@@ -3008,7 +3011,7 @@ def close(ctx, resource_ids, link, note):
     base_url = get_base_url(ctx.obj.get("url"))
     agent_id = get_agent_id(ctx.obj.get("agent"), base_url)
 
-    if agent_id == "unknown":
+    if agent_id is None:
         raise click.ClickException("Must set SKEIN_AGENT_ID or use --agent flag to close")
 
     for resource_id in resource_ids:
@@ -3057,7 +3060,7 @@ def register(ctx, capabilities, name, agent_type, description):
     base_url = get_base_url(ctx.obj.get("url"))
     agent_id = get_agent_id(ctx.obj.get("agent"), base_url)
 
-    if agent_id == "unknown":
+    if agent_id is None:
         raise click.ClickException("Must set SKEIN_AGENT_ID or use --agent flag to register")
 
     caps_list = [c.strip() for c in capabilities.split(",")] if capabilities else []
@@ -3284,7 +3287,7 @@ def _ignite_start(ctx, brief_id, mantle, message):
     """
     base_url = get_base_url(ctx.obj.get("url"))
     agent_id = get_agent_id(ctx.obj.get("agent"), base_url)
-    # agent_id may be "unknown" - that's fine, identity comes at ready
+    # agent_id may be None - that's fine, identity comes at ready
 
     # Prepare response data
     response = {
@@ -3572,7 +3575,7 @@ def _torch_start(ctx):
     base_url = get_base_url(ctx.obj.get("url"))
     agent_id = get_agent_id(ctx.obj.get("agent"), base_url)
 
-    if agent_id == "unknown":
+    if agent_id is None:
         raise click.ClickException("Must set SKEIN_AGENT_ID or use --agent flag to torch")
 
     # Get roster info
@@ -3739,7 +3742,7 @@ def complete(ctx, summary, yield_status, yield_outcome, yield_notes):
     base_url = get_base_url(ctx.obj.get("url"))
     agent_id = get_agent_id(ctx.obj.get("agent"), base_url)
 
-    if agent_id == "unknown":
+    if agent_id is None:
         raise click.ClickException("Must set SKEIN_AGENT_ID or use --agent flag")
 
     # Check if we're in a chain (yield required)
