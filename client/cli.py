@@ -3957,20 +3957,26 @@ def identify(ctx, agent_id, capabilities, name, agent_type, description, eval):
 
 
 @cli.command("stats")
-@click.argument("target", type=click.Choice(["threads"]))
-@click.option("--orphaned", is_flag=True, help="Show orphaned threads")
-@click.option("--by-weaver", is_flag=True, help="Group by weaver")
+@click.argument("target", type=click.Choice(["threads", "folios"]))
+@click.option("--orphaned", is_flag=True, help="Show orphaned threads (threads only)")
+@click.option("--by-weaver", is_flag=True, help="Group by weaver (threads only)")
 @click.option("--by-type", is_flag=True, help="Group by type")
+@click.option("--by-status", is_flag=True, help="Group by status (folios only)")
+@click.option("--by-site", is_flag=True, help="Group by site (folios only)")
 @click.option("--all", "show_all", is_flag=True, help="Show all stats")
 @click.option("--json", "output_json", is_flag=True, help="Output as JSON")
 @click.pass_context
-def stats(ctx, target, orphaned, by_weaver, by_type, show_all, output_json):
+def stats(ctx, target, orphaned, by_weaver, by_type, by_status, by_site, show_all, output_json):
     """Observability and debugging analytics.
 
     Examples:
         skein stats threads --orphaned
         skein stats threads --by-weaver
         skein stats threads --all
+        skein stats folios
+        skein stats folios --by-type
+        skein stats folios --by-status
+        skein stats folios --by-site
     """
     base_url = get_base_url(ctx.obj.get("url"))
     agent_id = get_agent_id(ctx.obj.get("agent"), base_url)
@@ -3978,6 +3984,9 @@ def stats(ctx, target, orphaned, by_weaver, by_type, show_all, output_json):
     if target == "threads":
         analyze_threads(base_url, agent_id, orphaned, by_weaver, by_type,
                        show_all, output_json)
+    elif target == "folios":
+        analyze_folios(base_url, agent_id, by_type, by_status, by_site,
+                      show_all, output_json)
 
 
 def analyze_threads(base_url, agent_id, orphaned, by_weaver, by_type,
@@ -4041,6 +4050,50 @@ def analyze_threads(base_url, agent_id, orphaned, by_weaver, by_type,
 
     if by_type or show_all:
         print_type_distribution(threads)
+
+
+def analyze_folios(base_url, agent_id, by_type, by_status, by_site,
+                   show_all, output_json):
+    """Analyze folio statistics."""
+    from .analytics import (
+        get_folio_stats,
+        print_folio_stats
+    )
+
+    # If no options specified, show all by default
+    if not (by_type or by_status or by_site or show_all):
+        show_all = True
+
+    # Fetch all folios with error handling
+    try:
+        folios = make_request("GET", "/folios", base_url, agent_id)
+        if not isinstance(folios, list):
+            folios = []
+    except Exception as e:
+        raise click.ClickException(f"Failed to fetch folios: {str(e)}")
+
+    if output_json:
+        stats = get_folio_stats(folios)
+        # Filter based on options
+        if not show_all:
+            filtered_stats = {'total': stats['total']}
+            if by_type:
+                filtered_stats['by_type'] = stats['by_type']
+            if by_status:
+                filtered_stats['by_status'] = stats['by_status']
+            if by_site:
+                filtered_stats['by_site'] = stats['by_site']
+            stats = filtered_stats
+        click.echo(json.dumps(stats, indent=2))
+        return
+
+    # Pretty print
+    print_folio_stats(
+        folios,
+        by_type=by_type or show_all,
+        by_status=by_status or show_all,
+        by_site=by_site or show_all
+    )
 
 
 @cli.command()

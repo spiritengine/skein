@@ -241,3 +241,123 @@ def print_type_distribution(threads: List[Dict]):
         for target_type, count in sorted(stats['reply_targets'].items(),
                                         key=lambda x: x[1], reverse=True):
             click.echo(f"  - {target_type}: {count} replies")
+
+
+def analyze_folios_by_type(folios: List[Dict]) -> Dict[str, int]:
+    """Analyze folio distribution by type.
+
+    Args:
+        folios: All folios in SKEIN
+
+    Returns:
+        Dict mapping folio type to count
+    """
+    type_counts = Counter()
+    for folio in folios:
+        if 'type' in folio:
+            type_counts[folio['type']] += 1
+    return dict(type_counts)
+
+
+def analyze_folios_by_status(folios: List[Dict]) -> Dict[str, int]:
+    """Analyze folio distribution by status.
+
+    Args:
+        folios: All folios in SKEIN
+
+    Returns:
+        Dict mapping status to count
+    """
+    status_counts = Counter()
+    for folio in folios:
+        status = folio.get('status', 'unknown')
+        status_counts[status] += 1
+    return dict(status_counts)
+
+
+def analyze_folios_by_site(folios: List[Dict]) -> Dict[str, int]:
+    """Analyze folio distribution by site.
+
+    Args:
+        folios: All folios in SKEIN
+
+    Returns:
+        Dict mapping site_id to count
+    """
+    site_counts = Counter()
+    for folio in folios:
+        site_id = folio.get('site_id', 'unknown')
+        site_counts[site_id] += 1
+    return dict(site_counts)
+
+
+def get_folio_stats(folios: List[Dict]) -> Dict[str, Any]:
+    """Get comprehensive folio statistics.
+
+    Args:
+        folios: All folios in SKEIN
+
+    Returns:
+        Dict with total, by_type, by_status, by_site
+    """
+    return {
+        'total': len(folios),
+        'by_type': analyze_folios_by_type(folios),
+        'by_status': analyze_folios_by_status(folios),
+        'by_site': analyze_folios_by_site(folios)
+    }
+
+
+def print_folio_stats(folios: List[Dict], by_type: bool = True,
+                      by_status: bool = True, by_site: bool = True):
+    """Pretty print folio statistics.
+
+    Args:
+        folios: All folios in SKEIN
+        by_type: Show breakdown by folio type
+        by_status: Show breakdown by status
+        by_site: Show breakdown by site
+    """
+    import click
+
+    total = len(folios)
+    click.echo(f"📊 FOLIO STATISTICS ({total} total)")
+    click.echo()
+
+    if by_type:
+        type_counts = analyze_folios_by_type(folios)
+        if type_counts:
+            click.echo("By Type:")
+            max_count = max(type_counts.values()) if type_counts else 1
+            for folio_type, count in sorted(type_counts.items(),
+                                            key=lambda x: x[1], reverse=True):
+                pct = (count / total) * 100 if total > 0 else 0
+                bar_length = int((count / max_count) * 20)
+                bar = '█' * bar_length
+                click.echo(f"  {folio_type:12} {count:4} ({pct:5.1f}%)  {bar}")
+            click.echo()
+
+    if by_status:
+        status_counts = analyze_folios_by_status(folios)
+        if status_counts:
+            click.echo("By Status:")
+            for status, count in sorted(status_counts.items(),
+                                        key=lambda x: x[1], reverse=True):
+                pct = (count / total) * 100 if total > 0 else 0
+                click.echo(f"  {status:12} {count:4} ({pct:5.1f}%)")
+            click.echo()
+
+    if by_site:
+        site_counts = analyze_folios_by_site(folios)
+        if site_counts:
+            click.echo(f"By Site ({len(site_counts)} sites):")
+            # Show top 10 sites if many
+            sorted_sites = sorted(site_counts.items(),
+                                  key=lambda x: x[1], reverse=True)
+            for site_id, count in sorted_sites[:10]:
+                pct = (count / total) * 100 if total > 0 else 0
+                click.echo(f"  {site_id:20} {count:4} ({pct:5.1f}%)")
+            if len(sorted_sites) > 10:
+                remaining = sum(count for _, count in sorted_sites[10:])
+                click.echo(f"  ... and {len(sorted_sites) - 10} more sites ({remaining} folios)")
+            click.echo()
