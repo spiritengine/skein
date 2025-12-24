@@ -3022,6 +3022,17 @@ def close(ctx, resource_ids, link, note):
         make_request("POST", "/threads", base_url, agent_id, json=status_data)
         click.echo(f"Closed {resource_id}")
 
+        # Create message thread if --note provided (without link)
+        if note and not link:
+            note_data = {
+                "from_id": agent_id,
+                "to_id": resource_id,
+                "type": "message",
+                "content": note
+            }
+            make_request("POST", "/threads", base_url, agent_id, json=note_data)
+            click.echo(f"  Note: {note}")
+
         # Create reference thread if --link provided
         if link:
             ref_content = note if note else "Resolved"
