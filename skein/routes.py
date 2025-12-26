@@ -748,6 +748,55 @@ async def update_folio(
     return {"success": True, "folio": folio}
 
 
+class FolioMoveRequest(BaseModel):
+    """Request to move a folio to a different site."""
+    dest_site_id: str
+    note: Optional[str] = None
+
+
+@router.post("/folios/{folio_id}/move")
+async def move_folio(
+    folio_id: str,
+    move_request: FolioMoveRequest,
+    x_agent_id: str = Header(None, alias="X-Agent-Id"),
+    store: JSONStore = Depends(get_project_store)
+):
+    """
+    Move a folio from its current site to a different site.
+
+    Updates the folio's site_id and physically relocates the file.
+    Optionally records a thread with the move reason.
+    """
+    created_by = x_agent_id or "unknown"
+
+    try:
+        moved_folio = store.move_folio(folio_id, move_request.dest_site_id)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+    if not moved_folio:
+        raise HTTPException(status_code=404, detail=f"Folio '{folio_id}' not found")
+
+    # Create a thread recording the move if note provided
+    if move_request.note:
+        move_thread = Thread(
+            thread_id=generate_thread_id(),
+            from_id=created_by,
+            to_id=folio_id,
+            type="message",
+            content=f"Moved to {move_request.dest_site_id}: {move_request.note}",
+            weaver=created_by,
+            created_at=datetime.now()
+        )
+        store.save_thread(move_thread)
+
+    return {
+        "success": True,
+        "folio": moved_folio,
+        "moved_to": move_request.dest_site_id
+    }
+
+
 # Thread Endpoints
 
 @router.post("/threads")

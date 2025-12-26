@@ -414,6 +414,54 @@ class JSONStore:
                     return Folio(**folio_data)
         return None
 
+    def move_folio(self, folio_id: str, dest_site_id: str) -> Optional[Folio]:
+        """
+        Move a folio from its current site to a different site.
+
+        Returns the updated folio on success, None if folio not found.
+        Raises ValueError if destination site doesn't exist.
+        """
+        # Find the folio and its current location
+        source_site_id = None
+        source_file = None
+        for site_dir in self.sites_dir.iterdir():
+            if site_dir.is_dir():
+                folio_file = site_dir / "folios" / f"{folio_id}.json"
+                if folio_file.exists():
+                    source_site_id = site_dir.name
+                    source_file = folio_file
+                    break
+
+        if not source_file or not source_site_id:
+            return None
+
+        # Verify destination site exists
+        dest_site_dir = self.sites_dir / dest_site_id
+        if not dest_site_dir.exists():
+            raise ValueError(f"Destination site '{dest_site_id}' does not exist")
+
+        # Load the folio
+        folio_data = self._load_json(source_file)
+        folio_data = self._normalize_datetime_fields(folio_data)
+
+        # Update site_id
+        old_site_id = folio_data.get("site_id")
+        folio_data["site_id"] = dest_site_id
+
+        # Ensure destination folios directory exists
+        dest_folios_dir = dest_site_dir / "folios"
+        dest_folios_dir.mkdir(exist_ok=True)
+
+        # Save to new location
+        dest_file = dest_folios_dir / f"{folio_id}.json"
+        self._save_json(dest_file, folio_data)
+
+        # Delete from old location
+        source_file.unlink()
+
+        logger.info(f"Moved folio {folio_id} from {old_site_id} to {dest_site_id}")
+        return Folio(**folio_data)
+
     # Thread Operations
 
     def save_thread(self, thread: Thread) -> bool:

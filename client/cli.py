@@ -2373,6 +2373,48 @@ def edit(ctx, folio_id, title, content, status, output_json):
         raise click.ClickException(f"Failed to update folio: {result}")
 
 
+@cli.command()
+@click.argument("folio_id")
+@click.argument("dest_site_id")
+@click.option("--note", "-n", help="Note explaining why the folio is being moved")
+@click.option("--json", "output_json", is_flag=True, help="Output as JSON")
+@click.pass_context
+def move(ctx, folio_id, dest_site_id, note, output_json):
+    """Move a folio from its current site to a different site.
+
+    Examples:
+        skein move brief-20251226-abc new-site
+        skein move brief-20251226-abc new-site --note "Consolidating mesh work"
+    """
+    base_url = get_base_url(ctx.obj.get("url"))
+    agent_id = get_agent_id(ctx.obj.get("agent"), base_url)
+
+    # Build move payload
+    move_data = {"dest_site_id": dest_site_id}
+    if note:
+        move_data["note"] = note
+
+    result = make_request(
+        "POST",
+        f"/folios/{folio_id}/move",
+        base_url,
+        agent_id,
+        json=move_data
+    )
+
+    if output_json:
+        click.echo(json.dumps(result, indent=2, default=str))
+        return
+
+    if result.get("success"):
+        moved_folio = result.get("folio", {})
+        click.echo(f"Moved {folio_id} to {dest_site_id}")
+        if note:
+            click.echo(f"  Note: {note}")
+    else:
+        raise click.ClickException(f"Failed to move folio: {result}")
+
+
 @cli.command(hidden=True)
 @click.argument("site_id")
 @click.option("--type", help="Filter by folio type")
