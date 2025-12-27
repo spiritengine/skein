@@ -1,0 +1,13 @@
+[Unit]
+Description=Daily SKEIN Backup Timer
+
+[Timer]
+# Run daily at midnight
+OnCalendar=daily
+# Run on boot if missed
+Persistent=true
+# Random delay up to 1 hour to avoid thundering herd
+RandomizedDelaySec=3600
+
+[Install]
+WantedBy=timers.target

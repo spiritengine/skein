@@ -1,0 +1,19 @@
+[Unit]
+Description=SKEIN Backup Service
+After=network.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=__SKEIN_PROJECT__
+Environment="PATH=__PYTHON_BIN_DIR__:/usr/local/bin:/usr/bin"
+Environment="SKEIN_PROJECT=__SKEIN_PROJECT__"
+ExecStart=__PYTHON__ -m client.cli backup create
+ExecStartPost=__PYTHON__ -m client.cli backup cleanup --keep-last __KEEP_LAST__
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=skein-backup
+
+[Install]
+WantedBy=default.target

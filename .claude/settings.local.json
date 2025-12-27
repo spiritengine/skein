@@ -4,7 +4,20 @@
       "Bash(for brief in brief-20251122-nwqg brief-20251122-muy2 brief-20251122-8ac0 brief-20251122-cg0h brief-20251122-w0xb brief-20251121-18c1 brief-20251122-uwal brief-20251121-8180)",
       "Bash(do echo '=== $brief ===')",
       "Bash(done)",
-      "Bash(for brief in brief-20251120-xwgr brief-20251120-h8cf brief-20251120-krw6 brief-20251120-mntg brief-20251120-k8m1 brief-20251120-b4ui brief-20251120-wrjd brief-20251120-wzpj brief-20251120-pwfd)"
+      "Bash(for brief in brief-20251120-xwgr brief-20251120-h8cf brief-20251120-krw6 brief-20251120-mntg brief-20251120-k8m1 brief-20251120-b4ui brief-20251120-wrjd brief-20251120-wzpj brief-20251120-pwfd)",
+      "mcp__spindle__spin",
+      "Bash(python -m pytest:*)",
+      "Bash(horizon cast:*)",
+      "mcp__spindle__spin_wait",
+      "mcp__spindle__unspool",
+      "Bash(horizon ls:*)",
+      "Bash(horizon strand list:*)",
+      "Bash(horizon health:*)",
+      "Bash(horizon --help:*)",
+      "Bash(curl:*)",
+      "Bash(for name in weftstone ply plumb bedrock keystone adamant knurl)",
+      "Bash(do echo -n \"$name: \" pip index versions \"$name\")",
+      "Bash(pip index:*)"
     ],
     "deny": [],
     "ask": []

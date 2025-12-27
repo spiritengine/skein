@@ -81,6 +81,7 @@ class Folio(BaseModel):
     archived: bool = False
     metadata: Dict[str, Any] = Field(default_factory=dict)
     acknowledged_at: Optional[datetime] = None
+    content_hash: Optional[str] = None  # Content-addressable hash of immutable fields
 
 
 class FolioUpdate(BaseModel):

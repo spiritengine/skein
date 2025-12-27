@@ -14,7 +14,30 @@ from contextlib import contextmanager
 
 from .models import AgentInfo, Site, Folio, Thread, LogLine
 
+try:
+    from knurl import canon, hash as knurl_hash
+    KNURL_AVAILABLE = True
+except ImportError:
+    KNURL_AVAILABLE = False
+
 logger = logging.getLogger(__name__)
+
+
+def compute_folio_hash(folio: Folio) -> str:
+    """Compute content-addressable hash of folio's immutable fields."""
+    if not KNURL_AVAILABLE:
+        return None
+
+    # Only hash immutable fields
+    immutable = {
+        "type": folio.type,
+        "title": folio.title,
+        "content": folio.content,
+        "created_at": folio.created_at.isoformat() if folio.created_at else None,
+        "created_by": folio.created_by,
+    }
+    canonical = canon.serialize(immutable)
+    return knurl_hash.compute(canonical.decode('utf-8'), prefix="folio")
 
 
 # Project Registry
@@ -375,6 +398,10 @@ class JSONStore:
             logger.error(f"Site {folio.site_id} does not exist")
             return False
 
+        # Compute content hash if not present
+        if not folio.content_hash and KNURL_AVAILABLE:
+            folio.content_hash = compute_folio_hash(folio)
+
         folios_dir = site_dir / "folios"
         folios_dir.mkdir(exist_ok=True)
 
@@ -411,7 +438,14 @@ class JSONStore:
                 if folio_file.exists():
                     folio_data = self._load_json(folio_file)
                     folio_data = self._normalize_datetime_fields(folio_data)
-                    return Folio(**folio_data)
+                    folio = Folio(**folio_data)
+
+                    # Lazy hash: compute and save if missing
+                    if not folio.content_hash and KNURL_AVAILABLE:
+                        folio.content_hash = compute_folio_hash(folio)
+                        self._save_json(folio_file, folio.model_dump(mode='json'))
+
+                    return folio
         return None
 
     def move_folio(self, folio_id: str, dest_site_id: str) -> Optional[Folio]:
