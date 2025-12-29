@@ -1,0 +1,1 @@
+Test tender auto-closeout verification
