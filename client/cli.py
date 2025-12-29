@@ -4925,6 +4925,7 @@ def shard_merge(ctx, worktree_name, explicit_caller_cwd):
     Merge SHARD branch into master and cleanup.
 
     Refuses if there are uncommitted changes or conflicts.
+    After successful merge, posts a tender folio (status=complete) and auto-closes it.
 
     Example:
         skein shard merge beadle_0001-20251202-001
@@ -4934,17 +4935,37 @@ def shard_merge(ctx, worktree_name, explicit_caller_cwd):
     """
     import os
 
+    base_url = get_base_url(ctx.obj.get("url"))
+    agent_id = get_agent_id(ctx.obj.get("agent"), base_url)
+
     shard_worktree = get_shard_worktree_module()
 
     # Use explicit caller_cwd if provided (from orchestration tools),
     # otherwise fall back to current working directory
     caller_cwd = explicit_caller_cwd if explicit_caller_cwd else os.getcwd()
 
+    # Gather tender metadata BEFORE merge (worktree gets deleted during merge)
+    shard_info = shard_worktree.get_shard_status(worktree_name)
+    if not shard_info:
+        raise click.ClickException(f"SHARD not found: {worktree_name}")
+
+    try:
+        metadata = shard_worktree.get_tender_metadata(worktree_name)
+    except Exception:
+        metadata = None  # Will use minimal metadata if gather fails
+
     try:
         result = shard_worktree.merge_shard(worktree_name, caller_cwd=caller_cwd)
 
         if result["success"]:
             click.echo(result["message"])
+
+            # Post tender folio with status=complete and auto-close it
+            tender_id = _post_merge_tender(
+                ctx, base_url, agent_id, worktree_name, shard_info, metadata
+            )
+            if tender_id:
+                click.echo(f"  Tender: {tender_id} (auto-closed)")
         else:
             click.echo(f"Error: {result['message']}")
             if result.get("uncommitted"):
@@ -4961,6 +4982,89 @@ def shard_merge(ctx, worktree_name, explicit_caller_cwd):
         raise click.ClickException(str(e))
     except Exception as e:
         raise click.ClickException(f"Failed to merge SHARD: {e}")
+
+
+def _post_merge_tender(ctx, base_url, agent_id, worktree_name, shard_info, metadata):
+    """
+    Post a tender folio with status=complete after successful merge, then auto-close it.
+
+    Returns tender_id on success, None on failure (non-fatal).
+    """
+    # Derive site from project path
+    site = None
+    worktree_path = shard_info.get("worktree_path", "")
+    if "/projects/" in worktree_path:
+        parts = worktree_path.split("/projects/")[1].split("/")
+        if parts:
+            site = f"{parts[0]}-development"
+    if not site:
+        site = "shard-review"
+
+    # Build content from metadata
+    if metadata:
+        summary_text = metadata.get("last_commit_message", "Merged")
+        files_list = metadata.get("files_modified", [])
+        commits = metadata.get("commits", 0)
+        branch_name = metadata.get("branch_name", shard_info.get("branch_name", "unknown"))
+    else:
+        summary_text = "Merged"
+        files_list = []
+        commits = 0
+        branch_name = shard_info.get("branch_name", "unknown")
+
+    files_str = "\n".join(f"  - {f}" for f in files_list[:20])
+    if len(files_list) > 20:
+        files_str += f"\n  ... and {len(files_list) - 20} more"
+
+    content = f"""## Tender: {worktree_name}
+
+**Status:** complete (merged)
+
+### Summary
+{summary_text}
+
+### Changes
+- **Commits:** {commits}
+- **Branch:** {branch_name}
+
+### Files Modified
+{files_str if files_str else '  (none)'}
+"""
+
+    folio_data = {
+        "type": "tender",
+        "site_id": site,
+        "title": make_title_from_content(summary_text) if summary_text else f"Merged: {worktree_name}",
+        "content": content,
+        "metadata": {
+            "worktree_name": worktree_name,
+            "branch_name": branch_name,
+            "commits": commits,
+            "files_modified": files_list,
+            "status": "complete",
+            "merged": True,
+            "name": shard_info.get("name"),
+        }
+    }
+
+    try:
+        result = make_request("POST", "/folios", base_url, agent_id, json=folio_data)
+        tender_id = result.get("folio_id")
+
+        if tender_id:
+            # Auto-close the tender immediately
+            status_data = {
+                "from_id": tender_id,
+                "to_id": tender_id,
+                "type": "status",
+                "content": "closed"
+            }
+            make_request("POST", "/threads", base_url, agent_id, json=status_data)
+
+        return tender_id
+    except Exception:
+        # Tender posting is non-fatal - merge already succeeded
+        return None
 
 
 @shard.command("pause")
