@@ -389,6 +389,21 @@ class JSONStore:
             return Site(**self._load_json(metadata_file))
         return None
 
+    def update_site(self, site_id: str, status: Optional[str] = None, metadata: Optional[Dict[str, Any]] = None) -> Optional[Site]:
+        """Update site status and/or metadata."""
+        site = self.get_site(site_id)
+        if not site:
+            return None
+
+        if status is not None:
+            site.status = status
+
+        if metadata is not None:
+            site.metadata.update(metadata)
+
+        self.save_site(site)
+        return site
+
     # Folio Operations
 
     def save_folio(self, folio: Folio) -> bool:

@@ -14,7 +14,7 @@ from pydantic import BaseModel
 
 from .models import (
     AgentRegistration, AgentInfo,
-    SiteCreate, Site,
+    SiteCreate, Site, SiteUpdate,
     FolioCreate, Folio, FolioUpdate,
     ThreadCreate, Thread,
     LogBatch, LogLine,
@@ -343,6 +343,23 @@ async def get_site(site_id: str, store: JSONStore = Depends(get_project_store)):
             )
         raise HTTPException(status_code=404, detail=f"Site '{site_id}' not found. No active sites exist - create one with 'skein site create <id> \"description\"'")
     return site
+
+
+@router.patch("/sites/{site_id}", response_model=Site)
+async def update_site(
+    site_id: str,
+    site_update: SiteUpdate,
+    store: JSONStore = Depends(get_project_store)
+):
+    """Update site status and/or metadata."""
+    updated_site = store.update_site(
+        site_id,
+        status=site_update.status,
+        metadata=site_update.metadata
+    )
+    if not updated_site:
+        raise HTTPException(status_code=404, detail=f"Site '{site_id}' not found")
+    return updated_site
 
 
 @router.get("/sites/{site_id}/folios", response_model=List[Folio])
