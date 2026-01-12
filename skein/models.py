@@ -41,6 +41,11 @@ class SiteCreate(BaseModel):
     metadata: Dict[str, Any] = Field(default_factory=dict)
 
 
+class SiteUpdate(BaseModel):
+    status: Optional[str] = None
+    metadata: Optional[Dict[str, Any]] = None
+
+
 class Site(BaseModel):
     site_id: str
     created_at: datetime

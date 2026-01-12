@@ -790,10 +790,46 @@ def site_get(ctx, site_id, output_json):
     else:
         click.echo(f"Site: {site_data['site_id']}")
         click.echo(f"Purpose: {site_data['purpose']}")
+        click.echo(f"Status: {site_data.get('status', 'active')}")
         click.echo(f"Created: {site_data['created_at']}")
         click.echo(f"By: {site_data['created_by']}")
         if site_data.get("metadata", {}).get("tags"):
             click.echo(f"Tags: {', '.join(site_data['metadata']['tags'])}")
+        if site_data.get("metadata", {}).get("closure_note"):
+            click.echo(f"Closure note: {site_data['metadata']['closure_note']}")
+
+
+@site.command("close")
+@click.argument("site_id")
+@click.option("--note", help="Reason for closing the site")
+@click.pass_context
+def site_close(ctx, site_id, note):
+    """Close a site."""
+    base_url = get_base_url(ctx.obj.get("url"))
+    agent_id = get_agent_id(ctx.obj.get("agent"), base_url)
+
+    data = {"status": "closed"}
+    if note:
+        data["metadata"] = {"closure_note": note}
+
+    result = make_request("PATCH", f"/sites/{site_id}", base_url, agent_id, json=data)
+    click.echo(f"Closed site: {site_id}")
+    if note:
+        click.echo(f"Note: {note}")
+
+
+@site.command("reopen")
+@click.argument("site_id")
+@click.pass_context
+def site_reopen(ctx, site_id):
+    """Reopen a closed site."""
+    base_url = get_base_url(ctx.obj.get("url"))
+    agent_id = get_agent_id(ctx.obj.get("agent"), base_url)
+
+    data = {"status": "active"}
+
+    result = make_request("PATCH", f"/sites/{site_id}", base_url, agent_id, json=data)
+    click.echo(f"Reopened site: {site_id}")
 
 
 @cli.command()
@@ -819,7 +855,8 @@ def sites(ctx, tag, output_json):
         else:
             click.echo(f"Found {len(sites_list)} site(s):\n")
             for s in sites_list:
-                click.echo(f"  {s['site_id']}")
+                status_indicator = "" if s.get('status', 'active') == 'active' else f" [{s['status']}]"
+                click.echo(f"  {s['site_id']}{status_indicator}")
                 click.echo(f"    {s['purpose']}")
                 click.echo()
 
