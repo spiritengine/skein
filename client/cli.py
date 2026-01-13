@@ -4869,16 +4869,21 @@ def shard_show(ctx, worktree_name):
 @shard.command("diff")
 @click.argument("worktree_name")
 @click.option("--stat", "show_stat", is_flag=True, help="Show diffstat only")
+@click.option("--integration", is_flag=True, help="Show full integration diff with master (includes master evolution)")
 @click.pass_context
-def shard_diff(ctx, worktree_name, show_stat):
+def shard_diff(ctx, worktree_name, show_stat, integration):
     """
-    Show diff for a SHARD (changes from master).
+    Show diff for a SHARD.
 
-    Useful for reviewing changes without cd'ing to the worktree.
+    By default shows WORK DIFF: agent's actual changes from the base commit.
+    This excludes any changes from master evolution (no false deletions).
+
+    Use --integration to see what would actually merge into current master.
 
     Examples:
-        skein shard diff my-shard-001
-        skein shard diff my-shard-001 --stat
+        skein shard diff my-shard-001          # Work diff (agent's changes)
+        skein shard diff my-shard-001 --stat   # Work diff stats only
+        skein shard diff my-shard-001 --integration  # Full merge preview
     """
     shard_worktree = get_shard_worktree_module()
 
@@ -4888,21 +4893,49 @@ def shard_diff(ctx, worktree_name, show_stat):
         if not shard:
             raise click.ClickException(f"SHARD not found: {worktree_name}")
 
-        if show_stat:
-            # Just show diffstat (already gathered in git_info)
-            git_info = shard_worktree.get_shard_git_info(worktree_name)
-            diffstat = git_info.get("diffstat", "")
-            if diffstat:
-                click.echo(diffstat)
-            else:
-                click.echo("No changes from master.")
-        else:
-            # Show full diff
-            diff_output = shard_worktree.get_shard_diff(worktree_name)
+        if integration:
+            # Show integration diff (what would merge into current master)
+            click.echo(f"=== INTEGRATION DIFF: {worktree_name} ===\n")
+            click.echo("Changes relative to current master:\n")
+            diff_output = shard_worktree.get_shard_diff(worktree_name, stat_only=show_stat, integration=True)
             if diff_output:
                 click.echo(diff_output)
             else:
-                click.echo("No changes from master.")
+                click.echo("No changes from current master.")
+        else:
+            # Show work diff (agent's actual changes from base)
+            drift_info = shard_worktree.get_shard_drift_info(worktree_name)
+
+            if drift_info.get("has_metadata") and drift_info.get("base_commit"):
+                click.echo(f"=== WORK DIFF: {worktree_name} ===\n")
+                base_short = drift_info.get("base_commit_short", "unknown")
+                base_date = drift_info.get("base_commit_date", "")
+                click.echo(f"Changes from base commit {base_short}")
+                if base_date:
+                    click.echo(f"(Base created: {base_date})\n")
+
+                # Show master activity if there's drift
+                master_ahead = drift_info.get("master_commits_ahead", 0)
+                if master_ahead > 0:
+                    click.echo(f"Note: Master has {master_ahead} new commits since your base.")
+                    notable = drift_info.get("master_notable_changes", [])
+                    if notable:
+                        click.echo("Notable changes on master:")
+                        for change in notable[:5]:
+                            click.echo(f"  - {change}")
+                    click.echo()
+
+                diff_output = shard_worktree.get_shard_work_diff(worktree_name, stat_only=show_stat)
+            else:
+                # No metadata - fall back to regular diff
+                click.echo(f"=== DIFF: {worktree_name} ===\n")
+                click.echo("(No base commit metadata - showing diff from current master)\n")
+                diff_output = shard_worktree.get_shard_diff(worktree_name, stat_only=show_stat)
+
+            if diff_output:
+                click.echo(diff_output)
+            else:
+                click.echo("No changes.")
 
     except shard_worktree.ShardError as e:
         raise click.ClickException(str(e))
@@ -4913,17 +4946,21 @@ def shard_diff(ctx, worktree_name, show_stat):
 @shard.command("cleanup")
 @click.argument("worktree_name")
 @click.option("--keep-branch", is_flag=True, help="Keep git branch after removing worktree")
+@click.option("--chain", is_flag=True, help="Remove entire graft chain (original + all grafts)")
 @click.option("--caller-cwd", "explicit_caller_cwd", default=None,
               help="Original working directory of caller (for orchestration tools)")
 @click.confirmation_option(prompt="Are you sure you want to cleanup this SHARD?")
 @click.pass_context
-def shard_cleanup(ctx, worktree_name, keep_branch, explicit_caller_cwd):
+def shard_cleanup(ctx, worktree_name, keep_branch, chain, explicit_caller_cwd):
     """
     Remove SHARD worktree and optionally delete branch.
 
+    Use --chain to remove an entire graft chain (original + all grafts).
+
     Example:
-        skein shard cleanup opus-security-architect-20251109-001
-        skein shard cleanup opus-security-architect-20251109-001 --keep-branch
+        skein shard cleanup my-shard-001
+        skein shard cleanup my-shard-001 --keep-branch
+        skein shard cleanup my-shard-001 --chain   # Remove full graft lineage
 
     For orchestration tools (e.g., Spindle), pass --caller-cwd to prevent
     agents from deleting their own worktree after cd-ing elsewhere.
@@ -4938,18 +4975,131 @@ def shard_cleanup(ctx, worktree_name, keep_branch, explicit_caller_cwd):
     caller_cwd = explicit_caller_cwd if explicit_caller_cwd else os.getcwd()
 
     try:
-        shard_worktree.cleanup_shard(worktree_name, keep_branch=keep_branch, caller_cwd=caller_cwd)
+        if chain:
+            # Clean up entire graft chain
+            result = shard_worktree.cleanup_graft_chain(
+                worktree_name,
+                keep_branch=keep_branch,
+                caller_cwd=caller_cwd
+            )
 
-        click.echo(f"✓ Cleaned up SHARD: {worktree_name}")
-        if not keep_branch:
-            click.echo("  (Branch also deleted)")
+            click.echo(f"Tracing worktree chain for: {worktree_name}\n")
+
+            if result["removed"]:
+                click.echo(f"Found chain ({len(result['removed'])} worktrees):")
+                for wt in reversed(result["removed"]):  # Show original first
+                    is_root = wt == result.get("chain_root", "")
+                    label = "(original)" if not shard_worktree.is_graft(wt) else "(graft)"
+                    click.echo(f"  {wt} {label}")
+                click.echo()
+
+                click.echo(f"Removed {len(result['removed'])} worktrees:")
+                for wt in result["removed"]:
+                    click.echo(f"  ✓ {wt}")
+
+            if result["errors"]:
+                click.echo("\nWarnings:")
+                for err in result["errors"]:
+                    click.echo(f"  ⚠ {err}", err=True)
+
+            if not keep_branch:
+                click.echo("\n  (Branches also deleted)")
         else:
-            click.echo("  (Branch kept)")
+            # Single worktree cleanup
+            shard_worktree.cleanup_shard(worktree_name, keep_branch=keep_branch, caller_cwd=caller_cwd)
+
+            click.echo(f"✓ Cleaned up SHARD: {worktree_name}")
+            if not keep_branch:
+                click.echo("  (Branch also deleted)")
+            else:
+                click.echo("  (Branch kept)")
+
+            # If this was a graft, suggest chain cleanup for the original
+            if shard_worktree.is_graft(worktree_name):
+                root = shard_worktree.get_graft_chain_root(worktree_name)
+                remaining_chain = shard_worktree.get_graft_chain(root)
+                if remaining_chain:
+                    click.echo(f"\nNote: Original shard and/or other grafts may remain:")
+                    for wt in remaining_chain:
+                        click.echo(f"  - {wt}")
+                    click.echo(f"\nTo remove all: skein shard cleanup {root} --chain")
 
     except shard_worktree.ShardError as e:
         raise click.ClickException(str(e))
     except Exception as e:
         raise click.ClickException(f"Failed to cleanup SHARD: {e}")
+
+
+@shard.command("graft")
+@click.argument("worktree_name")
+@click.pass_context
+def shard_graft(ctx, worktree_name):
+    """
+    Create a graft worktree to resolve conflicts with master.
+
+    When a shard has conflicts with current master (due to master evolution),
+    grafting creates a new worktree from current master and cherry-picks
+    the shard's commits onto it.
+
+    If conflicts occur during cherry-pick, the graft is left in a conflicted
+    state for you to resolve manually.
+
+    Example:
+        skein shard graft my-shard-001
+
+    After resolving conflicts (if any):
+        cd worktrees/my-shard-001-graft/
+        git add <resolved files>
+        git commit
+        skein shard merge my-shard-001-graft
+
+    Grafts can be grafted - if master evolves again before you merge,
+    just run graft again on the graft:
+        skein shard graft my-shard-001-graft
+    """
+    shard_worktree = get_shard_worktree_module()
+
+    try:
+        click.echo(f"Creating graft worktree from current master...")
+        click.echo(f"Applying commits from {worktree_name}...")
+        click.echo()
+
+        result = shard_worktree.graft_shard(worktree_name)
+
+        if result["success"]:
+            click.echo(f"✓ Applied cleanly (no conflicts)\n")
+            click.echo(f"Graft created at:")
+            click.echo(f"  {result['graft_worktree_path']}/\n")
+            click.echo("Your work has been applied onto current master.")
+            click.echo("Review and test, then merge:")
+            click.echo(f"  cd {result['graft_worktree_path']}")
+            click.echo("  (run tests)")
+            click.echo(f"  skein shard merge {result['graft_worktree_name']}")
+        else:
+            click.echo(f"✗ Conflicts in: {', '.join(result['conflicts'])}\n")
+            click.echo(f"Graft created at:")
+            click.echo(f"  {result['graft_worktree_path']}/\n")
+
+            # Show chain context if this is a multi-level graft
+            depth = result.get("chain_depth", 0)
+            if depth > 1:
+                chain = shard_worktree.get_graft_chain(shard_worktree.get_graft_chain_root(worktree_name))
+                click.echo("Chain: " + " → ".join(chain))
+                click.echo()
+
+            click.echo("Resolve conflicts:")
+            click.echo(f"  cd {result['graft_worktree_path']}")
+            for f in result['conflicts']:
+                click.echo(f"  (edit {f} to resolve conflicts)")
+            click.echo("  git add <resolved files>")
+            click.echo("  git commit\n")
+            click.echo("Then merge:")
+            click.echo(f"  skein shard merge {result['graft_worktree_name']}")
+
+    except shard_worktree.ShardError as e:
+        raise click.ClickException(str(e))
+    except Exception as e:
+        raise click.ClickException(f"Failed to create graft: {e}")
 
 
 @shard.command("merge")
@@ -4963,6 +5113,8 @@ def shard_merge(ctx, worktree_name, explicit_caller_cwd):
 
     Refuses if there are uncommitted changes or conflicts.
     After successful merge, posts a tender folio (status=complete) and auto-closes it.
+
+    If conflicts are detected, suggests using 'skein shard graft' instead.
 
     Example:
         skein shard merge beadle_0001-20251202-001
@@ -4992,9 +5144,22 @@ def shard_merge(ctx, worktree_name, explicit_caller_cwd):
         metadata = None  # Will use minimal metadata if gather fails
 
     try:
+        # First, show drift context
+        drift_info = shard_worktree.get_shard_drift_info(worktree_name)
+        master_ahead = drift_info.get("master_commits_ahead", 0)
+
+        click.echo("Testing integration with current master...")
+
         result = shard_worktree.merge_shard(worktree_name, caller_cwd=caller_cwd)
 
         if result["success"]:
+            # Show drift context in success message
+            if master_ahead > 0:
+                click.echo(f"✓ Clean integration (applied onto current master, {master_ahead} commits ahead)")
+            else:
+                click.echo("✓ Clean integration")
+            click.echo()
+            click.echo("Merging to master...")
             click.echo(result["message"])
 
             # Post tender folio with status=complete and auto-close it
@@ -5003,16 +5168,36 @@ def shard_merge(ctx, worktree_name, explicit_caller_cwd):
             )
             if tender_id:
                 click.echo(f"  Tender: {tender_id} (auto-closed)")
+
+            # Suggest chain cleanup if this was a graft
+            if shard_worktree.is_graft(worktree_name):
+                root = shard_worktree.get_graft_chain_root(worktree_name)
+                chain = shard_worktree.get_graft_chain(root)
+                if chain:
+                    click.echo(f"\nCleanup worktree chain:")
+                    click.echo(f"  → skein shard cleanup {root} --chain")
+                    click.echo(f"\nThis will remove:")
+                    for wt in chain:
+                        click.echo(f"  - worktrees/{wt}/")
+            else:
+                click.echo(f"\nCleanup worktree:")
+                click.echo(f"  → skein shard cleanup {worktree_name}")
         else:
-            click.echo(f"Error: {result['message']}")
+            click.echo(f"✗ {result['message']}")
+
             if result.get("uncommitted"):
                 click.echo("\nUncommitted files:")
                 for f in result["uncommitted"]:
                     click.echo(f"  {f}")
+                click.echo("\nCommit your changes first, then retry merge.")
+
             if result.get("conflicts"):
-                click.echo("\nFiles with conflicts:")
+                click.echo(f"\n✗ Conflicts detected")
                 for f in result["conflicts"]:
-                    click.echo(f"  {f}")
+                    click.echo(f"  - {f}")
+                click.echo(f"\nCreate graft worktree to resolve:")
+                click.echo(f"  → skein shard graft {worktree_name}")
+
             raise SystemExit(1)
 
     except shard_worktree.ShardError as e:
@@ -5461,11 +5646,13 @@ def shard_tender(ctx, worktree_name, site, reviewer, summary, status, confidence
 @click.pass_context
 def shard_triage(ctx, output_json):
     """
-    Triage all SHARDs - actionable overview with status, conflicts, and tender info.
+    Triage all SHARDs - actionable overview with status, conflicts, drift, and tender info.
 
     Shows all shards with:
     - Commit count and diffstat (+/-)
     - Merge status (clean/CONFLICT/uncommitted)
+    - Drift info (master commits since base)
+    - Graft chain context (if applicable)
     - Tender confidence if exists
 
     Example:
@@ -5512,10 +5699,20 @@ def shard_triage(ctx, output_json):
         for shard_item in shards:
             wt_name = shard_item["worktree_name"]
             git_info = shard_worktree.get_shard_git_info(wt_name)
+            drift_info = shard_worktree.get_shard_drift_info(wt_name)
 
             commits = git_info.get("commits_ahead", 0)
             merge = git_info.get("merge_status", "unknown")
             uncommitted = git_info.get("uncommitted", [])
+
+            # Get drift info
+            master_ahead = drift_info.get("master_commits_ahead", 0)
+            base_commit = drift_info.get("base_commit_short")
+            conflict_status = drift_info.get("conflict_status", "unknown")
+
+            # Check if this is a graft
+            is_graft = shard_worktree.is_graft(wt_name)
+            graft_depth = shard_worktree.get_graft_depth(wt_name) if is_graft else 0
 
             # Parse diffstat for +/-
             diffstat = git_info.get("diffstat", "")
@@ -5530,11 +5727,11 @@ def shard_triage(ctx, output_json):
                 if del_match:
                     deletions = int(del_match.group(1))
 
-            # Determine status icon
+            # Determine status icon and text
             if uncommitted:
                 status_icon = "○"  # uncommitted
                 status_text = "uncommitted"
-            elif merge == "conflict":
+            elif conflict_status == "conflict":
                 status_icon = "⚠"  # conflict
                 status_text = "CONFLICT"
             elif commits == 0:
@@ -5557,6 +5754,11 @@ def shard_triage(ctx, output_json):
                 "status_icon": status_icon,
                 "confidence": confidence,
                 "tender_id": tender.get("folio_id") if tender else None,
+                "master_ahead": master_ahead,
+                "base_commit": base_commit,
+                "is_graft": is_graft,
+                "graft_depth": graft_depth,
+                "conflict_status": conflict_status,
             }
             triage_data.append(entry)
 
@@ -5573,25 +5775,56 @@ def shard_triage(ctx, output_json):
                 status = entry["status"]
                 icon = entry["status_icon"]
                 conf = entry["confidence"]
+                master_ahead = entry.get("master_ahead", 0)
+                base_commit = entry.get("base_commit")
+                is_graft = entry.get("is_graft", False)
 
                 diffstat_str = f"+{ins}/-{dels}" if (ins or dels) else "---"
+
+                # Use different icon for grafts
+                if is_graft:
+                    icon = "○"  # graft indicator
+
                 parts = [
                     f"  {icon}",
-                    f"{name:<35}",
+                    f"{name:<40}",
+                    f"{status:<12}",
                     f"{commits:>2} commits",
                     f"{diffstat_str:>12}",
-                    f"{status:<12}",
                 ]
-                if conf is not None:
-                    parts.append(f"confidence:{conf}")
-                elif entry["tender_id"]:
-                    parts.append("(tendered)")
-                else:
-                    parts.append("(no tender)")
 
                 click.echo("  ".join(parts))
 
-            click.echo("\nUse `skein shard review <name>` for details on a specific shard")
+                # Show drift/graft context on second line
+                context_parts = []
+                if base_commit:
+                    context_parts.append(f"base: {base_commit}")
+                if master_ahead > 0:
+                    conflict_status = entry.get("conflict_status", "unknown")
+                    if conflict_status == "conflict":
+                        context_parts.append(f"master +{master_ahead} (conflicts)")
+                    else:
+                        context_parts.append(f"master +{master_ahead} (no conflicts)")
+                if is_graft:
+                    root = shard_worktree.get_graft_chain_root(name)
+                    context_parts.append(f"graft of {root}")
+
+                if context_parts:
+                    click.echo(f"       {', '.join(context_parts)}")
+
+                # Show tender info
+                if conf is not None:
+                    click.echo(f"       confidence: {conf}/10")
+                elif entry["tender_id"]:
+                    click.echo(f"       tendered: {entry['tender_id']}")
+
+                click.echo()  # Blank line between entries
+
+            click.echo("Commands:")
+            click.echo("  skein shard review <name>    # View details")
+            click.echo("  skein shard diff <name>      # View work diff")
+            click.echo("  skein shard merge <name>     # Merge to master")
+            click.echo("  skein shard graft <name>     # Create graft to resolve conflicts")
 
     except shard_worktree.ShardError as e:
         raise click.ClickException(str(e))
@@ -5608,9 +5841,10 @@ def shard_review(ctx, worktree_name, output_json):
     Deep review of a single SHARD for merge decision.
 
     Shows:
-    - Branch and tender info
-    - Specific conflict files (if any)
-    - Full change list with diffstat
+    - Work diff (agent's actual changes from base)
+    - Master activity since base (drift info)
+    - Conflict status with specific files
+    - Graft chain context (if applicable)
     - Tender summary and confidence
 
     Example:
@@ -5627,6 +5861,7 @@ def shard_review(ctx, worktree_name, output_json):
             raise click.ClickException(f"SHARD not found: {worktree_name}")
 
         git_info = shard_worktree.get_shard_git_info(worktree_name)
+        drift_info = shard_worktree.get_shard_drift_info(worktree_name)
 
         # Look up tender folio
         tender_info = None
@@ -5651,20 +5886,9 @@ def shard_review(ctx, worktree_name, output_json):
         except:
             pass
 
-        # Get conflict file list if there are conflicts
-        conflict_files = []
-        merge_status = git_info.get("merge_status", "unknown")
-        if merge_status == "conflict":
-            try:
-                from skein import shard as shard_module
-                repo = shard_module._get_repo()
-                branch = shard_info["branch_name"]
-                merge_base = repo.git.merge_base("master", branch)
-                master_files = set(repo.git.diff("--name-only", merge_base, "master").strip().split("\n"))
-                branch_files = set(repo.git.diff("--name-only", merge_base, branch).strip().split("\n"))
-                conflict_files = sorted(list(master_files & branch_files - {''}))
-            except:
-                pass
+        # Get conflict info from drift_info
+        conflict_status = drift_info.get("conflict_status", "unknown")
+        conflict_files = drift_info.get("conflict_files", [])
 
         # Build review data
         review_data = {
@@ -5672,29 +5896,68 @@ def shard_review(ctx, worktree_name, output_json):
             "branch_name": shard_info["branch_name"],
             "worktree_path": shard_info["worktree_path"],
             "commits_ahead": git_info.get("commits_ahead", 0),
-            "merge_status": merge_status,
+            "merge_status": conflict_status,
             "uncommitted": git_info.get("uncommitted", []),
             "commit_log": git_info.get("commit_log", []),
             "diffstat": git_info.get("diffstat", ""),
             "conflict_files": conflict_files,
             "tender": tender_info,
+            "base_commit": drift_info.get("base_commit_short"),
+            "base_commit_date": drift_info.get("base_commit_date"),
+            "master_commits_ahead": drift_info.get("master_commits_ahead", 0),
+            "master_notable_changes": drift_info.get("master_notable_changes", []),
+            "is_graft": shard_worktree.is_graft(worktree_name),
+            "work_diff_stat": drift_info.get("work_diff_stat"),
         }
 
         if output_json:
             import json as json_module
             click.echo(json_module.dumps(review_data, indent=2))
         else:
-            click.echo(f"SHARD: {worktree_name}")
-            click.echo(f"Branch: {shard_info['branch_name']}")
-
-            if tender_info:
-                conf_str = f"{tender_info['confidence']}/10" if tender_info.get('confidence') else "unrated"
-                click.echo(f"Tender: {tender_info['folio_id']} (confidence: {conf_str})")
-            else:
-                click.echo("Tender: (none)")
+            click.echo(f"=== SHARD: {worktree_name} ===")
             click.echo()
 
+            # Show graft chain context if applicable
+            is_graft = shard_worktree.is_graft(worktree_name)
+            if is_graft:
+                root = shard_worktree.get_graft_chain_root(worktree_name)
+                chain = shard_worktree.get_graft_chain(root)
+                click.echo(f"Chain: {' → '.join(chain)}")
+                click.echo()
+
+            # Show work info with base commit
+            base_commit = drift_info.get("base_commit_short")
+            base_date = drift_info.get("base_commit_date", "")
+            commits = git_info.get("commits_ahead", 0)
             uncommitted = git_info.get("uncommitted", [])
+
+            if uncommitted:
+                click.echo("Your Work (has uncommitted changes):")
+            elif conflict_status == "conflict":
+                click.echo("Your Work (conflicts with master):")
+            else:
+                click.echo("Your Work (clean, ready to integrate):")
+
+            if base_commit:
+                click.echo(f"  Base: {base_commit}" + (f" ({base_date})" if base_date else ""))
+            click.echo(f"  Commits: {commits}")
+
+            # Show work diff stat (agent's actual changes)
+            work_stat = drift_info.get("work_diff_stat")
+            if work_stat:
+                # Parse summary line
+                lines = work_stat.strip().split("\n")
+                if lines:
+                    summary = lines[-1]  # Last line has totals
+                    click.echo(f"  Changes: {summary.strip()}")
+
+            # Show modified files
+            commit_log = git_info.get("commit_log", [])
+            if commit_log:
+                click.echo(f"  Files changed: {len(commit_log)} commits")
+            click.echo()
+
+            # Show uncommitted changes if any
             if uncommitted:
                 click.echo("UNCOMMITTED CHANGES:")
                 for line in uncommitted[:10]:
@@ -5703,43 +5966,65 @@ def shard_review(ctx, worktree_name, output_json):
                     click.echo(f"  ... and {len(uncommitted) - 10} more")
                 click.echo()
 
-            if conflict_files:
-                click.echo("CONFLICTS WITH MASTER:")
-                for f in conflict_files[:15]:
-                    click.echo(f"  {f}")
-                if len(conflict_files) > 15:
-                    click.echo(f"  ... and {len(conflict_files) - 15} more")
+            # Show master activity (drift)
+            master_ahead = drift_info.get("master_commits_ahead", 0)
+            if master_ahead > 0:
+                click.echo("Master Activity Since Your Base:")
+                click.echo(f"  {master_ahead} new commits merged to master")
                 click.echo()
 
-            commit_log = git_info.get("commit_log", [])
-            if commit_log:
-                click.echo(f"CHANGES ({len(commit_log)} commits):")
-                for sha, msg in commit_log[:10]:
-                    click.echo(f"  {sha} {msg}")
-                click.echo()
-
-                diffstat = git_info.get("diffstat", "")
-                if diffstat:
-                    click.echo("FILES:")
-                    for line in diffstat.split("\n")[:15]:
-                        click.echo(f"  {line}")
+                notable = drift_info.get("master_notable_changes", [])
+                if notable:
+                    click.echo("  Notable changes:")
+                    for change in notable[:5]:
+                        click.echo(f"    - {change}")
                     click.echo()
-            else:
-                click.echo("No unique commits")
+
+                # Show conflict status
+                if conflict_status == "conflict":
+                    click.echo(f"  ⚠ Integration test: Conflicts detected")
+                    if conflict_files:
+                        for f in conflict_files[:10]:
+                            click.echo(f"    - {f}")
+                        if len(conflict_files) > 10:
+                            click.echo(f"    ... and {len(conflict_files) - 10} more")
+                else:
+                    click.echo(f"  ✓ Integration test: No conflicts detected")
+                    click.echo(f"  ✓ Ready to merge onto current master")
+                click.echo()
+            elif base_commit:
+                click.echo("✓ Master is at same state as your base")
+                click.echo("✓ Ready to merge")
                 click.echo()
 
-            if tender_info and tender_info.get("summary"):
-                click.echo("TENDER SUMMARY:")
-                click.echo(f"  {tender_info['summary']}")
+            # Show tender info
+            if tender_info:
+                conf_str = f"{tender_info['confidence']}/10" if tender_info.get('confidence') else "unrated"
+                click.echo(f"Tender: {tender_info['folio_id']} (confidence: {conf_str})")
+                if tender_info.get("summary"):
+                    click.echo(f"  {tender_info['summary']}")
                 click.echo()
 
-            # Actions hint
+            # Actions
             if uncommitted:
-                click.echo("Actions: Commit changes first, then merge or tender")
-            elif merge_status == "conflict":
-                click.echo("Actions: Use `skein shard apply` to work on it locally")
-            elif commit_log:
-                click.echo(f"Actions: `skein shard merge {worktree_name}` or `skein shard cleanup {worktree_name}`")
+                click.echo("Commit your changes first, then merge:")
+                click.echo(f"  cd {shard_info['worktree_path']}")
+                click.echo("  git add . && git commit")
+                click.echo(f"  skein shard merge {worktree_name}")
+            elif conflict_status == "conflict":
+                click.echo("Create graft worktree to resolve:")
+                click.echo(f"  → skein shard graft {worktree_name}")
+                click.echo()
+                click.echo("Or review your original work first:")
+                click.echo(f"  → skein shard diff {worktree_name}")
+            else:
+                click.echo("Merge to master:")
+                click.echo(f"  → skein shard merge {worktree_name}")
+                if is_graft:
+                    root = shard_worktree.get_graft_chain_root(worktree_name)
+                    click.echo()
+                    click.echo("After merge, cleanup chain:")
+                    click.echo(f"  → skein shard cleanup {root} --chain")
 
     except shard_worktree.ShardError as e:
         raise click.ClickException(str(e))

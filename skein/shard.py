@@ -9,6 +9,7 @@ Provides core functions for creating, cleaning up, and listing SHARDs.
 import os
 import re
 import json
+import sqlite3
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -22,6 +23,118 @@ except ImportError:
 class ShardError(Exception):
     """Base exception for SHARD operations."""
     pass
+
+
+# =============================================================================
+# SQLITE DATABASE FOR SHARD METADATA
+# =============================================================================
+
+SHARD_DB_SCHEMA = """
+CREATE TABLE IF NOT EXISTS shards (
+    worktree_name TEXT PRIMARY KEY,
+    parent_worktree TEXT,
+    base_commit TEXT NOT NULL,
+    created_at TIMESTAMP NOT NULL,
+    spawned_by TEXT,
+    brief_id TEXT,
+    description TEXT,
+    status TEXT DEFAULT 'active',
+    tendered_at TIMESTAMP,
+    merged_at TIMESTAMP,
+    confidence INTEGER
+);
+
+CREATE INDEX IF NOT EXISTS idx_shards_parent ON shards(parent_worktree);
+CREATE INDEX IF NOT EXISTS idx_shards_status ON shards(status);
+CREATE INDEX IF NOT EXISTS idx_shards_base_commit ON shards(base_commit);
+"""
+
+
+def _get_db_path() -> Path:
+    """Get path to shard database (in .skein directory of project root)."""
+    project_root = get_project_root()
+    skein_dir = project_root / ".skein"
+    skein_dir.mkdir(exist_ok=True)
+    return skein_dir / "shards.db"
+
+
+def _get_db_connection() -> sqlite3.Connection:
+    """Get connection to shard database, creating it if needed."""
+    db_path = _get_db_path()
+    conn = sqlite3.connect(str(db_path))
+    conn.row_factory = sqlite3.Row
+
+    # Initialize schema if needed
+    conn.executescript(SHARD_DB_SCHEMA)
+    conn.commit()
+
+    return conn
+
+
+def _record_shard_metadata(
+    worktree_name: str,
+    base_commit: str,
+    created_at: datetime,
+    spawned_by: Optional[str] = None,
+    brief_id: Optional[str] = None,
+    description: Optional[str] = None,
+    parent_worktree: Optional[str] = None
+) -> None:
+    """Record shard metadata in SQLite database."""
+    conn = _get_db_connection()
+    try:
+        conn.execute("""
+            INSERT OR REPLACE INTO shards
+            (worktree_name, base_commit, created_at, spawned_by, brief_id, description, parent_worktree, status)
+            VALUES (?, ?, ?, ?, ?, ?, ?, 'active')
+        """, (worktree_name, base_commit, created_at.isoformat(), spawned_by, brief_id, description, parent_worktree))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _get_shard_metadata(worktree_name: str) -> Optional[Dict[str, Any]]:
+    """Get shard metadata from SQLite database."""
+    conn = _get_db_connection()
+    try:
+        cursor = conn.execute(
+            "SELECT * FROM shards WHERE worktree_name = ?",
+            (worktree_name,)
+        )
+        row = cursor.fetchone()
+        if row:
+            return dict(row)
+        return None
+    finally:
+        conn.close()
+
+
+def _update_shard_status(worktree_name: str, status: str, **kwargs) -> None:
+    """Update shard status in database."""
+    conn = _get_db_connection()
+    try:
+        updates = ["status = ?"]
+        values = [status]
+
+        if "merged_at" in kwargs:
+            updates.append("merged_at = ?")
+            values.append(kwargs["merged_at"].isoformat() if kwargs["merged_at"] else None)
+        if "tendered_at" in kwargs:
+            updates.append("tendered_at = ?")
+            values.append(kwargs["tendered_at"].isoformat() if kwargs["tendered_at"] else None)
+        if "confidence" in kwargs:
+            updates.append("confidence = ?")
+            values.append(kwargs["confidence"])
+
+        values.append(worktree_name)
+
+        conn.execute(
+            f"UPDATE shards SET {', '.join(updates)} WHERE worktree_name = ?",
+            values
+        )
+        conn.commit()
+    finally:
+        conn.close()
 
 
 # =============================================================================
@@ -195,6 +308,75 @@ def _get_repo() -> 'git.Repo':
         raise ShardError(f"Not a git repository: {get_project_root()}")
 
 
+# Cached git version (None = not yet checked, tuple = parsed version)
+_GIT_VERSION: Optional[Tuple[int, ...]] = None
+
+
+def _get_git_version() -> Tuple[int, ...]:
+    """
+    Get the git version as a tuple of integers.
+
+    Returns:
+        Version tuple, e.g., (2, 38, 1) for git 2.38.1
+
+    Raises:
+        ShardError: If git version cannot be determined
+    """
+    global _GIT_VERSION
+    if _GIT_VERSION is not None:
+        return _GIT_VERSION
+
+    try:
+        import subprocess
+        result = subprocess.run(
+            ["git", "--version"],
+            capture_output=True,
+            text=True,
+            check=True
+        )
+        # Output format: "git version 2.38.1" or "git version 2.38.1.windows.1"
+        version_str = result.stdout.strip()
+        # Extract version number after "git version "
+        if version_str.startswith("git version "):
+            version_str = version_str[12:]
+        # Take only the first version component (before any OS-specific suffix)
+        version_parts = version_str.split()[0].split(".")
+        # Parse as integers, ignoring non-numeric parts
+        version = []
+        for part in version_parts:
+            try:
+                version.append(int(part))
+            except ValueError:
+                break
+        if len(version) >= 2:
+            _GIT_VERSION = tuple(version)
+            return _GIT_VERSION
+        raise ShardError(f"Could not parse git version: {result.stdout}")
+    except subprocess.CalledProcessError as e:
+        raise ShardError(f"Failed to get git version: {e}")
+    except FileNotFoundError:
+        raise ShardError("git not found. Please install git.")
+
+
+def _check_git_version_for_merge_tree() -> None:
+    """
+    Check that git version supports three-argument merge-tree.
+
+    Three-argument merge-tree (merge-tree BASE OURS THEIRS) requires git 2.38+.
+    Earlier versions only support two-argument form.
+
+    Raises:
+        ShardError: If git version is too old
+    """
+    version = _get_git_version()
+    if version < (2, 38):
+        raise ShardError(
+            f"Git version {'.'.join(map(str, version))} is too old for conflict detection.\n"
+            f"The three-argument 'git merge-tree' command requires git 2.38 or later.\n"
+            f"Please upgrade git to use drift detection and graft features."
+        )
+
+
 # Maximum sequence number per name per day (3 digits = 001-999)
 MAX_SEQUENCE_NUMBER = 999
 
@@ -314,11 +496,25 @@ def spawn_shard(
     # Create git worktree with new branch using GitPython
     try:
         repo = _get_repo()
+        # Record base_commit BEFORE creating worktree (current master HEAD)
+        base_commit = repo.git.rev_parse("master")
         repo.git.worktree("add", str(worktree_path), "-b", branch_name)
     except Exception as e:
         if git and isinstance(e, git.GitCommandError):
             raise ShardError(f"Failed to create worktree: {e}")
         raise
+
+    created_at = datetime.now()
+
+    # Record metadata in SQLite database for drift detection
+    _record_shard_metadata(
+        worktree_name=worktree_name,
+        base_commit=base_commit,
+        created_at=created_at,
+        spawned_by=name,  # Use name as spawned_by for now
+        brief_id=brief_id,
+        description=description
+    )
 
     # Return SHARD info
     return {
@@ -329,7 +525,8 @@ def spawn_shard(
         "worktree_name": worktree_name,
         "brief_id": brief_id,
         "description": description,
-        "created_at": datetime.now().isoformat(),
+        "created_at": created_at.isoformat(),
+        "base_commit": base_commit,
         "status": "spawned"
     }
 
@@ -576,8 +773,15 @@ def _parse_worktree_info(worktree_path: str) -> Optional[Dict[str, str]]:
 
     worktree_name = path.name
 
-    # Try to parse worktree name: {name}-{date}-{seq}
-    parts = worktree_name.rsplit("-", 2)
+    # Strip any -graft suffixes before parsing the base name
+    base_name = worktree_name
+    graft_suffix = ""
+    while base_name.endswith("-graft"):
+        base_name = base_name[:-6]  # Remove "-graft"
+        graft_suffix += "-graft"
+
+    # Try to parse base name: {name}-{date}-{seq}
+    parts = base_name.rsplit("-", 2)
     if len(parts) < 3:
         return None
 
@@ -771,6 +975,8 @@ def get_shard_git_info(worktree_name: str) -> Dict:
 
         # Merge status - check if branch can merge cleanly into master
         try:
+            # Check git version supports three-argument merge-tree (2.38+)
+            _check_git_version_for_merge_tree()
             # Find merge base
             merge_base = repo.git.merge_base("master", branch)
             # Use merge-tree with base, master, and branch
@@ -780,6 +986,9 @@ def get_shard_git_info(worktree_name: str) -> Dict:
                 result["merge_status"] = "conflict"
             else:
                 result["merge_status"] = "clean"
+        except ShardError:
+            # Git version too old - can't determine merge status
+            result["merge_status"] = "unknown"
         except Exception:
             result["merge_status"] = "unknown"
 
@@ -892,12 +1101,190 @@ def get_tender_metadata(worktree_name: str) -> Optional[Dict]:
     return metadata
 
 
-def get_shard_diff(worktree_name: str) -> Optional[str]:
+def get_shard_drift_info(worktree_name: str) -> Dict[str, Any]:
+    """
+    Get comprehensive drift information for a shard.
+
+    Returns information about:
+    - Base commit (where shard branched from)
+    - Master activity since base (commits, notable changes)
+    - Work diff (agent's actual changes from base)
+    - Integration diff (what would merge into current master)
+    - Conflict status
+
+    Args:
+        worktree_name: Worktree directory name
+
+    Returns:
+        Dict with drift information
+    """
+    shard_info = get_shard_status(worktree_name)
+    if not shard_info:
+        return {}
+
+    # Get metadata from SQLite
+    metadata = _get_shard_metadata(worktree_name)
+
+    result = {
+        "worktree_name": worktree_name,
+        "branch_name": shard_info["branch_name"],
+        "base_commit": None,
+        "base_commit_short": None,
+        "base_commit_date": None,
+        "has_metadata": metadata is not None,
+        "master_commits_ahead": 0,
+        "master_notable_changes": [],
+        "is_stale": False,
+        "conflict_status": "unknown",
+        "conflict_files": [],
+        "work_diff_stat": None,
+        "integration_diff_stat": None,
+    }
+
+    try:
+        repo = _get_repo()
+        branch = shard_info["branch_name"]
+
+        if metadata and metadata.get("base_commit"):
+            base_commit = metadata["base_commit"]
+            result["base_commit"] = base_commit
+            result["base_commit_short"] = base_commit[:7]
+
+            # Get base commit date
+            try:
+                base_date = repo.git.log("-1", "--format=%ci", base_commit)
+                result["base_commit_date"] = base_date.strip()
+            except:
+                pass
+
+            # Count commits on master since base
+            try:
+                count = repo.git.rev_list("--count", f"{base_commit}..master")
+                result["master_commits_ahead"] = int(count)
+                result["is_stale"] = int(count) > 0
+            except:
+                pass
+
+            # Get notable changes on master since base
+            try:
+                if result["master_commits_ahead"] > 0:
+                    # Get file stats for changes on master
+                    name_status = repo.git.diff("--name-status", f"{base_commit}..master")
+                    notable = []
+                    for line in name_status.strip().split("\n")[:10]:  # Limit to 10
+                        if line:
+                            parts = line.split("\t", 1)
+                            if len(parts) == 2:
+                                status, file_path = parts
+                                if status == "D":
+                                    notable.append(f"deleted: {file_path}")
+                                elif status == "A":
+                                    notable.append(f"added: {file_path}")
+                                elif status.startswith("R"):
+                                    notable.append(f"renamed: {file_path}")
+                    result["master_notable_changes"] = notable
+            except:
+                pass
+
+            # Get work diff stat (agent's actual changes from base)
+            try:
+                work_stat = repo.git.diff("--stat", f"{base_commit}..{branch}")
+                result["work_diff_stat"] = work_stat.strip() if work_stat.strip() else None
+            except:
+                pass
+
+        # Get integration diff stat (what would merge with current master)
+        try:
+            integration_stat = repo.git.diff("--stat", f"master...{branch}")
+            result["integration_diff_stat"] = integration_stat.strip() if integration_stat.strip() else None
+        except:
+            pass
+
+        # Test for conflicts using merge-tree
+        try:
+            # Check git version supports three-argument merge-tree (2.38+)
+            _check_git_version_for_merge_tree()
+            merge_base = repo.git.merge_base("master", branch)
+            merge_output = repo.git.merge_tree(merge_base, "master", branch)
+
+            if "<<<<<<" in merge_output or "+<<<<<<" in merge_output:
+                result["conflict_status"] = "conflict"
+                # Parse conflict files from merge-tree output
+                conflict_files = set()
+                lines = merge_output.split("\n")
+                for i, line in enumerate(lines):
+                    if line.strip() == "changed in both":
+                        # Next line has file info
+                        if i + 1 < len(lines):
+                            parts = lines[i + 1].split()
+                            if len(parts) >= 4:
+                                conflict_files.add(" ".join(parts[3:]))
+                result["conflict_files"] = list(conflict_files)
+            else:
+                result["conflict_status"] = "clean"
+        except ShardError:
+            # Git version too old - can't determine conflict status
+            result["conflict_status"] = "unknown"
+        except Exception:
+            result["conflict_status"] = "unknown"
+
+    except Exception:
+        pass
+
+    return result
+
+
+def get_shard_work_diff(worktree_name: str, stat_only: bool = False) -> Optional[str]:
+    """
+    Get the WORK diff: agent's actual changes from base commit.
+
+    This shows only what the agent committed, without any false deletions
+    from master evolution.
+
+    Args:
+        worktree_name: Worktree directory name
+        stat_only: If True, return only --stat output
+
+    Returns:
+        Git diff output as string, or None if no changes or no metadata
+    """
+    shard_info = get_shard_status(worktree_name)
+    if not shard_info:
+        return None
+
+    metadata = _get_shard_metadata(worktree_name)
+    if not metadata or not metadata.get("base_commit"):
+        # Fall back to integration diff if no metadata
+        return get_shard_diff(worktree_name, stat_only=stat_only)
+
+    try:
+        repo = _get_repo()
+        branch = shard_info["branch_name"]
+        base_commit = metadata["base_commit"]
+
+        # Work diff: base_commit..branch
+        if stat_only:
+            diff_output = repo.git.diff("--stat", f"{base_commit}..{branch}")
+        else:
+            diff_output = repo.git.diff(f"{base_commit}..{branch}")
+
+        return diff_output if diff_output.strip() else None
+
+    except Exception as e:
+        raise ShardError(f"Failed to get work diff: {e}")
+
+
+def get_shard_diff(worktree_name: str, stat_only: bool = False, integration: bool = False) -> Optional[str]:
     """
     Get diff between master and shard branch.
 
+    By default returns integration diff (master...branch) which shows what would merge.
+    Use get_shard_work_diff() for agent's actual changes from base.
+
     Args:
         worktree_name: Worktree directory name (e.g., 'opus-security-architect-20251109-001')
+        stat_only: If True, return only --stat output
+        integration: If True, use three-dot diff (master...branch) for merge preview
 
     Returns:
         Git diff output as string, or None if no changes or shard not found
@@ -911,7 +1298,11 @@ def get_shard_diff(worktree_name: str) -> Optional[str]:
         branch = shard_info["branch_name"]
 
         # Get diff between master and shard branch
-        diff_output = repo.git.diff(f"master..{branch}")
+        diff_range = f"master...{branch}" if integration else f"master..{branch}"
+        if stat_only:
+            diff_output = repo.git.diff("--stat", diff_range)
+        else:
+            diff_output = repo.git.diff(diff_range)
         return diff_output if diff_output.strip() else None
 
     except Exception as e:
@@ -994,6 +1385,8 @@ def merge_shard(
     if merge_status != "clean":
         # Get list of conflicting files
         try:
+            # Check git version supports three-argument merge-tree (2.38+)
+            _check_git_version_for_merge_tree()
             merge_base = repo.git.merge_base("master", branch_name)
             merge_output = repo.git.merge_tree(merge_base, "master", branch_name)
             # Parse merge-tree output to find conflicting files
@@ -1021,6 +1414,9 @@ def merge_shard(
                                     break
                                 j += 1
                 i += 1
+        except ShardError as e:
+            # Git version too old - include error message
+            conflict_files = [f"(git version check failed: {e})"]
         except:
             conflict_files = ["(unable to determine conflicting files)"]
 
@@ -1092,6 +1488,314 @@ def merge_shard(
                 repo.git.checkout(original_ref)
             except Exception:
                 pass  # Best effort restoration
+
+
+# =============================================================================
+# GRAFT WORKFLOW - Conflict Resolution
+# =============================================================================
+
+def get_graft_chain_root(worktree_name: str) -> str:
+    """
+    Get the root worktree name by following parent_worktree links in SQLite.
+
+    Falls back to name parsing (stripping -graft suffixes) for legacy shards
+    without SQLite metadata.
+    """
+    conn = _get_db_connection()
+    try:
+        current = worktree_name
+        visited = set()  # Prevent infinite loops
+
+        while current and current not in visited:
+            visited.add(current)
+            cursor = conn.execute(
+                "SELECT parent_worktree FROM shards WHERE worktree_name = ?",
+                (current,)
+            )
+            row = cursor.fetchone()
+
+            if row and row["parent_worktree"]:
+                current = row["parent_worktree"]
+            else:
+                # No parent - this is the root (or legacy shard without metadata)
+                break
+
+        # If we found a root via SQLite, return it
+        if current:
+            return current
+
+    finally:
+        conn.close()
+
+    # Fallback for legacy shards: strip -graft suffixes
+    name = worktree_name
+    while name.endswith("-graft"):
+        name = name[:-6]  # Remove "-graft"
+    return name
+
+
+def get_graft_chain(worktree_name: str) -> List[str]:
+    """
+    Get full graft chain for a worktree using SQLite parent relationships.
+
+    Returns list of worktree names from root to current, e.g.:
+    ['fix-bug-20260112-001', 'fix-bug-20260112-001-graft', 'fix-bug-20260112-001-graft-graft']
+
+    Uses SQLite parent_worktree column for chain tracking, with fallback to
+    name parsing for legacy shards without metadata.
+    """
+    worktrees_dir = get_worktrees_dir()
+    conn = _get_db_connection()
+
+    try:
+        # First, find the root by following parent links up
+        root = get_graft_chain_root(worktree_name)
+
+        # Now build chain by following children down
+        chain = []
+        current = root
+
+        while current:
+            path = worktrees_dir / current
+            if path.exists():
+                chain.append(current)
+
+            # Find child (shard with parent_worktree = current)
+            cursor = conn.execute(
+                "SELECT worktree_name FROM shards WHERE parent_worktree = ?",
+                (current,)
+            )
+            row = cursor.fetchone()
+
+            if row:
+                current = row["worktree_name"]
+            else:
+                # No child in SQLite - try legacy name-based detection
+                next_graft = f"{current}-graft"
+                if (worktrees_dir / next_graft).exists():
+                    current = next_graft
+                else:
+                    break
+
+        return chain
+
+    finally:
+        conn.close()
+
+
+def get_graft_depth(worktree_name: str) -> int:
+    """Get depth in graft chain (0 = original, 1 = first graft, etc)."""
+    # Count only suffix -graft occurrences, not -graft in the name part
+    depth = 0
+    name = worktree_name
+    while name.endswith("-graft"):
+        depth += 1
+        name = name[:-6]  # Remove "-graft"
+    return depth
+
+
+def is_graft(worktree_name: str) -> bool:
+    """Check if worktree is a graft (has -graft suffix)."""
+    return worktree_name.endswith("-graft")
+
+
+def graft_shard(
+    worktree_name: str,
+    project_root: Optional[str] = None
+) -> Dict[str, Any]:
+    """
+    Create a graft worktree to resolve conflicts.
+
+    Creates a new worktree from current master and cherry-picks commits
+    from the source shard. If conflicts occur, leaves in conflicted state
+    for manual resolution.
+
+    Args:
+        worktree_name: Source worktree to graft
+        project_root: Optional path to git repo
+
+    Returns:
+        Dict with:
+            - success: bool
+            - graft_worktree_name: name of new graft worktree
+            - graft_worktree_path: path to new worktree
+            - conflicts: list of conflict files (if any)
+            - message: status message
+    """
+    if project_root:
+        set_project_root(project_root)
+
+    # Verify source worktree exists
+    shard_info = get_shard_status(worktree_name)
+    if not shard_info:
+        raise ShardError(f"Worktree not found: {worktree_name}")
+
+    # Get metadata for base commit
+    source_metadata = _get_shard_metadata(worktree_name)
+
+    worktrees_dir = get_worktrees_dir()
+    repo = _get_repo()
+
+    # Generate graft name (append -graft)
+    graft_worktree_name = f"{worktree_name}-graft"
+    graft_branch_name = f"shard-{graft_worktree_name}"
+    graft_worktree_path = worktrees_dir / graft_worktree_name
+
+    # Check if graft already exists
+    if graft_worktree_path.exists():
+        raise ShardError(
+            f"Graft worktree already exists: {graft_worktree_name}\n"
+            f"Either clean up the existing graft or continue working in it."
+        )
+
+    # Get commits from source shard
+    source_branch = shard_info["branch_name"]
+
+    # Find base commit (from metadata or merge-base with master)
+    if source_metadata and source_metadata.get("base_commit"):
+        base_commit = source_metadata["base_commit"]
+    else:
+        # Legacy shard without metadata - use merge-base
+        base_commit = repo.git.merge_base("master", source_branch)
+
+    # Get list of commits to cherry-pick (in reverse order - oldest first)
+    commits_output = repo.git.rev_list("--reverse", f"{base_commit}..{source_branch}")
+    commits = commits_output.strip().split("\n") if commits_output.strip() else []
+
+    if not commits:
+        raise ShardError(
+            f"No commits to graft from {worktree_name}\n"
+            f"The shard has no changes relative to its base."
+        )
+
+    # Get current master HEAD for new base_commit
+    new_base_commit = repo.git.rev_parse("master")
+
+    # Create worktree from current master
+    try:
+        repo.git.worktree("add", str(graft_worktree_path), "-b", graft_branch_name, "master")
+    except Exception as e:
+        raise ShardError(f"Failed to create graft worktree: {e}")
+
+    created_at = datetime.now()
+
+    # Record graft metadata
+    _record_shard_metadata(
+        worktree_name=graft_worktree_name,
+        base_commit=new_base_commit,
+        created_at=created_at,
+        parent_worktree=worktree_name,
+        description=f"Graft of {worktree_name} for conflict resolution"
+    )
+
+    # Cherry-pick commits
+    conflict_files = []
+    try:
+        if git is None:
+            raise ShardError("GitPython not installed")
+        graft_repo = git.Repo(str(graft_worktree_path))
+
+        for commit in commits:
+            try:
+                graft_repo.git.cherry_pick(commit)
+            except Exception as e:
+                # Cherry-pick failed - likely conflicts
+                if "conflict" in str(e).lower() or "CONFLICT" in str(e):
+                    # Get list of conflicted files
+                    try:
+                        status = graft_repo.git.status("--porcelain")
+                        for line in status.split("\n"):
+                            if line.startswith("UU ") or line.startswith("AA "):
+                                conflict_files.append(line[3:])
+                    except:
+                        pass
+                    break
+                else:
+                    raise ShardError(f"Cherry-pick failed: {e}")
+
+    except ShardError:
+        raise
+    except Exception as e:
+        # If something went wrong, try to clean up
+        try:
+            repo.git.worktree("remove", "--force", str(graft_worktree_path))
+            repo.git.branch("-D", graft_branch_name)
+        except:
+            pass
+        raise ShardError(f"Failed to apply commits: {e}")
+
+    result = {
+        "success": len(conflict_files) == 0,
+        "graft_worktree_name": graft_worktree_name,
+        "graft_worktree_path": str(graft_worktree_path),
+        "graft_branch_name": graft_branch_name,
+        "source_worktree_name": worktree_name,
+        "commits_applied": len(commits),
+        "conflicts": conflict_files,
+        "chain_depth": get_graft_depth(graft_worktree_name),
+    }
+
+    if conflict_files:
+        result["message"] = (
+            f"Graft created with conflicts in: {', '.join(conflict_files)}\n"
+            f"Resolve conflicts in: {graft_worktree_path}"
+        )
+    else:
+        result["message"] = (
+            f"Graft created cleanly - ready to merge\n"
+            f"Location: {graft_worktree_path}"
+        )
+
+    return result
+
+
+def cleanup_graft_chain(
+    worktree_name: str,
+    keep_branch: bool = False,
+    caller_cwd: Optional[str] = None,
+    project_root: Optional[str] = None
+) -> Dict[str, Any]:
+    """
+    Clean up entire graft chain (original + all grafts).
+
+    Args:
+        worktree_name: Any worktree in the chain
+        keep_branch: Keep branches after removing worktrees
+        caller_cwd: Caller's cwd to check for self-deletion
+        project_root: Optional project root override
+
+    Returns:
+        Dict with:
+            - success: bool
+            - removed: list of removed worktree names
+            - errors: list of error messages
+    """
+    if project_root:
+        set_project_root(project_root)
+
+    root = get_graft_chain_root(worktree_name)
+    chain = get_graft_chain(root)
+
+    if not chain:
+        raise ShardError(f"No worktrees found in chain for: {worktree_name}")
+
+    removed = []
+    errors = []
+
+    # Remove in reverse order (grafts first, then original)
+    for wt_name in reversed(chain):
+        try:
+            cleanup_shard(wt_name, keep_branch=keep_branch, caller_cwd=caller_cwd)
+            removed.append(wt_name)
+        except ShardError as e:
+            errors.append(f"{wt_name}: {e}")
+
+    return {
+        "success": len(errors) == 0,
+        "removed": removed,
+        "errors": errors,
+        "chain_root": root,
+    }
 
 
 def detect_shard_environment() -> Optional[Dict[str, str]]:
