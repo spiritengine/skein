@@ -1505,6 +1505,7 @@ def get_graft_chain_root(worktree_name: str) -> str:
     try:
         current = worktree_name
         visited = set()  # Prevent infinite loops
+        found_in_db = False
 
         while current and current not in visited:
             visited.add(current)
@@ -1514,14 +1515,19 @@ def get_graft_chain_root(worktree_name: str) -> str:
             )
             row = cursor.fetchone()
 
-            if row and row["parent_worktree"]:
-                current = row["parent_worktree"]
+            if row:
+                found_in_db = True
+                if row["parent_worktree"]:
+                    current = row["parent_worktree"]
+                else:
+                    # No parent - this is the root
+                    break
             else:
-                # No parent - this is the root (or legacy shard without metadata)
+                # Not in database - use fallback
                 break
 
         # If we found a root via SQLite, return it
-        if current:
+        if found_in_db and current:
             return current
 
     finally:
