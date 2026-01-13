@@ -308,6 +308,75 @@ def _get_repo() -> 'git.Repo':
         raise ShardError(f"Not a git repository: {get_project_root()}")
 
 
+# Cached git version (None = not yet checked, tuple = parsed version)
+_GIT_VERSION: Optional[Tuple[int, ...]] = None
+
+
+def _get_git_version() -> Tuple[int, ...]:
+    """
+    Get the git version as a tuple of integers.
+
+    Returns:
+        Version tuple, e.g., (2, 38, 1) for git 2.38.1
+
+    Raises:
+        ShardError: If git version cannot be determined
+    """
+    global _GIT_VERSION
+    if _GIT_VERSION is not None:
+        return _GIT_VERSION
+
+    try:
+        import subprocess
+        result = subprocess.run(
+            ["git", "--version"],
+            capture_output=True,
+            text=True,
+            check=True
+        )
+        # Output format: "git version 2.38.1" or "git version 2.38.1.windows.1"
+        version_str = result.stdout.strip()
+        # Extract version number after "git version "
+        if version_str.startswith("git version "):
+            version_str = version_str[12:]
+        # Take only the first version component (before any OS-specific suffix)
+        version_parts = version_str.split()[0].split(".")
+        # Parse as integers, ignoring non-numeric parts
+        version = []
+        for part in version_parts:
+            try:
+                version.append(int(part))
+            except ValueError:
+                break
+        if len(version) >= 2:
+            _GIT_VERSION = tuple(version)
+            return _GIT_VERSION
+        raise ShardError(f"Could not parse git version: {result.stdout}")
+    except subprocess.CalledProcessError as e:
+        raise ShardError(f"Failed to get git version: {e}")
+    except FileNotFoundError:
+        raise ShardError("git not found. Please install git.")
+
+
+def _check_git_version_for_merge_tree() -> None:
+    """
+    Check that git version supports three-argument merge-tree.
+
+    Three-argument merge-tree (merge-tree BASE OURS THEIRS) requires git 2.38+.
+    Earlier versions only support two-argument form.
+
+    Raises:
+        ShardError: If git version is too old
+    """
+    version = _get_git_version()
+    if version < (2, 38):
+        raise ShardError(
+            f"Git version {'.'.join(map(str, version))} is too old for conflict detection.\n"
+            f"The three-argument 'git merge-tree' command requires git 2.38 or later.\n"
+            f"Please upgrade git to use drift detection and graft features."
+        )
+
+
 # Maximum sequence number per name per day (3 digits = 001-999)
 MAX_SEQUENCE_NUMBER = 999
 
@@ -906,6 +975,8 @@ def get_shard_git_info(worktree_name: str) -> Dict:
 
         # Merge status - check if branch can merge cleanly into master
         try:
+            # Check git version supports three-argument merge-tree (2.38+)
+            _check_git_version_for_merge_tree()
             # Find merge base
             merge_base = repo.git.merge_base("master", branch)
             # Use merge-tree with base, master, and branch
@@ -915,6 +986,9 @@ def get_shard_git_info(worktree_name: str) -> Dict:
                 result["merge_status"] = "conflict"
             else:
                 result["merge_status"] = "clean"
+        except ShardError:
+            # Git version too old - can't determine merge status
+            result["merge_status"] = "unknown"
         except Exception:
             result["merge_status"] = "unknown"
 
@@ -1128,6 +1202,8 @@ def get_shard_drift_info(worktree_name: str) -> Dict[str, Any]:
 
         # Test for conflicts using merge-tree
         try:
+            # Check git version supports three-argument merge-tree (2.38+)
+            _check_git_version_for_merge_tree()
             merge_base = repo.git.merge_base("master", branch)
             merge_output = repo.git.merge_tree(merge_base, "master", branch)
 
@@ -1146,6 +1222,9 @@ def get_shard_drift_info(worktree_name: str) -> Dict[str, Any]:
                 result["conflict_files"] = list(conflict_files)
             else:
                 result["conflict_status"] = "clean"
+        except ShardError:
+            # Git version too old - can't determine conflict status
+            result["conflict_status"] = "unknown"
         except Exception:
             result["conflict_status"] = "unknown"
 
@@ -1306,6 +1385,8 @@ def merge_shard(
     if merge_status != "clean":
         # Get list of conflicting files
         try:
+            # Check git version supports three-argument merge-tree (2.38+)
+            _check_git_version_for_merge_tree()
             merge_base = repo.git.merge_base("master", branch_name)
             merge_output = repo.git.merge_tree(merge_base, "master", branch_name)
             # Parse merge-tree output to find conflicting files
@@ -1333,6 +1414,9 @@ def merge_shard(
                                     break
                                 j += 1
                 i += 1
+        except ShardError as e:
+            # Git version too old - include error message
+            conflict_files = [f"(git version check failed: {e})"]
         except:
             conflict_files = ["(unable to determine conflicting files)"]
 
@@ -1411,7 +1495,39 @@ def merge_shard(
 # =============================================================================
 
 def get_graft_chain_root(worktree_name: str) -> str:
-    """Get the root worktree name by stripping -graft suffixes from the end."""
+    """
+    Get the root worktree name by following parent_worktree links in SQLite.
+
+    Falls back to name parsing (stripping -graft suffixes) for legacy shards
+    without SQLite metadata.
+    """
+    conn = _get_db_connection()
+    try:
+        current = worktree_name
+        visited = set()  # Prevent infinite loops
+
+        while current and current not in visited:
+            visited.add(current)
+            cursor = conn.execute(
+                "SELECT parent_worktree FROM shards WHERE worktree_name = ?",
+                (current,)
+            )
+            row = cursor.fetchone()
+
+            if row and row["parent_worktree"]:
+                current = row["parent_worktree"]
+            else:
+                # No parent - this is the root (or legacy shard without metadata)
+                break
+
+        # If we found a root via SQLite, return it
+        if current:
+            return current
+
+    finally:
+        conn.close()
+
+    # Fallback for legacy shards: strip -graft suffixes
     name = worktree_name
     while name.endswith("-graft"):
         name = name[:-6]  # Remove "-graft"
@@ -1420,28 +1536,51 @@ def get_graft_chain_root(worktree_name: str) -> str:
 
 def get_graft_chain(worktree_name: str) -> List[str]:
     """
-    Get full graft chain for a worktree.
+    Get full graft chain for a worktree using SQLite parent relationships.
 
     Returns list of worktree names from root to current, e.g.:
     ['fix-bug-20260112-001', 'fix-bug-20260112-001-graft', 'fix-bug-20260112-001-graft-graft']
+
+    Uses SQLite parent_worktree column for chain tracking, with fallback to
+    name parsing for legacy shards without metadata.
     """
-    root = get_graft_chain_root(worktree_name)
     worktrees_dir = get_worktrees_dir()
+    conn = _get_db_connection()
 
-    chain = []
-    current = root
-    while True:
-        path = worktrees_dir / current
-        if path.exists():
-            chain.append(current)
-        # Check for next graft in chain
-        next_graft = f"{current}-graft"
-        if (worktrees_dir / next_graft).exists():
-            current = next_graft
-        else:
-            break
+    try:
+        # First, find the root by following parent links up
+        root = get_graft_chain_root(worktree_name)
 
-    return chain
+        # Now build chain by following children down
+        chain = []
+        current = root
+
+        while current:
+            path = worktrees_dir / current
+            if path.exists():
+                chain.append(current)
+
+            # Find child (shard with parent_worktree = current)
+            cursor = conn.execute(
+                "SELECT worktree_name FROM shards WHERE parent_worktree = ?",
+                (current,)
+            )
+            row = cursor.fetchone()
+
+            if row:
+                current = row["worktree_name"]
+            else:
+                # No child in SQLite - try legacy name-based detection
+                next_graft = f"{current}-graft"
+                if (worktrees_dir / next_graft).exists():
+                    current = next_graft
+                else:
+                    break
+
+        return chain
+
+    finally:
+        conn.close()
 
 
 def get_graft_depth(worktree_name: str) -> int:
