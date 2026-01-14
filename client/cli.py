@@ -5944,17 +5944,19 @@ def shard_review(ctx, worktree_name, output_json):
 
             # Show work diff stat (agent's actual changes)
             work_stat = drift_info.get("work_diff_stat")
+            files_changed = 0
             if work_stat:
-                # Parse summary line
+                # Parse summary line and count files
                 lines = work_stat.strip().split("\n")
                 if lines:
                     summary = lines[-1]  # Last line has totals
                     click.echo(f"  Changes: {summary.strip()}")
+                    # Count non-summary lines (each represents a file)
+                    files_changed = len(lines) - 1 if len(lines) > 1 else 0
 
-            # Show modified files
-            commit_log = git_info.get("commit_log", [])
-            if commit_log:
-                click.echo(f"  Files changed: {len(commit_log)} commits")
+            # Show file count
+            if files_changed > 0:
+                click.echo(f"  Files changed: {files_changed}")
             click.echo()
 
             # Show uncommitted changes if any
