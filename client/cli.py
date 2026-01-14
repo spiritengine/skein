@@ -5992,11 +5992,18 @@ def shard_review(ctx, worktree_name, output_json):
                             click.echo(f"    ... and {len(conflict_files) - 10} more")
                 else:
                     click.echo(f"  ✓ Integration test: No conflicts detected")
-                    click.echo(f"  ✓ Ready to merge onto current master")
+                    if commits > 0:
+                        click.echo(f"  ✓ Ready to merge onto current master")
+                    else:
+                        click.echo(f"  ℹ No code changes (research/verification only)")
                 click.echo()
             elif base_commit:
-                click.echo("✓ Master is at same state as your base")
-                click.echo("✓ Ready to merge")
+                if commits > 0:
+                    click.echo("✓ Master is at same state as your base")
+                    click.echo("✓ Ready to merge")
+                else:
+                    click.echo("✓ Master is at same state as your base")
+                    click.echo("ℹ No code changes (research/verification only)")
                 click.echo()
 
             # Show tender info
@@ -6019,6 +6026,9 @@ def shard_review(ctx, worktree_name, output_json):
                 click.echo()
                 click.echo("Or review your original work first:")
                 click.echo(f"  → skein shard diff {worktree_name}")
+            elif commits == 0:
+                click.echo("Nothing to merge (research/verification shard):")
+                click.echo(f"  → skein shard cleanup {worktree_name}")
             else:
                 click.echo("Merge to master:")
                 click.echo(f"  → skein shard merge {worktree_name}")
