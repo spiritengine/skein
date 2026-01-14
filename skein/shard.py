@@ -1117,6 +1117,13 @@ def get_shard_drift_info(worktree_name: str) -> Dict[str, Any]:
 
     Returns:
         Dict with drift information
+
+    Example:
+        >>> info = get_shard_drift_info('fix-bug-20260113-001')
+        >>> if info['conflict_status'] == 'conflict':
+        ...     print(f"Conflicts in: {', '.join(info['conflict_files'])}")
+        >>> elif info['master_commits_ahead'] > 10:
+        ...     print("Shard is stale, consider grafting")
     """
     shard_info = get_shard_status(worktree_name)
     if not shard_info:
