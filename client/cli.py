@@ -5709,6 +5709,7 @@ def shard_triage(ctx, output_json):
             master_ahead = drift_info.get("master_commits_ahead", 0)
             base_commit = drift_info.get("base_commit_short")
             conflict_status = drift_info.get("conflict_status", "unknown")
+            conflict_files = drift_info.get("conflict_files", [])
 
             # Check if this is a graft
             is_graft = shard_worktree.is_graft(wt_name)
@@ -5759,6 +5760,7 @@ def shard_triage(ctx, output_json):
                 "is_graft": is_graft,
                 "graft_depth": graft_depth,
                 "conflict_status": conflict_status,
+                "conflict_files": conflict_files,
             }
             triage_data.append(entry)
 
@@ -5800,8 +5802,8 @@ def shard_triage(ctx, output_json):
                 if base_commit:
                     context_parts.append(f"base: {base_commit}")
                 if master_ahead > 0:
-                    conflict_status = entry.get("conflict_status", "unknown")
-                    if conflict_status == "conflict":
+                    conflict_status_val = entry.get("conflict_status", "unknown")
+                    if conflict_status_val == "conflict":
                         context_parts.append(f"master +{master_ahead} (conflicts)")
                     else:
                         context_parts.append(f"master +{master_ahead} (no conflicts)")
@@ -5811,6 +5813,19 @@ def shard_triage(ctx, output_json):
 
                 if context_parts:
                     click.echo(f"       {', '.join(context_parts)}")
+
+                # Show conflict details if CONFLICT status but no drift info shown above
+                conflict_status_val = entry.get("conflict_status", "unknown")
+                conflict_files_list = entry.get("conflict_files", [])
+                if status == "CONFLICT" and master_ahead == 0 and not is_graft:
+                    # Conflict exists but not from drift or graft - explain why
+                    click.echo(f"       conflicts with master (files: {', '.join(conflict_files_list[:3])}{'...' if len(conflict_files_list) > 3 else ''})")
+                elif status == "CONFLICT" and conflict_files_list:
+                    # Show which files conflict (for all CONFLICT cases with file info)
+                    files_str = ', '.join(conflict_files_list[:3])
+                    if len(conflict_files_list) > 3:
+                        files_str += f" +{len(conflict_files_list) - 3} more"
+                    click.echo(f"       conflicting files: {files_str}")
 
                 # Show tender info
                 if conf is not None:
