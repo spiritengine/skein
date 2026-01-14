@@ -953,9 +953,12 @@ def get_shard_git_info(worktree_name: str) -> Dict:
         branch = shard_info["branch_name"]
         worktree_path = shard_info["worktree_path"]
 
-        # Commits ahead of master
+        # Get base reference (base_commit from SQLite, or fall back to master)
+        base_ref = _get_shard_base_ref(worktree_name)
+
+        # Commits ahead of base_ref (agent's actual commits)
         try:
-            count = repo.git.rev_list("--count", f"master..{branch}")
+            count = repo.git.rev_list("--count", f"{base_ref}..{branch}")
             result["commits_ahead"] = int(count)
         except:
             pass
@@ -992,9 +995,9 @@ def get_shard_git_info(worktree_name: str) -> Dict:
         except Exception:
             result["merge_status"] = "unknown"
 
-        # Commit log (commits on branch not in master)
+        # Commit log (commits on branch since base_ref - agent's actual work)
         try:
-            log_output = repo.git.log("--oneline", f"master..{branch}")
+            log_output = repo.git.log("--oneline", f"{base_ref}..{branch}")
             if log_output.strip():
                 for line in log_output.strip().split("\n"):
                     parts = line.split(" ", 1)
@@ -1004,10 +1007,10 @@ def get_shard_git_info(worktree_name: str) -> Dict:
         except:
             pass
 
-        # Diffstat (files changed between master and branch)
+        # Diffstat (files changed between base_ref and branch - agent's actual work)
         try:
             if result["commits_ahead"] > 0:
-                diffstat = repo.git.diff("--stat", f"master..{branch}")
+                diffstat = repo.git.diff("--stat", f"{base_ref}..{branch}")
                 result["diffstat"] = diffstat.strip()
         except:
             pass
@@ -1064,19 +1067,23 @@ def get_tender_metadata(worktree_name: str) -> Optional[Dict]:
     # Get git statistics if possible
     try:
         repo = _get_repo()
+        branch = shard_info["branch_name"]
 
-        # Get commit count on this branch (since branching from master)
+        # Get base reference (base_commit from SQLite, or fall back to master)
+        base_ref = _get_shard_base_ref(worktree_name)
+
+        # Get commit count on this branch (since base_ref)
         try:
-            # Count commits on SHARD branch not in master
-            commit_count = repo.git.rev_list("--count", f"master..{shard_info['branch_name']}")
+            # Count commits on SHARD branch since base
+            commit_count = repo.git.rev_list("--count", f"{base_ref}..{branch}")
             metadata["commits"] = int(commit_count)
         except:
             metadata["commits"] = 0
 
-        # Get list of modified files
+        # Get list of modified files (agent's actual work from base_ref)
         try:
-            # Files changed between master and this branch
-            changed_files = repo.git.diff("--name-only", "master", shard_info["branch_name"])
+            # Files changed between base_ref and this branch
+            changed_files = repo.git.diff("--name-only", base_ref, branch)
             if changed_files:
                 metadata["files_modified"] = changed_files.strip().split("\n")
             else:
@@ -1086,7 +1093,7 @@ def get_tender_metadata(worktree_name: str) -> Optional[Dict]:
 
         # Get last commit message
         try:
-            last_commit = repo.git.log("-1", "--pretty=%B", shard_info["branch_name"])
+            last_commit = repo.git.log("-1", "--pretty=%B", branch)
             metadata["last_commit_message"] = last_commit.strip()
         except:
             metadata["last_commit_message"] = ""
@@ -1241,6 +1248,29 @@ def get_shard_drift_info(worktree_name: str) -> Dict[str, Any]:
     return result
 
 
+def _get_shard_base_ref(worktree_name: str) -> str:
+    """
+    Get the base reference for diffing a shard's work.
+
+    For shards with SQLite metadata, returns the base_commit (where the shard branched).
+    For legacy shards without metadata, falls back to 'master'.
+
+    This ensures file counts and diffs reflect only the agent's actual work,
+    not commits that existed in master before the shard was created.
+
+    Args:
+        worktree_name: Worktree directory name
+
+    Returns:
+        Git ref string (commit SHA or 'master')
+    """
+    metadata = _get_shard_metadata(worktree_name)
+    if metadata and metadata.get("base_commit"):
+        return metadata["base_commit"]
+    # Legacy shard without metadata - fall back to master
+    return "master"
+
+
 def get_shard_work_diff(worktree_name: str, stat_only: bool = False) -> Optional[str]:
     """
     Get the WORK diff: agent's actual changes from base commit.
@@ -1259,21 +1289,20 @@ def get_shard_work_diff(worktree_name: str, stat_only: bool = False) -> Optional
     if not shard_info:
         return None
 
-    metadata = _get_shard_metadata(worktree_name)
-    if not metadata or not metadata.get("base_commit"):
-        # Fall back to integration diff if no metadata
+    base_ref = _get_shard_base_ref(worktree_name)
+    if base_ref == "master":
+        # No base_commit metadata - fall back to integration diff
         return get_shard_diff(worktree_name, stat_only=stat_only)
 
     try:
         repo = _get_repo()
         branch = shard_info["branch_name"]
-        base_commit = metadata["base_commit"]
 
-        # Work diff: base_commit..branch
+        # Work diff: base_ref..branch (base_ref is the actual base commit SHA)
         if stat_only:
-            diff_output = repo.git.diff("--stat", f"{base_commit}..{branch}")
+            diff_output = repo.git.diff("--stat", f"{base_ref}..{branch}")
         else:
-            diff_output = repo.git.diff(f"{base_commit}..{branch}")
+            diff_output = repo.git.diff(f"{base_ref}..{branch}")
 
         return diff_output if diff_output.strip() else None
 
