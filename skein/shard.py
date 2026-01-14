@@ -473,6 +473,20 @@ def spawn_shard(
     if project_root:
         set_project_root(project_root)
 
+    # Check if spawning from inside a worktree and warn
+    import sys
+    parent_shard = detect_shard_environment()
+    if parent_shard:
+        parent_name = parent_shard.get("worktree_name", "unknown")
+        parent_branch = parent_shard.get("branch_name", "unknown")
+        print(
+            f"\n⚠️  WARNING: Spawning shard from inside worktree '{parent_name}'\n"
+            f"   The new shard will branch from '{parent_branch}', not the primary branch.\n"
+            f"   If you want to branch from the primary branch, run from the project root:\n"
+            f"   cd {get_project_root()}\n",
+            file=sys.stderr
+        )
+
     worktrees_dir = get_worktrees_dir()
     # Ensure worktrees directory exists
     worktrees_dir.mkdir(exist_ok=True)
