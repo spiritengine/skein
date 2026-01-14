@@ -6074,7 +6074,7 @@ def shard_review(ctx, worktree_name, output_json):
                     click.echo()
                     click.echo(f"Flags ({len(flags)}):")
                     for flag in flags[:10]:
-                        loc = f"{flag['file']}:{flag['line']}" if flag.get('line') else flag.get('file', '?')
+                        loc = f"{flag.get('file', '?')}:{flag['line']}" if flag.get('line') else flag.get('file', '?')
                         click.echo(f"  {loc} [{flag.get('check', '?')}] {flag.get('message', '')}")
                     if len(flags) > 10:
                         click.echo(f"  ... and {len(flags) - 10} more")
@@ -6096,7 +6096,7 @@ def shard_review(ctx, worktree_name, output_json):
                     click.echo()
                     click.echo(f"Smells ({len(smells)}):")
                     for smell in smells[:5]:
-                        loc = f"{smell['file']}:{smell['line']}" if smell.get('line') else smell.get('file', '?')
+                        loc = f"{smell.get('file', '?')}:{smell['line']}" if smell.get('line') else smell.get('file', '?')
                         click.echo(f"  {loc} [{smell.get('kind', '?')}] {smell.get('reason', '')}")
                     if len(smells) > 5:
                         click.echo(f"  ... and {len(smells) - 5} more")
