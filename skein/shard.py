@@ -473,12 +473,14 @@ def spawn_shard(
     if project_root:
         set_project_root(project_root)
 
-    # Check if spawning from inside a worktree and warn
+    # Check if spawning from inside a worktree and record parent relationship
     import sys
     parent_shard = detect_shard_environment()
+    parent_worktree_name = None
     if parent_shard:
         parent_name = parent_shard.get("worktree_name", "unknown")
         parent_branch = parent_shard.get("branch_name", "unknown")
+        parent_worktree_name = parent_shard.get("worktree_name")
         print(
             f"\n⚠️  WARNING: Spawning shard from inside worktree '{parent_name}'\n"
             f"   The new shard will branch from '{parent_branch}', not the primary branch.\n"
@@ -527,7 +529,8 @@ def spawn_shard(
         created_at=created_at,
         spawned_by=name,  # Use name as spawned_by for now
         brief_id=brief_id,
-        description=description
+        description=description,
+        parent_worktree=parent_worktree_name  # Track nested shard relationship
     )
 
     # Return SHARD info
@@ -1163,6 +1166,7 @@ def get_shard_drift_info(worktree_name: str) -> Dict[str, Any]:
         "master_commits_ahead": 0,
         "master_notable_changes": [],
         "is_stale": False,
+        "is_nested": is_nested_shard(worktree_name),
         "conflict_status": "unknown",
         "conflict_files": [],
         "work_diff_stat": None,
@@ -1653,6 +1657,97 @@ def get_graft_depth(worktree_name: str) -> int:
 def is_graft(worktree_name: str) -> bool:
     """Check if worktree is a graft (has -graft suffix)."""
     return worktree_name.endswith("-graft")
+
+
+def is_nested_shard(worktree_name: str) -> bool:
+    """
+    Check if worktree is a nested shard (spawned from another shard, not master).
+
+    A nested shard is one where:
+    - The branch was created from inside another worktree, so it contains
+      commits from the parent shard that aren't on master
+    - Has parent_worktree set (recorded during spawn), OR
+    - Is a graft (grafts always have parent worktrees)
+
+    The detection is based on explicit parent tracking rather than heuristics.
+    This avoids:
+    - False negative when master hasn't moved (merge-base equals base_commit
+      even for nested shards)
+    - False positive when shard was rebased (merge-base changes but it's not nested)
+
+    Nested shards cannot be merged directly to master without first grafting
+    to isolate their changes.
+
+    Returns:
+        True if this is a nested shard
+    """
+    # Grafts are inherently nested - they have a parent worktree
+    if is_graft(worktree_name):
+        return True
+
+    metadata = _get_shard_metadata(worktree_name)
+    if not metadata:
+        return False
+
+    # Check if parent_worktree is set - this is the authoritative source
+    # Wired during spawn_shard() when spawning from inside another worktree
+    if metadata.get("parent_worktree"):
+        return True
+
+    # For legacy shards without parent_worktree tracking, check for commits
+    # not on master that predate the shard creation
+    base_commit = metadata.get("base_commit")
+    created_at = metadata.get("created_at")
+    if not base_commit or not created_at:
+        return False
+
+    shard_info = get_shard_status(worktree_name)
+    if not shard_info:
+        return False
+
+    try:
+        repo = _get_repo()
+        branch = shard_info["branch_name"]
+
+        # Get the actual merge-base between master and this branch
+        actual_merge_base = repo.git.merge_base("master", branch)
+
+        # If base_commit equals merge-base, check if there are commits between
+        # the base and the branch tip that are not on master and predate creation.
+        # This catches nested shards where master hasn't moved.
+        if base_commit == actual_merge_base:
+            # Get commits on branch not on master, with timestamps
+            # Format: "SHA TIMESTAMP" where TIMESTAMP is Unix epoch
+            commits_output = repo.git.log(
+                "--format=%H %ct",
+                f"{actual_merge_base}..{branch}",
+                "--not", "master"
+            )
+            if commits_output.strip():
+                # Parse creation time
+                from datetime import datetime as dt
+                try:
+                    # created_at could be string or datetime
+                    if isinstance(created_at, str):
+                        created_ts = dt.fromisoformat(created_at.replace('Z', '+00:00')).timestamp()
+                    else:
+                        created_ts = created_at.timestamp()
+                except (ValueError, AttributeError):
+                    return False
+
+                # Check if any commit predates shard creation
+                for line in commits_output.strip().split('\n'):
+                    parts = line.split()
+                    if len(parts) >= 2:
+                        commit_ts = int(parts[1])
+                        # Allow 60 second grace period for timing skew
+                        if commit_ts < created_ts - 60:
+                            return True
+
+    except Exception:
+        pass
+
+    return False
 
 
 def graft_shard(

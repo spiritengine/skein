@@ -5906,6 +5906,7 @@ def shard_review(ctx, worktree_name, output_json):
         conflict_files = drift_info.get("conflict_files", [])
 
         # Build review data
+        is_nested = drift_info.get("is_nested", False)
         review_data = {
             "worktree_name": worktree_name,
             "branch_name": shard_info["branch_name"],
@@ -5922,6 +5923,7 @@ def shard_review(ctx, worktree_name, output_json):
             "master_commits_ahead": drift_info.get("master_commits_ahead", 0),
             "master_notable_changes": drift_info.get("master_notable_changes", []),
             "is_graft": shard_worktree.is_graft(worktree_name),
+            "is_nested": is_nested,
             "work_diff_stat": drift_info.get("work_diff_stat"),
         }
 
@@ -6005,6 +6007,11 @@ def shard_review(ctx, worktree_name, output_json):
                             click.echo(f"    - {f}")
                         if len(conflict_files) > 10:
                             click.echo(f"    ... and {len(conflict_files) - 10} more")
+                elif is_nested and not is_graft:
+                    # Nested shard (spawned from another shard) - can't merge directly
+                    click.echo(f"  ✓ Integration test: No conflicts detected")
+                    click.echo(f"  ⚠ Nested shard: contains commits from parent shard")
+                    click.echo(f"    Must graft to isolate your changes before merging")
                 else:
                     click.echo(f"  ✓ Integration test: No conflicts detected")
                     if commits > 0:
@@ -6013,7 +6020,11 @@ def shard_review(ctx, worktree_name, output_json):
                         click.echo(f"  ℹ No code changes (research/verification only)")
                 click.echo()
             elif base_commit:
-                if commits > 0:
+                if is_nested and not is_graft:
+                    # Nested shard at same base as master
+                    click.echo("⚠ Nested shard: contains commits from parent shard")
+                    click.echo("  Must graft to isolate your changes before merging")
+                elif commits > 0:
                     click.echo("✓ Master is at same state as your base")
                     click.echo("✓ Ready to merge")
                 else:
@@ -6041,6 +6052,12 @@ def shard_review(ctx, worktree_name, output_json):
                 click.echo()
                 click.echo("Or review your original work first:")
                 click.echo(f"  → skein shard diff {worktree_name}")
+            elif is_nested and not is_graft:
+                # Nested shard needs grafting to isolate changes
+                click.echo("Graft to isolate your changes from parent shard:")
+                click.echo(f"  → skein shard graft {worktree_name}")
+                click.echo()
+                click.echo("This will cherry-pick only your commits onto master.")
             elif commits == 0:
                 click.echo("Nothing to merge (research/verification shard):")
                 click.echo(f"  → skein shard cleanup {worktree_name}")
