@@ -207,4 +207,3 @@ make test
 python tests/test_skein.py              # Main workflow tests
 python tests/test_skein.py search       # Unified search tests
 ```
-# Test drift detection
