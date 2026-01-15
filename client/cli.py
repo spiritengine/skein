@@ -5927,6 +5927,29 @@ def shard_review(ctx, worktree_name, output_json):
             "work_diff_stat": drift_info.get("work_diff_stat"),
         }
 
+        # Run xgun scan if available (silent degradation if not)
+        xgun_result = None
+        import shutil
+        import json as json_mod
+        if shutil.which("xgun"):
+            import subprocess
+            worktree_path = shard_info["worktree_path"]
+            try:
+                result = subprocess.run(
+                    ["xgun", "scan", worktree_path, "--output", "json"],
+                    capture_output=True,
+                    text=True,
+                    timeout=60,
+                    cwd=worktree_path
+                )
+                if result.returncode in (0, 1):  # 0=passed, 1=issues found
+                    xgun_result = json_mod.loads(result.stdout)
+            except (subprocess.TimeoutExpired, subprocess.SubprocessError, json_mod.JSONDecodeError):
+                pass  # Silent degradation
+
+        if xgun_result:
+            review_data["xgun"] = xgun_result
+
         if output_json:
             import json as json_module
             click.echo(json_module.dumps(review_data, indent=2))
@@ -6038,6 +6061,57 @@ def shard_review(ctx, worktree_name, output_json):
                 click.echo(f"Tender: {tender_info['folio_id']} (confidence: {conf_str})")
                 if tender_info.get("summary"):
                     click.echo(f"  {tender_info['summary']}")
+                click.echo()
+
+            # Show xgun quality check results
+            if xgun_result:
+                click.echo("=== Code Quality (xgun) ===")
+                click.echo()
+                summary = xgun_result.get("summary", {})
+                flags_count = summary.get("flags", 0)
+                signals_count = summary.get("signals", 0)
+                smells_count = summary.get("smells", 0)
+                passed = summary.get("passed", True)
+
+                if passed:
+                    click.echo(f"✓ Quality: Passed ({signals_count} signals, {flags_count} flags, {smells_count} smells)")
+                else:
+                    click.echo(f"✗ Quality: Issues detected ({signals_count} signals, {flags_count} flags, {smells_count} smells)")
+
+                # Show flags (specific line issues)
+                qgun_data = xgun_result.get("qgun", {})
+                flags = qgun_data.get("flags", [])
+                if flags:
+                    click.echo()
+                    click.echo(f"Flags ({len(flags)}):")
+                    for flag in flags[:10]:
+                        loc = f"{flag.get('file', '?')}:{flag['line']}" if flag.get('line') else flag.get('file', '?')
+                        click.echo(f"  {loc} [{flag.get('check', '?')}] {flag.get('message', '')}")
+                    if len(flags) > 10:
+                        click.echo(f"  ... and {len(flags) - 10} more")
+
+                # Show signals (repo-wide observations)
+                signals = qgun_data.get("signals", [])
+                if signals:
+                    click.echo()
+                    click.echo(f"Signals ({len(signals)}):")
+                    for signal in signals[:5]:
+                        click.echo(f"  [{signal.get('check', '?')}] {signal.get('message', '')}")
+                    if len(signals) > 5:
+                        click.echo(f"  ... and {len(signals) - 5} more")
+
+                # Show smells
+                sgun_data = xgun_result.get("sgun", {})
+                smells = sgun_data.get("smells", [])
+                if smells:
+                    click.echo()
+                    click.echo(f"Smells ({len(smells)}):")
+                    for smell in smells[:5]:
+                        loc = f"{smell.get('file', '?')}:{smell['line']}" if smell.get('line') else smell.get('file', '?')
+                        click.echo(f"  {loc} [{smell.get('kind', '?')}] {smell.get('reason', '')}")
+                    if len(smells) > 5:
+                        click.echo(f"  ... and {len(smells) - 5} more")
+
                 click.echo()
 
             # Actions
