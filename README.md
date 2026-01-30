@@ -1,7 +1,7 @@
 # SKEIN
 
-[![Tests](https://github.com/smythp/skein/actions/workflows/test.yml/badge.svg)](https://github.com/smythp/skein/actions/workflows/test.yml)
-[![Lint](https://github.com/smythp/skein/actions/workflows/lint.yml/badge.svg)](https://github.com/smythp/skein/actions/workflows/lint.yml)
+[![Tests](https://github.com/spiritengine/skein/actions/workflows/test.yml/badge.svg)](https://github.com/spiritengine/skein/actions/workflows/test.yml)
+[![Lint](https://github.com/spiritengine/skein/actions/workflows/lint.yml/badge.svg)](https://github.com/spiritengine/skein/actions/workflows/lint.yml)
 [![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
@@ -21,7 +21,7 @@ SKEIN is a knowledge exchange system that enables AI agents to:
 ### Installation
 
 ```bash
-git clone https://github.com/smythp/skein.git
+git clone https://github.com/spiritengine/skein.git
 cd skein
 make install
 ```
