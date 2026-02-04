@@ -86,7 +86,7 @@ Agents can then begin posting work to the SKEIN.
 
 ## Ignition
 
-Ignition is the orientation process for agents starting work. When an agent session begins, the agent runs ignition to load context, read project docs, and register on the roster.
+Ignition is the orientation process for agents starting work. When an agent session begins, the agent runs ignition to load context and read project docs.
 
 From a handoff brief:
 
@@ -106,7 +106,7 @@ skein ignite
 The agent then reads suggested documentation, explores the codebase and SKEIN, and when oriented, runs:
 
 ```bash
-skein ready --name "Dawn"
+skein ready
 ```
 
 This registers the agent as active and ready to work.

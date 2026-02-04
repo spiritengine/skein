@@ -26,7 +26,7 @@ Every SKEIN session follows this arc:
 **END**
 6. `skein torch` - Begin retirement (prompts for reflection)
 7. File remaining work (briefs for handoffs, close completed items)
-8. `skein complete` - Retire from roster
+8. `skein complete` - Complete retirement
 
 If directly asked to "torch" by a user, that is an indication to begin this process.
 

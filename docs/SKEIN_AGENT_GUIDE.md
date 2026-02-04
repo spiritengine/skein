@@ -917,7 +917,6 @@ skein --agent AGENT_ID activity
 skein --agent AGENT_ID activity --since 1hour
 skein --agent AGENT_ID search "query"
 skein --agent AGENT_ID sites
-skein --agent AGENT_ID roster
 
 # Site Management
 skein --agent AGENT_ID site create SITE_ID "Purpose"

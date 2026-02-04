@@ -55,7 +55,7 @@ Every SKEIN session follows this arc:
 **END**
 7. `skein torch` - Begin retirement (prompts for reflection)
 8. File remaining work (briefs for handoffs, close completed items)
-9. `skein complete` - Retire from roster
+9. `skein complete` - Complete retirement
 
 **Key insight:** Torch is where you reflect and clean up. Don't skip it.
 
@@ -489,7 +489,6 @@ skein --agent AGENT search "query"
 skein --agent AGENT search "query" --resources folios,threads,agents
 skein --agent AGENT search "query" --type issue --status open
 skein --agent AGENT sites
-skein --agent AGENT roster
 
 # Site
 skein --agent AGENT site create ID "Purpose"
