@@ -142,6 +142,49 @@ class LogDatabase:
                 ON screenshots(strand_id, timestamp DESC)
             """)
 
+            # Sacks table - stores yields from chain participants
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS sacks (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    sack_id TEXT UNIQUE NOT NULL,
+                    chain_id TEXT NOT NULL,
+                    task_id TEXT NOT NULL,
+                    agent_id TEXT,
+                    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+
+                    -- Yield fields (structured, queryable)
+                    status TEXT,
+                    outcome TEXT,
+                    artifacts JSON,
+                    notes TEXT,
+
+                    -- Enrichment (added by system)
+                    duration_seconds INTEGER,
+                    tokens_used INTEGER,
+                    shard_path TEXT,
+                    tender_id TEXT,
+
+                    -- Catchall for future fields
+                    metadata JSON
+                )
+            """)
+
+            # Create indexes for sacks
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_sacks_chain
+                ON sacks(chain_id, timestamp)
+            """)
+
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_sacks_agent
+                ON sacks(agent_id)
+            """)
+
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_sacks_status
+                ON sacks(status)
+            """)
+
             conn.commit()
 
     @contextmanager
@@ -304,6 +347,197 @@ class LogDatabase:
             )
             row = cursor.fetchone()
             return dict(row) if row else None
+
+    # Sack Operations
+
+    def add_yield(
+        self,
+        sack_id: str,
+        chain_id: str,
+        task_id: str,
+        agent_id: Optional[str] = None,
+        status: Optional[str] = None,
+        outcome: Optional[str] = None,
+        artifacts: Optional[List[str]] = None,
+        notes: Optional[str] = None,
+        duration_seconds: Optional[int] = None,
+        tokens_used: Optional[int] = None,
+        shard_path: Optional[str] = None,
+        tender_id: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None
+    ) -> bool:
+        """
+        Add a yield to the sack for a chain.
+
+        Args:
+            sack_id: Unique yield ID (e.g., 'yield-20251206-abc')
+            chain_id: Chain this yield belongs to
+            task_id: Which task produced this yield
+            agent_id: Agent that produced the yield
+            status: Yield status (complete/partial/blocked)
+            outcome: What was accomplished
+            artifacts: List of SKEIN artifact IDs (tender-xyz, finding-abc)
+            notes: Context for next agent
+            duration_seconds: How long the task took
+            tokens_used: Token consumption
+            shard_path: Path to shard worktree if used
+            tender_id: Tender folio ID if work was tendered
+            metadata: Additional metadata
+
+        Returns:
+            True on success
+        """
+        with self._get_connection() as conn:
+            conn.execute("""
+                INSERT INTO sacks (
+                    sack_id, chain_id, task_id, agent_id,
+                    status, outcome, artifacts, notes,
+                    duration_seconds, tokens_used, shard_path, tender_id,
+                    metadata
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                sack_id,
+                chain_id,
+                task_id,
+                agent_id,
+                status,
+                outcome,
+                json.dumps(artifacts) if artifacts else None,
+                notes,
+                duration_seconds,
+                tokens_used,
+                shard_path,
+                tender_id,
+                json.dumps(metadata) if metadata else None
+            ))
+            conn.commit()
+            return True
+
+    def get_chain_yields(self, chain_id: str) -> List[Dict[str, Any]]:
+        """
+        Get all yields in a chain, ordered by timestamp.
+
+        Args:
+            chain_id: The chain to query
+
+        Returns:
+            List of yield dicts in execution order
+        """
+        with self._get_connection() as conn:
+            cursor = conn.execute(
+                "SELECT * FROM sacks WHERE chain_id = ? ORDER BY timestamp",
+                (chain_id,)
+            )
+            rows = cursor.fetchall()
+
+            results = []
+            for row in rows:
+                yield_dict = dict(row)
+                # Parse JSON fields
+                if yield_dict.get('artifacts'):
+                    yield_dict['artifacts'] = json.loads(yield_dict['artifacts'])
+                if yield_dict.get('metadata'):
+                    yield_dict['metadata'] = json.loads(yield_dict['metadata'])
+                results.append(yield_dict)
+
+            return results
+
+    def get_yield(self, sack_id: str) -> Optional[Dict[str, Any]]:
+        """Get specific yield by ID."""
+        with self._get_connection() as conn:
+            cursor = conn.execute(
+                "SELECT * FROM sacks WHERE sack_id = ?",
+                (sack_id,)
+            )
+            row = cursor.fetchone()
+            if not row:
+                return None
+
+            yield_dict = dict(row)
+            if yield_dict.get('artifacts'):
+                yield_dict['artifacts'] = json.loads(yield_dict['artifacts'])
+            if yield_dict.get('metadata'):
+                yield_dict['metadata'] = json.loads(yield_dict['metadata'])
+            return yield_dict
+
+    def get_yields_by_status(self, status: str) -> List[Dict[str, Any]]:
+        """Get yields by status (e.g., find all blocked work)."""
+        with self._get_connection() as conn:
+            cursor = conn.execute(
+                "SELECT * FROM sacks WHERE status = ? ORDER BY timestamp DESC",
+                (status,)
+            )
+            rows = cursor.fetchall()
+
+            results = []
+            for row in rows:
+                yield_dict = dict(row)
+                if yield_dict.get('artifacts'):
+                    yield_dict['artifacts'] = json.loads(yield_dict['artifacts'])
+                if yield_dict.get('metadata'):
+                    yield_dict['metadata'] = json.loads(yield_dict['metadata'])
+                results.append(yield_dict)
+
+            return results
+
+    def get_agent_yields(self, agent_id: str) -> List[Dict[str, Any]]:
+        """Get all yields by a specific agent."""
+        with self._get_connection() as conn:
+            cursor = conn.execute(
+                "SELECT * FROM sacks WHERE agent_id = ? ORDER BY timestamp DESC",
+                (agent_id,)
+            )
+            rows = cursor.fetchall()
+
+            results = []
+            for row in rows:
+                yield_dict = dict(row)
+                if yield_dict.get('artifacts'):
+                    yield_dict['artifacts'] = json.loads(yield_dict['artifacts'])
+                if yield_dict.get('metadata'):
+                    yield_dict['metadata'] = json.loads(yield_dict['metadata'])
+                results.append(yield_dict)
+
+            return results
+
+    def get_previous_yield(self, chain_id: str, before_task_id: str) -> Optional[Dict[str, Any]]:
+        """
+        Get the most recent yield in a chain before a specific task.
+
+        Used for injecting previous yield context into downstream tasks.
+
+        Args:
+            chain_id: The chain to query
+            before_task_id: Get yields before this task
+
+        Returns:
+            The previous yield dict, or None if this is the first task
+        """
+        with self._get_connection() as conn:
+            # Get all yields in chain ordered by timestamp
+            cursor = conn.execute(
+                "SELECT * FROM sacks WHERE chain_id = ? ORDER BY timestamp",
+                (chain_id,)
+            )
+            rows = cursor.fetchall()
+
+            # Find the yield just before the specified task
+            previous = None
+            for row in rows:
+                if row['task_id'] == before_task_id:
+                    break
+                previous = row
+
+            if not previous:
+                return None
+
+            yield_dict = dict(previous)
+            if yield_dict.get('artifacts'):
+                yield_dict['artifacts'] = json.loads(yield_dict['artifacts'])
+            if yield_dict.get('metadata'):
+                yield_dict['metadata'] = json.loads(yield_dict['metadata'])
+            return yield_dict
 
 
 # JSON Storage for Structured Artifacts
