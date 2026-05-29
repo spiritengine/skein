@@ -6566,6 +6566,33 @@ def shard_resume(ctx, worktree_name, message):
 # ---------------------------------------------------------------------------
 
 
+def _normalize_xgun(d):
+    """Coerce an xgun result into the expected shape at the single trust boundary.
+
+    ``dict.get(key, default)`` only defaults absent keys — a present-but-null or
+    scalar value (e.g. ``"signals": null`` under schema drift) would still raise
+    on downstream ``.get()``/iteration. Force the accessed containers to the
+    right type (and drop non-dict list elements) so no nested access can raise.
+    Unknown top-level keys are preserved.
+    """
+    def as_dict(v):
+        return v if isinstance(v, dict) else {}
+
+    def as_list_of_dicts(v):
+        return [x for x in v if isinstance(x, dict)] if isinstance(v, list) else []
+
+    out = dict(d)
+    out["summary"] = as_dict(d.get("summary"))
+    qgun = dict(as_dict(d.get("qgun")))
+    qgun["flags"] = as_list_of_dicts(qgun.get("flags"))
+    qgun["signals"] = as_list_of_dicts(qgun.get("signals"))
+    out["qgun"] = qgun
+    sgun = dict(as_dict(d.get("sgun")))
+    sgun["smells"] = as_list_of_dicts(sgun.get("smells"))
+    out["sgun"] = sgun
+    return out
+
+
 def _run_xgun_scan(worktree_path):
     """Run ``xgun scan`` on a worktree path, returning parsed JSON or None.
 
@@ -6591,7 +6618,7 @@ def _run_xgun_scan(worktree_path):
             # Only trust a dict — a valid-but-non-dict payload (array, bare
             # string) would slip past callers' falsy guards and raise on .get().
             if isinstance(parsed, dict):
-                return parsed
+                return _normalize_xgun(parsed)
     except (
         OSError,  # includes FileNotFoundError when worktree_path is gone
         subprocess.TimeoutExpired,
