@@ -6589,6 +6589,7 @@ def _run_xgun_scan(worktree_path):
         if result.returncode in (0, 1):  # 0=clean, 1=issues found
             return _json.loads(result.stdout)
     except (
+        OSError,  # includes FileNotFoundError when worktree_path is gone
         subprocess.TimeoutExpired,
         subprocess.SubprocessError,
         _json.JSONDecodeError,
