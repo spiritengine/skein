@@ -6246,6 +6246,10 @@ def shard_merge(ctx, worktree_name, explicit_caller_cwd):
     except Exception:
         metadata = None  # Will use minimal metadata if gather fails
 
+    # Run xgun before merge (worktree is removed during merge)
+    xgun_result = _run_xgun_scan(shard_info.get("worktree_path", ""))
+    xgun_compact = _xgun_compact(xgun_result) if xgun_result else None
+
     try:
         # First, show drift context
         drift_info = shard_worktree.get_shard_drift_info(worktree_name)
@@ -6275,9 +6279,12 @@ def shard_merge(ctx, worktree_name, explicit_caller_cwd):
             click.echo(f"Merging to {base_branch}...")
             click.echo(result["message"])
 
+            if xgun_compact:
+                click.echo(f"  {_xgun_verdict_line(xgun_compact)}")
+
             # Post tender folio with status=complete and auto-close it
             tender_id = _post_merge_tender(
-                ctx, base_url, agent_id, worktree_name, shard_info, metadata
+                ctx, base_url, agent_id, worktree_name, shard_info, metadata, xgun_compact
             )
             if tender_id:
                 click.echo(f"  Tender: {tender_id} (auto-closed)")
@@ -6319,7 +6326,9 @@ def shard_merge(ctx, worktree_name, explicit_caller_cwd):
         raise click.ClickException(f"Failed to merge SHARD: {e}")
 
 
-def _post_merge_tender(ctx, base_url, agent_id, worktree_name, shard_info, metadata):
+def _post_merge_tender(
+    ctx, base_url, agent_id, worktree_name, shard_info, metadata, xgun_compact=None
+):
     """
     Post a tender folio with status=complete after successful merge, then auto-close it.
 
@@ -6353,6 +6362,12 @@ def _post_merge_tender(ctx, base_url, agent_id, worktree_name, shard_info, metad
     if len(files_list) > 20:
         files_str += f"\n  ... and {len(files_list) - 20} more"
 
+    quality_line = (
+        f"\n### Code Quality\n{_xgun_verdict_line(xgun_compact)}\n"
+        if xgun_compact
+        else ""
+    )
+
     content = f"""## Tender: {worktree_name}
 
 **Status:** complete (merged)
@@ -6366,7 +6381,7 @@ def _post_merge_tender(ctx, base_url, agent_id, worktree_name, shard_info, metad
 
 ### Files Modified
 {files_str if files_str else "  (none)"}
-"""
+{quality_line}"""
 
     folio_data = {
         "type": "tender",
@@ -6385,6 +6400,7 @@ def _post_merge_tender(ctx, base_url, agent_id, worktree_name, shard_info, metad
             "status": "complete",
             "merged": True,
             "name": shard_info.get("name"),
+            "xgun": xgun_compact,
         },
     }
 
@@ -6534,6 +6550,179 @@ def shard_resume(ctx, worktree_name, message):
         click.echo(f"  Warning: Failed to update SKEIN thread: {e}", err=True)
 
 
+# ---------------------------------------------------------------------------
+# xgun quality-gate helpers
+#
+# xgun (spiritengine/xgun) produces flags (hard issues that fail the gate),
+# smells (agent-specific bad patterns, also fail the gate), and signals
+# (leveled green/yellow/red FYIs that never block). These helpers run xgun
+# once and render it consistently across tender, triage, merge, and inspect.
+#
+# Display policy: flags and smells are always shown. Signals are shown only
+# when yellow or red; green signals collapse to a count + reveal hint, since
+# a green FYI carries no actionable information. Checks that degraded to
+# "not available" (radon/ast-grep binary missing) are surfaced loudly in the
+# summary so a half-disabled scan never reads as a clean pass.
+# ---------------------------------------------------------------------------
+
+
+def _run_xgun_scan(worktree_path):
+    """Run ``xgun scan`` on a worktree path, returning parsed JSON or None.
+
+    Returns None when the xgun binary is absent or the scan fails — callers
+    treat None as "no quality data available" rather than an error.
+    """
+    import shutil
+    import subprocess
+    import json as _json
+
+    if not shutil.which("xgun"):
+        return None
+    try:
+        result = subprocess.run(
+            ["xgun", "scan", worktree_path, "--output", "json"],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            cwd=worktree_path,
+        )
+        if result.returncode in (0, 1):  # 0=clean, 1=issues found
+            return _json.loads(result.stdout)
+    except (
+        subprocess.TimeoutExpired,
+        subprocess.SubprocessError,
+        _json.JSONDecodeError,
+    ):
+        pass
+    return None
+
+
+def _xgun_skipped_checks(xgun_result):
+    """Names of checks that degraded to 'not available' (binary missing)."""
+    skipped = []
+    for sig in xgun_result.get("qgun", {}).get("signals", []):
+        msg = (sig.get("message") or "").lower()
+        if "not available" in msg:
+            skipped.append(sig.get("check", "?"))
+    return skipped
+
+
+def _xgun_summary_counts(xgun_result):
+    """Return (flags, smells, signals, passed) from the xgun summary block."""
+    summary = xgun_result.get("summary", {})
+    return (
+        summary.get("flags", 0),
+        summary.get("smells", 0),
+        summary.get("signals", 0),
+        summary.get("passed", True),
+    )
+
+
+def _xgun_compact(xgun_result):
+    """Compact verdict suitable for storing in a tender folio's metadata."""
+    flags, smells, signals, passed = _xgun_summary_counts(xgun_result)
+    return {
+        "passed": bool(passed),
+        "flags": flags,
+        "smells": smells,
+        "signals": signals,
+        "skipped": _xgun_skipped_checks(xgun_result),
+    }
+
+
+def _xgun_verdict_line(compact):
+    """One-line verdict for triage/merge from a compact dict (see _xgun_compact).
+
+    e.g. "✓ xgun: clean" or "✗ xgun: 2 flags, 1 smell (radon,ast_grep skipped)".
+    """
+    flags = compact.get("flags", 0)
+    smells = compact.get("smells", 0)
+    skipped = compact.get("skipped", [])
+    skip_note = f" ({','.join(skipped)} skipped)" if skipped else ""
+    if compact.get("passed", True) and flags == 0 and smells == 0:
+        return f"✓ xgun: clean{skip_note}"
+    parts = []
+    if flags:
+        parts.append(f"{flags} flag" + ("s" if flags != 1 else ""))
+    if smells:
+        parts.append(f"{smells} smell" + ("s" if smells != 1 else ""))
+    return f"✗ xgun: {', '.join(parts) or 'issues'}{skip_note}"
+
+
+def _xgun_detail_lines(xgun_result, verbose=False, reveal_hint=None):
+    """Build full xgun verdict lines (used by inspect and the tender folio).
+
+    Hides green signals by default (collapsed to a count + optional reveal
+    hint); always shows yellow/red signals, flags, and smells; surfaces
+    skipped checks in the summary line.
+    """
+    lines = []
+    flags_count, smells_count, _sig_count, passed = _xgun_summary_counts(xgun_result)
+    skipped = _xgun_skipped_checks(xgun_result)
+    skip_note = (
+        f"  [{len(skipped)} check{'s' if len(skipped) != 1 else ''} SKIPPED: "
+        f"{', '.join(skipped)}]"
+        if skipped
+        else ""
+    )
+    clean = passed and flags_count == 0 and smells_count == 0
+    state = "clean" if clean else "issues"
+    mark = "✓" if clean else "✗"
+    lines.append(
+        f"{mark} Quality: {state} ({flags_count} flags, {smells_count} smells){skip_note}"
+    )
+
+    qgun = xgun_result.get("qgun", {})
+
+    flags = qgun.get("flags", [])
+    if flags:
+        lines.append("")
+        lines.append(f"Flags ({len(flags)}):")
+        for f in flags[:10]:
+            loc = f"{f.get('file', '?')}:{f['line']}" if f.get("line") else f.get("file", "?")
+            lines.append(f"  {loc} [{f.get('check', '?')}] {f.get('message', '')}")
+        if len(flags) > 10:
+            lines.append(f"  ... and {len(flags) - 10} more")
+
+    signals = qgun.get("signals", [])
+    green = [s for s in signals if s.get("level") == "green"]
+    to_show = signals if verbose else [s for s in signals if s.get("level") in ("yellow", "red")]
+    if to_show:
+        lines.append("")
+        lines.append(f"Signals ({len(to_show)}):")
+        for s in to_show:
+            lines.append(
+                f"  [{s.get('level', '?')}] [{s.get('check', '?')}] {s.get('message', '')}"
+            )
+    if green and not verbose:
+        hint = f" — {reveal_hint}" if reveal_hint else ""
+        lines.append(f"  +{len(green)} green signals hidden{hint}")
+
+    smells = xgun_result.get("sgun", {}).get("smells", [])
+    if smells:
+        lines.append("")
+        lines.append(f"Smells ({len(smells)}):")
+        for sm in smells[:10]:
+            loc = f"{sm.get('file', '?')}:{sm['line']}" if sm.get("line") else sm.get("file", "?")
+            lines.append(f"  {loc} [{sm.get('kind', '?')}] {sm.get('reason', '')}")
+        if len(smells) > 10:
+            lines.append(f"  ... and {len(smells) - 10} more")
+
+    return lines
+
+
+def _xgun_folio_section(xgun_result):
+    """Markdown section embedding the xgun verdict into a tender folio body."""
+    body = "\n".join(_xgun_detail_lines(xgun_result, verbose=False))
+    return (
+        "### Code Quality (xgun)\n"
+        "```\n"
+        f"{body}\n"
+        "```\n"
+        "_Run `skein shard inspect <name> --verbose` for hidden green signals._"
+    )
+
+
 @shard.command("review")
 @click.option(
     "--stale-days",
@@ -6541,23 +6730,43 @@ def shard_resume(ctx, worktree_name, message):
     type=int,
     help="Days without commits to consider stale (default: 7)",
 )
+@click.argument("worktree_name", required=False)
 @click.option("--json", "output_json", is_flag=True, help="Output as JSON")
+@click.option(
+    "--verbose",
+    is_flag=True,
+    help="With a worktree name: show hidden green quality signals",
+)
 @click.pass_context
-def shard_review(ctx, stale_days, output_json):
+def shard_review(ctx, worktree_name, stale_days, output_json, verbose):
     """
-    Show SHARD review queue for QM visibility.
+    Show the SHARD review queue, or deep-review one SHARD by name.
 
-    Groups shards by status:
+    With no name: groups all shards by status for QM visibility:
     - READY: Has commits, clean working tree, no conflicts (merge candidates)
     - NEEDS_COMMIT: Has uncommitted changes
     - CONFLICTS: Would have merge conflicts with master
     - STALE: No commits and older than --stale-days
 
+    With a worktree name: runs the deep review (alias for `shard inspect`),
+    including the xgun quality scan.
+
     Examples:
         skein shard review
         skein shard review --stale-days 3
-        skein shard review --json
+        skein shard review my-feature-20260113-001
     """
+    # Deep-review dispatch: `review <name>` is an alias for `inspect <name>`,
+    # matching the name everyone types and the docs/muscle memory.
+    if worktree_name:
+        ctx.invoke(
+            shard_inspect,
+            worktree_name=worktree_name,
+            output_json=output_json,
+            verbose=verbose,
+        )
+        return
+
     shard_worktree = get_shard_worktree_module()
 
     try:
@@ -6751,6 +6960,15 @@ def shard_tender(ctx, worktree_name, site, reviewer, summary, status, confidence
     if len(files_list) > 20:
         files_str += f"\n  ... and {len(files_list) - 20} more"
 
+    # Run xgun once at the handoff: embed the verdict in the folio body and
+    # store a compact form in metadata so triage/merge can read it without
+    # re-scanning.
+    xgun_result = _run_xgun_scan(shard_info.get("worktree_path", ""))
+    xgun_compact = _xgun_compact(xgun_result) if xgun_result else None
+    quality_section = (
+        "\n" + _xgun_folio_section(xgun_result) + "\n" if xgun_result else ""
+    )
+
     content = f"""## Tender: {worktree_name}
 
 **Status:** {status}
@@ -6766,7 +6984,7 @@ def shard_tender(ctx, worktree_name, site, reviewer, summary, status, confidence
 
 ### Files Modified
 {files_str if files_str else "  (none)"}
-"""
+{quality_section}"""
 
     # Create tender folio
     folio_data = {
@@ -6787,6 +7005,7 @@ def shard_tender(ctx, worktree_name, site, reviewer, summary, status, confidence
             "confidence": confidence,
             "reviewer": reviewer,
             "name": metadata.get("name"),
+            "xgun": xgun_compact,
         },
     }
 
@@ -6803,6 +7022,8 @@ def shard_tender(ctx, worktree_name, site, reviewer, summary, status, confidence
         click.echo(f"  Reviewer: {reviewer}")
         click.echo(f"  Commits: {metadata.get('commits', 0)}")
         click.echo(f"  Files: {len(files_list)}")
+        if xgun_compact:
+            click.echo(f"  {_xgun_verdict_line(xgun_compact)}")
 
         if summary:
             click.echo(f"  Summary: {summary}")
@@ -6866,6 +7087,7 @@ def shard_triage(ctx, output_json):
                         "confidence": metadata.get("confidence"),
                         "status": metadata.get("status"),
                         "summary": folio.get("title", "")[:50],
+                        "xgun": metadata.get("xgun"),
                     }
         except Exception:
             pass  # Tender lookup is optional
@@ -6940,6 +7162,7 @@ def shard_triage(ctx, output_json):
                 "status_icon": status_icon,
                 "confidence": confidence,
                 "tender_id": tender.get("folio_id") if tender else None,
+                "xgun": tender.get("xgun") if tender else None,
                 "base_ahead": master_ahead,
                 "base_branch": base_branch,
                 "base_commit": base_commit,
@@ -7032,10 +7255,14 @@ def shard_triage(ctx, output_json):
                 elif entry["tender_id"]:
                     click.echo(f"       tendered: {entry['tender_id']}")
 
+                # Show xgun verdict (from tender metadata, computed at tender time)
+                if entry.get("xgun"):
+                    click.echo(f"       {_xgun_verdict_line(entry['xgun'])}")
+
                 click.echo()  # Blank line between entries
 
             click.echo("Commands:")
-            click.echo("  skein shard review <name>    # View details")
+            click.echo("  skein shard inspect <name>   # Deep review (with quality scan)")
             click.echo("  skein shard diff <name>      # View work diff")
             click.echo("  skein shard merge <name>     # Merge to base branch")
             click.echo(
@@ -7051,8 +7278,13 @@ def shard_triage(ctx, output_json):
 @shard.command("inspect")
 @click.argument("worktree_name")
 @click.option("--json", "output_json", is_flag=True, help="Output as JSON")
+@click.option(
+    "--verbose",
+    is_flag=True,
+    help="Show hidden green quality signals (off by default)",
+)
 @click.pass_context
-def shard_inspect(ctx, worktree_name, output_json):
+def shard_inspect(ctx, worktree_name, output_json, verbose):
     """
     Deep review of a single SHARD for merge decision.
 
@@ -7131,31 +7363,8 @@ def shard_inspect(ctx, worktree_name, output_json):
             "work_diff_stat": drift_info.get("work_diff_stat"),
         }
 
-        # Run xgun scan if available (silent degradation if not)
-        xgun_result = None
-        import shutil
-        import json as json_mod
-
-        if shutil.which("xgun"):
-            import subprocess
-
-            worktree_path = shard_info["worktree_path"]
-            try:
-                result = subprocess.run(
-                    ["xgun", "scan", worktree_path, "--output", "json"],
-                    capture_output=True,
-                    text=True,
-                    timeout=60,
-                    cwd=worktree_path,
-                )
-                if result.returncode in (0, 1):  # 0=passed, 1=issues found
-                    xgun_result = json_mod.loads(result.stdout)
-            except (
-                subprocess.TimeoutExpired,
-                subprocess.SubprocessError,
-                json_mod.JSONDecodeError,
-            ):
-                pass  # Silent degradation
+        # Run xgun scan if available (None if absent — silent degradation)
+        xgun_result = _run_xgun_scan(shard_info["worktree_path"])
 
         if xgun_result:
             review_data["xgun"] = xgun_result
@@ -7290,73 +7499,15 @@ def shard_inspect(ctx, worktree_name, output_json):
                     click.echo(f"  {tender_info['summary']}")
                 click.echo()
 
-            # Show xgun quality check results
+            # Show xgun quality check results (green signals hidden unless --verbose)
             if xgun_result:
                 click.echo("=== Code Quality (xgun) ===")
                 click.echo()
-                summary = xgun_result.get("summary", {})
-                flags_count = summary.get("flags", 0)
-                signals_count = summary.get("signals", 0)
-                smells_count = summary.get("smells", 0)
-                passed = summary.get("passed", True)
-
-                if passed:
-                    click.echo(
-                        f"✓ Quality: Passed ({signals_count} signals, {flags_count} flags, {smells_count} smells)"
-                    )
-                else:
-                    click.echo(
-                        f"✗ Quality: Issues detected ({signals_count} signals, {flags_count} flags, {smells_count} smells)"
-                    )
-
-                # Show flags (specific line issues)
-                qgun_data = xgun_result.get("qgun", {})
-                flags = qgun_data.get("flags", [])
-                if flags:
-                    click.echo()
-                    click.echo(f"Flags ({len(flags)}):")
-                    for flag in flags[:10]:
-                        loc = (
-                            f"{flag.get('file', '?')}:{flag['line']}"
-                            if flag.get("line")
-                            else flag.get("file", "?")
-                        )
-                        click.echo(
-                            f"  {loc} [{flag.get('check', '?')}] {flag.get('message', '')}"
-                        )
-                    if len(flags) > 10:
-                        click.echo(f"  ... and {len(flags) - 10} more")
-
-                # Show signals (repo-wide observations)
-                signals = qgun_data.get("signals", [])
-                if signals:
-                    click.echo()
-                    click.echo(f"Signals ({len(signals)}):")
-                    for signal in signals[:5]:
-                        click.echo(
-                            f"  [{signal.get('check', '?')}] {signal.get('message', '')}"
-                        )
-                    if len(signals) > 5:
-                        click.echo(f"  ... and {len(signals) - 5} more")
-
-                # Show smells
-                sgun_data = xgun_result.get("sgun", {})
-                smells = sgun_data.get("smells", [])
-                if smells:
-                    click.echo()
-                    click.echo(f"Smells ({len(smells)}):")
-                    for smell in smells[:5]:
-                        loc = (
-                            f"{smell.get('file', '?')}:{smell['line']}"
-                            if smell.get("line")
-                            else smell.get("file", "?")
-                        )
-                        click.echo(
-                            f"  {loc} [{smell.get('kind', '?')}] {smell.get('reason', '')}"
-                        )
-                    if len(smells) > 5:
-                        click.echo(f"  ... and {len(smells) - 5} more")
-
+                hint = f"skein shard inspect {worktree_name} --verbose"
+                for line in _xgun_detail_lines(
+                    xgun_result, verbose=verbose, reveal_hint=hint
+                ):
+                    click.echo(line)
                 click.echo()
 
             # Actions
