@@ -6570,25 +6570,46 @@ def _normalize_xgun(d):
     """Coerce an xgun result into the expected shape at the single trust boundary.
 
     ``dict.get(key, default)`` only defaults absent keys — a present-but-null or
-    scalar value (e.g. ``"signals": null`` under schema drift) would still raise
-    on downstream ``.get()``/iteration. Force the accessed containers to the
-    right type (and drop non-dict list elements) so no nested access can raise.
-    Unknown top-level keys are preserved.
+    scalar value (e.g. ``"signals": null``, or a signal whose ``message`` is a
+    number, under schema drift) would still raise on downstream ``.get()``,
+    iteration, ``.lower()``, or ``str.join``. Force the accessed containers to
+    the right type (dropping non-dict list elements) AND coerce the leaf fields
+    the helpers actually touch to ``str``, so nothing past this boundary can
+    raise regardless of the payload. Unknown top-level keys are preserved.
     """
+    if not isinstance(d, dict):
+        return {"summary": {}, "qgun": {"flags": [], "signals": []}, "sgun": {"smells": []}}
+
     def as_dict(v):
         return v if isinstance(v, dict) else {}
 
-    def as_list_of_dicts(v):
-        return [x for x in v if isinstance(x, dict)] if isinstance(v, list) else []
+    def clean_items(v, str_fields):
+        # Keep only dict elements; coerce named leaves to str. A present-but-null
+        # leaf is dropped so the consumer's ``.get(key, default)`` still applies.
+        items = []
+        if not isinstance(v, list):
+            return items
+        for x in v:
+            if not isinstance(x, dict):
+                continue
+            item = dict(x)
+            for f in str_fields:
+                val = item.get(f)
+                if val is None:
+                    item.pop(f, None)
+                elif not isinstance(val, str):
+                    item[f] = str(val)
+            items.append(item)
+        return items
 
     out = dict(d)
     out["summary"] = as_dict(d.get("summary"))
     qgun = dict(as_dict(d.get("qgun")))
-    qgun["flags"] = as_list_of_dicts(qgun.get("flags"))
-    qgun["signals"] = as_list_of_dicts(qgun.get("signals"))
+    qgun["flags"] = clean_items(qgun.get("flags"), ("check", "file", "message"))
+    qgun["signals"] = clean_items(qgun.get("signals"), ("check", "level", "message"))
     out["qgun"] = qgun
     sgun = dict(as_dict(d.get("sgun")))
-    sgun["smells"] = as_list_of_dicts(sgun.get("smells"))
+    sgun["smells"] = clean_items(sgun.get("smells"), ("kind", "file", "reason"))
     out["sgun"] = sgun
     return out
 
