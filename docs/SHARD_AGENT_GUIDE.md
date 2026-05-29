@@ -81,6 +81,9 @@ Spawned SHARD: fix-bug-20260113-001
 ### `skein shard review <name>`
 
 Deep review of a shard showing drift, conflicts, and merge readiness.
+`skein shard review <name>` is an alias for `skein shard inspect <name>` — the
+same deep review either way. (Bare `skein shard review`, with no name, shows the
+review queue instead.)
 
 ```bash
 skein shard review fix-bug-20260113-001
@@ -90,6 +93,10 @@ skein shard review fix-bug-20260113-001
 - **Your Work**: Base commit, file changes, line counts
 - **Master Activity**: Commits merged since you branched, notable changes
 - **Conflict Status**: Whether merge will succeed (requires git 2.38+)
+- **Code Quality (xgun)**: Flags, smells, and yellow/red signals from a quality
+  scan, when xgun is installed. Green signals are hidden by default — add
+  `--verbose` to see them. Checks that couldn't run (e.g. radon/ast-grep not on
+  PATH) are reported as SKIPPED so a partial scan never looks like a clean pass.
 - **Next Actions**: Clear commands to merge or graft
 
 **Example output (no drift):**
