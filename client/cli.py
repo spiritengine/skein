@@ -6587,7 +6587,11 @@ def _run_xgun_scan(worktree_path):
             cwd=worktree_path,
         )
         if result.returncode in (0, 1):  # 0=clean, 1=issues found
-            return _json.loads(result.stdout)
+            parsed = _json.loads(result.stdout)
+            # Only trust a dict — a valid-but-non-dict payload (array, bare
+            # string) would slip past callers' falsy guards and raise on .get().
+            if isinstance(parsed, dict):
+                return parsed
     except (
         OSError,  # includes FileNotFoundError when worktree_path is gone
         subprocess.TimeoutExpired,
@@ -6669,8 +6673,11 @@ def _xgun_detail_lines(xgun_result, verbose=False, reveal_hint=None):
     clean = passed and flags_count == 0 and smells_count == 0
     state = "clean" if clean else "issues"
     mark = "✓" if clean else "✗"
+    flag_word = "flag" if flags_count == 1 else "flags"
+    smell_word = "smell" if smells_count == 1 else "smells"
     lines.append(
-        f"{mark} Quality: {state} ({flags_count} flags, {smells_count} smells){skip_note}"
+        f"{mark} Quality: {state} "
+        f"({flags_count} {flag_word}, {smells_count} {smell_word}){skip_note}"
     )
 
     qgun = xgun_result.get("qgun", {})
@@ -6687,7 +6694,9 @@ def _xgun_detail_lines(xgun_result, verbose=False, reveal_hint=None):
 
     signals = qgun.get("signals", [])
     green = [s for s in signals if s.get("level") == "green"]
-    to_show = signals if verbose else [s for s in signals if s.get("level") in ("yellow", "red")]
+    # Show everything that isn't green (yellow/red and any unexpected level),
+    # so a signal can never silently vanish — green is the only hidden class.
+    to_show = signals if verbose else [s for s in signals if s.get("level") != "green"]
     if to_show:
         lines.append("")
         lines.append(f"Signals ({len(to_show)}):")
