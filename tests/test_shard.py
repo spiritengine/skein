@@ -2435,6 +2435,83 @@ class TestGraftConflictPreservesLaterCommits:
             cleanup_graft_chain(info["worktree_name"])
 
 
+class TestGraftEmptyCommitPause:
+    """
+    Regression for fell-r1 on finding-20260530-3jnx: when a commit replays
+    EMPTY on the advanced base (its change is already present), git stops with
+    "...now empty, possibly due to conflict resolution." That string contains
+    "conflict", so the conflict branch ran, but `git status` showed no UU/AA
+    files, leaving conflict_files empty - and success was wrongly computed from
+    "no conflict files", reporting a clean graft while the sequencer still held
+    the rest. success must instead be driven by whether the sequence DRAINED.
+    """
+
+    def test_empty_commit_pause_is_not_a_false_clean(self, shard_env: Path):
+        """WHY: An empty-commit pause must report success=False, not a clean graft."""
+        info = spawn_shard("empty-commit-pause-test")
+        worktree_path = Path(info["worktree_path"])
+
+        try:
+            # C1 adds X.py. C2 adds an unrelated Y.py (must stay queued).
+            (worktree_path / "X.py").write_text("shared change\n")
+            subprocess.run(["git", "add", "."], cwd=worktree_path, check=True)
+            subprocess.run(
+                ["git", "commit", "-m", "C1: add X"],
+                cwd=worktree_path,
+                check=True,
+                capture_output=True,
+            )
+            (worktree_path / "Y.py").write_text("shard Y v1\n")
+            subprocess.run(["git", "add", "."], cwd=worktree_path, check=True)
+            subprocess.run(
+                ["git", "commit", "-m", "C2: add unrelated Y"],
+                cwd=worktree_path,
+                check=True,
+                capture_output=True,
+            )
+
+            # Advance master with the SAME change C1 makes (identical content),
+            # so cherry-picking C1 onto the new base replays EMPTY - no conflict.
+            (shard_env / "X.py").write_text("shared change\n")
+            subprocess.run(["git", "add", "."], cwd=shard_env, check=True)
+            subprocess.run(
+                ["git", "commit", "-m", "Master: add identical X"],
+                cwd=shard_env,
+                check=True,
+                capture_output=True,
+            )
+
+            graft_result = graft_shard(info["worktree_name"])
+            graft_path = Path(graft_result["graft_worktree_path"])
+
+            # The graft is PAUSED on the empty commit - this must NOT be a false
+            # clean. There are no conflict files (it is an empty replay, not a
+            # merge conflict).
+            assert graft_result["success"] is False
+            assert graft_result["conflicts"] == []
+
+            # The sequencer is detected as paused (empty pick still in progress).
+            assert _graft_sequence_in_progress(graft_path) is not None
+
+            # Counts are accurate: C1 replayed empty so nothing landed yet, and
+            # both commits remain pending.
+            assert graft_result["commits_total"] == 2
+            assert graft_result["commits_applied"] == 0
+            assert graft_result["commits_pending"] == 2
+
+            # The message guides --skip/--continue, not a "ready to merge".
+            assert "empty" in graft_result["message"].lower()
+            assert "ready to merge" not in graft_result["message"].lower()
+
+            # And the merge guard refuses the paused graft.
+            merge_result = merge_shard(graft_result["graft_worktree_name"])
+            assert not merge_result["success"]
+            assert "paused mid-sequence" in merge_result["message"].lower()
+
+        finally:
+            cleanup_graft_chain(info["worktree_name"])
+
+
 class TestGraftMergeGuard:
     """
     Invariant: `merge_shard` refuses to finalize a graft that is paused

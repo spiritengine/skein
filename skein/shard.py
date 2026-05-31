@@ -1557,7 +1557,16 @@ def _graft_sequence_in_progress(worktree_path) -> Optional[str]:
             except Exception:
                 pending = []
             if pending:
-                return f"{len(pending)} commit(s) still queued in the cherry-pick sequencer"
+                # The sequencer todo retains the currently-stopped pick until
+                # `--continue` advances it, so len(pending) can overstate the
+                # not-yet-applied count by one. Phrase it as a lower bound
+                # rather than an exact count (fell-r1). graft_shard's
+                # commits_pending is the accurate count (derived from the
+                # branch, not the sequencer).
+                return (
+                    f"at least {len(pending)} commit(s) still queued in the "
+                    f"cherry-pick sequencer"
+                )
 
         # An in-progress (unfinished) cherry-pick that has not been continued.
         if _git_path("CHERRY_PICK_HEAD").exists():
@@ -2115,6 +2124,19 @@ def graft_shard(
             pass
         raise ShardError(f"Failed to apply commits: {e}")
 
+    # A cherry-pick can stop for two distinct reasons that BOTH leave the
+    # sequence paused with commits still queued:
+    #   1. a merge conflict - `git status` shows UU/AA files (conflict_files),
+    #   2. a commit that replays EMPTY on the advanced base (its change already
+    #      exists). git stops with "The previous cherry-pick is now empty,
+    #      possibly due to conflict resolution." - note that string contains
+    #      "conflict", so it lands in the branch above, but `git status` shows
+    #      NO conflict files, so conflict_files stays empty.
+    # Defining success by "no conflict files" would therefore misreport an
+    # empty-commit pause as a clean graft while the sequencer still holds the
+    # rest (fell-r1). Define success by whether the sequence actually DRAINED.
+    paused = _graft_sequence_in_progress(graft_worktree_path)
+
     # Count commits that ACTUALLY landed on the graft branch. On a conflict the
     # cherry-pick stops part-way through, so this is NOT len(commits): it is the
     # number of commits between the new base and the graft HEAD. The conflicting
@@ -2129,7 +2151,7 @@ def graft_shard(
     commits_pending = len(commits) - commits_applied
 
     result = {
-        "success": len(conflict_files) == 0,
+        "success": paused is None and not conflict_files,
         "graft_worktree_name": graft_worktree_name,
         "graft_worktree_path": str(graft_worktree_path),
         "graft_branch_name": graft_branch_name,
@@ -2148,6 +2170,21 @@ def graft_shard(
             f"{commits_pending} still queued in the cherry-pick sequencer.\n"
             f"Resolve conflicts in: {graft_worktree_path}\n"
             f"Then run `git cherry-pick --continue` to apply the rest."
+        )
+    elif paused is not None:
+        # No conflict files, but the sequence is still paused - typically a
+        # commit that replayed empty on the new base. git stopped WITHOUT
+        # creating it; the user must skip it (or commit it empty) to continue.
+        result["message"] = (
+            f"Graft PAUSED mid-sequence ({paused}).\n"
+            f"{commits_applied}/{len(commits)} commit(s) applied, "
+            f"{commits_pending} still queued in the cherry-pick sequencer.\n"
+            f"No merge conflicts - a commit replayed empty on the new base "
+            f"(its change is already present).\n"
+            f"In: {graft_worktree_path}\n"
+            f"Run `git cherry-pick --skip` to drop the empty commit "
+            f"(or `git cherry-pick --continue` to keep it empty), repeating "
+            f"until the sequencer is empty."
         )
     else:
         result["message"] = (

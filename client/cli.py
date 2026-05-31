@@ -6172,6 +6172,36 @@ def shard_graft(ctx, worktree_name):
             click.echo(f"  cd {result['graft_worktree_path']}")
             click.echo("  (run tests)")
             click.echo(f"  skein shard merge {result['graft_worktree_name']}")
+        elif not result.get("conflicts"):
+            # Paused mid-sequence with NO conflict files - typically a commit
+            # that replayed EMPTY on the new base. This is NOT a clean graft
+            # (fell-r1): the sequencer still holds the rest, so do not report
+            # "Applied cleanly". Surface the pause and how to proceed.
+            applied = result.get("commits_applied", 0)
+            total = result.get("commits_total", applied)
+            pending = result.get("commits_pending", 0)
+            click.echo("⏸ Graft PAUSED mid-sequence (no merge conflicts)\n")
+            click.echo("Graft created at:")
+            click.echo(f"  {result['graft_worktree_path']}/\n")
+            click.echo(
+                f"{applied}/{total} commit(s) applied, "
+                f"{pending} still queued in the cherry-pick sequencer.\n"
+            )
+            click.echo(
+                "A commit replayed empty on the new base (its change is already\n"
+                "present), so git stopped without creating it.\n"
+            )
+            click.echo("Continue the sequence:")
+            click.echo(f"  cd {result['graft_worktree_path']}")
+            click.echo("  git cherry-pick --skip       # drop the now-empty commit")
+            click.echo(
+                "  (or `git cherry-pick --continue` to keep it as an empty commit)"
+            )
+            click.echo(
+                "  (repeat until the sequencer is empty - do NOT stop early)\n"
+            )
+            click.echo("Then merge:")
+            click.echo(f"  skein shard merge {result['graft_worktree_name']}")
         else:
             click.echo(f"✗ Conflicts in: {', '.join(result['conflicts'])}\n")
             click.echo("Graft created at:")
