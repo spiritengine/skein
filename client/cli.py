@@ -6186,12 +6186,25 @@ def shard_graft(ctx, worktree_name):
                 click.echo("Chain: " + " → ".join(chain))
                 click.echo()
 
+            # Surface that the graft is paused MID-SEQUENCE with commits still
+            # queued - merging now would drop them (see finding-20260530-3jnx).
+            applied = result.get("commits_applied", 0)
+            total = result.get("commits_total", applied)
+            pending = result.get("commits_pending", 0)
+            click.echo(
+                f"Graft PAUSED mid-sequence: {applied}/{total} commit(s) applied, "
+                f"{pending} still queued in the cherry-pick sequencer.\n"
+            )
             click.echo("Resolve conflicts:")
             click.echo(f"  cd {result['graft_worktree_path']}")
             for f in result["conflicts"]:
                 click.echo(f"  (edit {f} to resolve conflicts)")
             click.echo("  git add <resolved files>")
-            click.echo("  git commit\n")
+            click.echo("  git cherry-pick --continue")
+            click.echo(
+                "  (repeat resolve + --continue for any further conflicts until the\n"
+                "   sequencer is empty - do NOT stop after the first commit)\n"
+            )
             click.echo("Then merge:")
             click.echo(f"  skein shard merge {result['graft_worktree_name']}")
 

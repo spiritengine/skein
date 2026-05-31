@@ -1523,6 +1523,52 @@ def get_shard_diff(
         raise ShardError(f"Failed to get diff: {e}")
 
 
+def _graft_sequence_in_progress(worktree_path) -> Optional[str]:
+    """
+    Detect whether a cherry-pick sequence is paused/in-progress in a worktree.
+
+    After `git cherry-pick <base>..<branch>` stops on a conflict, git records the
+    in-progress pick (CHERRY_PICK_HEAD) and queues the remaining commits in the
+    sequencer. If a user resolves only the in-progress commit and commits it, the
+    working tree looks clean even though commits remain queued - merging then
+    would silently drop them (see finding-20260530-3jnx). Returns a human-readable
+    detail string when a sequence is still pending, else None.
+    """
+    try:
+        if git is None:
+            return None
+        wt_repo = git.Repo(str(worktree_path))
+
+        def _git_path(name: str) -> Path:
+            p = Path(wt_repo.git.rev_parse("--git-path", name))
+            if not p.is_absolute():
+                p = Path(worktree_path) / p
+            return p
+
+        # Remaining commits queued in the sequencer todo list.
+        todo = _git_path("sequencer/todo")
+        if todo.exists():
+            try:
+                pending = [
+                    ln
+                    for ln in todo.read_text().splitlines()
+                    if ln.strip() and not ln.lstrip().startswith("#")
+                ]
+            except Exception:
+                pending = []
+            if pending:
+                return f"{len(pending)} commit(s) still queued in the cherry-pick sequencer"
+
+        # An in-progress (unfinished) cherry-pick that has not been continued.
+        if _git_path("CHERRY_PICK_HEAD").exists():
+            return "a cherry-pick is in progress (run `git cherry-pick --continue`)"
+
+    except Exception:
+        return None
+
+    return None
+
+
 def merge_shard(
     worktree_name: str,
     caller_cwd: Optional[str] = None,
@@ -1583,6 +1629,23 @@ def merge_shard(
 
     repo = _get_repo()
     base_branch = _get_shard_base_branch(worktree_name)
+
+    # Refuse to merge a graft paused mid cherry-pick sequence: queued commits
+    # remain unapplied and merging now would silently drop them (finding-20260530-3jnx).
+    paused = _graft_sequence_in_progress(worktree_path)
+    if paused:
+        return {
+            "success": False,
+            "message": (
+                f"Cannot merge: graft is paused mid-sequence ({paused}).\n"
+                f"Finish applying the shard's remaining commits first:\n"
+                f"  cd {worktree_path}\n"
+                f"  git cherry-pick --continue   # repeat until the sequencer is empty\n"
+                f"Then retry the merge."
+            ),
+            "uncommitted": [],
+            "conflicts": [],
+        }
 
     # Check for uncommitted changes in the worktree
     git_info = get_shard_git_info(worktree_name)
@@ -2011,30 +2074,35 @@ def graft_shard(
         base_branch=base_branch,
     )
 
-    # Cherry-pick commits
+    # Cherry-pick the shard's commits onto the new base as a SINGLE range
+    # operation so git owns the full sequence. If an early commit conflicts,
+    # git stops there and records the remaining commits in .git/sequencer; the
+    # user resolves and runs `git cherry-pick --continue` to walk the rest.
+    #
+    # (The previous implementation cherry-picked commit-by-commit in a loop and
+    # `break`ed on the first conflict, silently dropping every later commit -
+    # while still reporting commits_applied=len(commits). See finding-20260530-3jnx.)
     conflict_files = []
     try:
         if git is None:
             raise ShardError("GitPython not installed")
         graft_repo = git.Repo(str(graft_worktree_path))
 
-        for commit in commits:
-            try:
-                graft_repo.git.cherry_pick(commit)
-            except Exception as e:
-                # Cherry-pick failed - likely conflicts
-                if "conflict" in str(e).lower() or "CONFLICT" in str(e):
-                    # Get list of conflicted files
-                    try:
-                        status = graft_repo.git.status("--porcelain")
-                        for line in status.split("\n"):
-                            if line.startswith("UU ") or line.startswith("AA "):
-                                conflict_files.append(line[3:])
-                    except Exception:
-                        pass
-                    break
-                else:
-                    raise ShardError(f"Cherry-pick failed: {e}")
+        try:
+            graft_repo.git.cherry_pick(f"{base_commit}..{source_branch}")
+        except Exception as e:
+            # Cherry-pick paused - likely a conflict in one commit. The
+            # remaining commits stay queued in the sequencer for --continue.
+            if "conflict" in str(e).lower() or "CONFLICT" in str(e):
+                try:
+                    status = graft_repo.git.status("--porcelain")
+                    for line in status.split("\n"):
+                        if line.startswith("UU ") or line.startswith("AA "):
+                            conflict_files.append(line[3:])
+                except Exception:
+                    pass
+            else:
+                raise ShardError(f"Cherry-pick failed: {e}")
 
     except ShardError:
         raise
@@ -2047,21 +2115,39 @@ def graft_shard(
             pass
         raise ShardError(f"Failed to apply commits: {e}")
 
+    # Count commits that ACTUALLY landed on the graft branch. On a conflict the
+    # cherry-pick stops part-way through, so this is NOT len(commits): it is the
+    # number of commits between the new base and the graft HEAD. The conflicting
+    # commit (in progress) plus anything still queued is reported as pending.
+    try:
+        applied_output = graft_repo.git.rev_list(f"{new_base_commit}..HEAD")
+        commits_applied = (
+            len(applied_output.strip().split("\n")) if applied_output.strip() else 0
+        )
+    except Exception:
+        commits_applied = 0
+    commits_pending = len(commits) - commits_applied
+
     result = {
         "success": len(conflict_files) == 0,
         "graft_worktree_name": graft_worktree_name,
         "graft_worktree_path": str(graft_worktree_path),
         "graft_branch_name": graft_branch_name,
         "source_worktree_name": worktree_name,
-        "commits_applied": len(commits),
+        "commits_total": len(commits),
+        "commits_applied": commits_applied,
+        "commits_pending": commits_pending,
         "conflicts": conflict_files,
         "chain_depth": get_graft_depth(graft_worktree_name),
     }
 
     if conflict_files:
         result["message"] = (
-            f"Graft created with conflicts in: {', '.join(conflict_files)}\n"
-            f"Resolve conflicts in: {graft_worktree_path}"
+            f"Graft PAUSED at a conflict in: {', '.join(conflict_files)}\n"
+            f"{commits_applied}/{len(commits)} commit(s) applied, "
+            f"{commits_pending} still queued in the cherry-pick sequencer.\n"
+            f"Resolve conflicts in: {graft_worktree_path}\n"
+            f"Then run `git cherry-pick --continue` to apply the rest."
         )
     else:
         result["message"] = (
