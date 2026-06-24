@@ -500,7 +500,7 @@ def crypto_factory():
 # Conformance corpus
 # ---------------------------------------------------------------------------
 #
-# Corpus lives at tests/conformance/corpus/ (vendored from sigstore-python's
+# Corpus lives at skein/tests/conformance/corpus/ (vendored from sigstore-python's
 # test/assets/, MIT-licensed). Tests skip if a specific file is absent.
 
 
@@ -526,7 +526,7 @@ def corpus():
 
 
 def pytest_configure(config):
-    # --run-interactive is registered at rootdir-level in tests/conftest.py so
+    # --run-interactive is registered at rootdir-level in skein/tests/conftest.py so
     # the option is recognized regardless of the invocation path.
     config.addinivalue_line(
         "markers",

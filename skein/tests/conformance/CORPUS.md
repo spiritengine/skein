@@ -95,6 +95,6 @@ The true end-to-end round-trip requires a real OIDC token:
 
 After `pip install "sigstore>=4.2,<5"`, corpus files are NOT included in the
 wheel. Obtain from source: `github.com/sigstore/sigstore-python/test/assets/`.
-A copy is committed to `tests/conformance/corpus/` in this repository.
+A copy is committed to `skein/tests/conformance/corpus/` in this repository.
 
 License: Apache-2.0 (sigstore-python source); MIT per the project's test asset policy.

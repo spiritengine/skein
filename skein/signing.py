@@ -1413,12 +1413,12 @@ def _coerce_signature_bundle(
 
     The wire→domain inflation boundary is owned by verify()/verify_multi(),
     not the caller: SKEIN's write path persists the signature_bundle as JSON
-    (see tests/conformance/conftest.py::make_skein_bundle docstring), so the
+    (see skein/tests/conformance/conftest.py::make_skein_bundle docstring), so the
     read path hands verify() a deserialized Mapping, not a live model. A
     SignatureBundle instance is accepted unchanged for in-memory callers.
     This is the spec-alignment decision recorded in finding-20260519-tg40,
     threaded to the Phase 2 lock (finding-20260514-6078); the locked contract
-    pins it via the dict-passing tests in tests/conformance.
+    pins it via the dict-passing tests in skein/tests/conformance.
 
     Pydantic ValidationError (missing required field, non-base64
     canonical_bytes) is the caller's signal to map BUNDLE_MALFORMED and is

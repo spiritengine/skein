@@ -20,7 +20,7 @@ The 2x2 matrix:
 §D's pass criterion: case 3 is empty or has documented benign reasons.
 
 Run as a script, not via pytest:
-    python tests/test_signing/bit_flip_matrix_probe.py [bundle_v3|...|all]
+    python skein/tests/test_signing/bit_flip_matrix_probe.py [bundle_v3|...|all]
 """
 
 from __future__ import annotations
@@ -33,10 +33,11 @@ from pathlib import Path
 
 import logging
 
-# Resolve skein against the project root the probe lives in (parents[2]) before
-# the editable-install finder, so a worktree copy of this probe exercises the
-# worktree's skein rather than the main repo's installed package.
-_PROJECT_ROOT = Path(__file__).resolve().parents[2]
+# Resolve skein against the project root the probe lives in (parents[3]: the file
+# is at skein/tests/test_signing/) before the editable-install finder, so a
+# worktree copy of this probe exercises the worktree's skein rather than the main
+# repo's installed package.
+_PROJECT_ROOT = Path(__file__).resolve().parents[3]
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 

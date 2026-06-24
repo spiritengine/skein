@@ -5,7 +5,7 @@ Goal: cross-implementation portability. A bundle that sigstore-python verifies
 clean must verify clean through SKEIN.signing. A bundle sigstore-python rejects
 must be rejected by SKEIN.signing with the appropriate status.
 
-Corpus expected at tests/conformance/corpus/ — vendored from sigstore-python's
+Corpus expected at skein/tests/conformance/corpus/ — vendored from sigstore-python's
 test/assets/ (MIT-licensed). Tests skip cleanly when a specific corpus file is
 absent so phase 3 implementer can iterate.
 
@@ -13,7 +13,7 @@ Note on staging vs production: corpus bundles are signed against staging
 Sigstore. The phase-3 implementer must support a staging trust root override
 for these tests (env var SIGSTORE_TUF_CACHE_DIR or a Verifier.staging path).
 
-See tests/conformance/CORPUS.md for the corpus-to-test mapping.
+See skein/tests/conformance/CORPUS.md for the corpus-to-test mapping.
 """
 
 from __future__ import annotations
@@ -38,7 +38,7 @@ pytestmark = pytest.mark.skipif(
 # Tests that need the staging TUF root. Phase-3 must support staging mode.
 #
 # Footgun: this file applies @conformance_staging at FUNCTION level (no class
-# wrapper), unlike tests/conformance/test_signing_conformance.py which marks at
+# wrapper), unlike skein/tests/conformance/test_signing_conformance.py which marks at
 # CLASS level. An undecorated function that drives a staging-signed corpus
 # through signing.verify() silently runs the production verifier and fails the
 # staging cert chain → CERT_INVALID. Behind a loose pin (`!= VERIFIED` or a

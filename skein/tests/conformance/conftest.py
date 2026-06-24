@@ -87,8 +87,8 @@ def _conformance_staging_verifier(request, monkeypatch):
     is the single patch target the implementation exposes for exactly this
     (see its docstring, which names this fixture by name).
 
-    This mirrors the autouse fixture in tests/test_signing/conftest.py:
-    that fixture is directory-scoped to tests/test_signing/ and does NOT
+    This mirrors the autouse fixture in skein/tests/test_signing/conftest.py:
+    that fixture is directory-scoped to skein/tests/test_signing/ and does NOT
     apply to this sibling directory, which is why the cross-impl corpus
     suite had no staging redirect at 917ed47. Verifier.staging(offline=True)
     uses the staging TUF root baked into sigstore-python — no network, no

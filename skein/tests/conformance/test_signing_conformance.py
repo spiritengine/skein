@@ -806,7 +806,7 @@ class TestPortabilityRoundTrip:
         Mock strategy for CI: provide a pre-acquired OIDC JWT via env var
         SKEIN_TEST_OIDC_TOKEN. When present, skip the browser OIDC flow.
 
-        Enable: SKEIN_TEST_OIDC=1 pytest tests/conformance/ -m conformance_staging -k round_trip
+        Enable: SKEIN_TEST_OIDC=1 pytest skein/tests/conformance/ -m conformance_staging -k round_trip
         """
         import os
         from sigstore.errors import VerificationError

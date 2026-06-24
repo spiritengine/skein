@@ -685,7 +685,7 @@ def _extract_rs(bundle_json: str) -> tuple[int, int]:
 # K-A9 onto this path (finding-20260520-16nx).
 #
 # Run it with:
-#   pytest tests/test_signing/test_sign.py -s --run-interactive \
+#   pytest skein/tests/test_signing/test_sign.py -s --run-interactive \
 #       -k nonce_not_reused_interactive
 # (-s is recommended so the browser-prompt diagnostics aren't captured.)
 #
