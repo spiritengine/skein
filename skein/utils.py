@@ -1,35 +1,26 @@
-"""
-SKEIN utility functions.
+"""Utility helpers — the subset of the legacy ``skein.utils`` the new package uses.
+
+Absorbed verbatim from legacy ``skein/utils.py`` (A0, making ``skein``
+self-contained so legacy can be deleted at cutover). Only the two functions the
+new package imports are carried — ``generate_yield_id`` (chain sack ids) and
+``generate_agent_name`` (roster names) — plus the four private helpers
+``generate_agent_name`` depends on. The legacy-store helpers (status/assignment
+enrichment over a json_store) are deliberately NOT carried: they speak the legacy
+storage API, which the content-hash model does not have. ``get_word_pair`` rides
+the sibling :mod:`skein.words` (also copied verbatim).
+
+These ids/names are NOT canonical or signed material (sack ids are sidecar; agent
+names are slugs), so the bar here is behavioral fidelity, not byte-identity — but
+the bodies are carried verbatim regardless.
 """
 
+import json
 import random
 import string
-import re
 import subprocess
-import json
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import List, Set, Optional
-
-
-def generate_folio_id(folio_type: str) -> str:
-    """
-    Generate folio ID with format: {type}-{YYYYMMDD}-{4char}
-    Example: issue-20251106-a7b3
-    """
-    date_str = datetime.now(timezone.utc).strftime("%Y%m%d")
-    random_suffix = "".join(random.choices(string.ascii_lowercase + string.digits, k=4))
-    return f"{folio_type}-{date_str}-{random_suffix}"
-
-
-def generate_thread_id() -> str:
-    """
-    Generate thread ID with format: thread-{YYYYMMDD}-{4char}
-    Example: thread-20251107-p8q2
-    """
-    date_str = datetime.now(timezone.utc).strftime("%Y%m%d")
-    random_suffix = "".join(random.choices(string.ascii_lowercase + string.digits, k=4))
-    return f"thread-{date_str}-{random_suffix}"
+from typing import Optional, Set
 
 
 def generate_yield_id() -> str:
@@ -40,176 +31,6 @@ def generate_yield_id() -> str:
     date_str = datetime.now(timezone.utc).strftime("%Y%m%d")
     random_suffix = "".join(random.choices(string.ascii_lowercase + string.digits, k=4))
     return f"sack-{date_str}-{random_suffix}"
-
-
-def parse_mentions(content: str) -> Set[str]:
-    """
-    Parse @mentions from content.
-
-    Recognizes patterns like:
-    - @agent-id (agent mentions)
-    - @issue-123 (issue mentions)
-    - @brief-456 (brief mentions)
-    - @notion-789 (notion mentions)
-    - @finding-abc (finding mentions)
-    - @plan-xyz (plan mentions)
-    - @summary-123 (summary mentions)
-    - @friction-456 (friction mentions)
-
-    Returns:
-        Set of unique resource IDs mentioned
-    """
-    if not content:
-        return set()
-
-    # Pattern matches @word-word-... allowing alphanumeric and hyphens
-    # Case-insensitive matching
-    pattern = r"@([a-z0-9][a-z0-9\-]+)"
-    matches = re.findall(pattern, content.lower())
-
-    # Filter to valid resource ID patterns (must have at least one hyphen)
-    valid_mentions = set()
-    for match in matches:
-        if "-" in match:
-            valid_mentions.add(match)
-
-    return valid_mentions
-
-
-def get_current_status(folio_id: str, json_store) -> Optional[str]:
-    """Get current status of a folio from the most recent status thread."""
-    status_threads = json_store.get_threads(to_id=folio_id, type="status")
-    if not status_threads:
-        return None
-    status_threads.sort(key=lambda t: t.created_at, reverse=True)
-    return status_threads[0].content
-
-
-def get_current_assignment(folio_id: str, json_store) -> Optional[str]:
-    """Get current assignment of a folio from the most recent assignment thread."""
-    assignment_threads = json_store.get_threads(from_id=folio_id, type="assignment")
-    if not assignment_threads:
-        return None
-    assignment_threads.sort(key=lambda t: t.created_at, reverse=True)
-    return assignment_threads[0].to_id
-
-
-def enrich_folios_with_status(folios: List, store) -> None:
-    """Batch-enrich folios with status and assignment from threads.
-
-    Uses batch queries instead of N+1 individual queries.
-    """
-    if not folios:
-        return
-    folio_ids = [f.folio_id for f in folios]
-    statuses = store.get_latest_statuses(folio_ids)
-    assignments = store.get_latest_assignments(folio_ids)
-    for folio in folios:
-        folio.status = statuses.get(folio.folio_id) or folio.status or "open"
-        folio.assigned_to = assignments.get(folio.folio_id) or folio.assigned_to
-
-
-def format_relative_time(dt: datetime) -> str:
-    """
-    Format a datetime as a human-readable relative time string.
-
-    Examples:
-        - just now
-        - 2m ago
-        - 1h ago
-        - 5h ago
-        - 1d ago
-        - 3d ago
-
-    Args:
-        dt: The datetime to format (can be timezone-aware or naive)
-
-    Returns:
-        Human-readable relative time string
-    """
-    from datetime import timezone
-
-    now = datetime.now(timezone.utc)
-
-    # Make dt timezone-aware if needed (assume UTC for naive)
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-
-    delta = now - dt
-    total_seconds = delta.total_seconds()
-
-    if total_seconds < 0:
-        return "just now"  # Future dates show as "just now"
-
-    if total_seconds < 60:
-        return "just now"
-
-    minutes = int(total_seconds // 60)
-    if minutes < 60:
-        return f"{minutes}m ago"
-
-    hours = int(total_seconds // 3600)
-    if hours < 24:
-        return f"{hours}h ago"
-
-    days = int(total_seconds // 86400)
-    return f"{days}d ago"
-
-
-def parse_relative_time(time_str: str) -> datetime:
-    """
-    Parse relative time strings like '1day', '2hours', '30min' to datetime.
-
-    Supports:
-    - '1day', '2days' -> X days ago
-    - '1hour', '2hours' -> X hours ago
-    - '30min', '45minutes' -> X minutes ago
-    - ISO format strings (passthrough)
-
-    Returns:
-        datetime object representing the time in the past (timezone-aware UTC)
-
-    Raises:
-        ValueError: If time string format is invalid
-    """
-    from datetime import timedelta, timezone
-
-    time_str = time_str.strip().lower()
-
-    # Try ISO format first
-    try:
-        dt = datetime.fromisoformat(time_str)
-        # Ensure timezone-aware (assume UTC if naive)
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        return dt
-    except ValueError:
-        pass
-
-    # Parse relative time
-    match = re.match(r"^(\d+)(day|hour|min|minute)s?$", time_str)
-    if not match:
-        raise ValueError(
-            f"Invalid time format: '{time_str}'. Use '1day', '2hours', '30min', or ISO format"
-        )
-
-    amount = int(match.group(1))
-    unit = match.group(2)
-
-    if unit == "day":
-        delta = timedelta(days=amount)
-    elif unit == "hour":
-        delta = timedelta(hours=amount)
-    elif unit in ("min", "minute"):
-        delta = timedelta(minutes=amount)
-    else:
-        raise ValueError(f"Unknown time unit: '{unit}'")
-
-    # Return timezone-aware datetime in UTC
-    return datetime.now(timezone.utc) - delta
-
-
-# Agent Name Generation
 
 
 def generate_agent_name(

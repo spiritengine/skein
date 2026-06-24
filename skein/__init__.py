@@ -1,9 +1,30 @@
-"""
-SKEIN: Structured Knowledge Exchange & Integration Nexus
+"""skein: content-hash-native parallel station.
 
-Agent collaboration infrastructure for async coordination.
+Slice 1 — the content-hash-native store. Folio identity is the content hash of
+five canonical fields (type, title, content, created_at, created_by); there is
+no human folio_id. See brief-20260529-i6fy.
 """
 
-__version__ = "0.2.0"
-__author__ = "Patrick"
-__description__ = "Asynchronous collaboration infrastructure for AI agents"
+from .bridge import (
+    ImportReport,
+    classify_endpoint,
+    import_project,
+    open_legacy,
+)
+from .identity import (
+    compute_folio_hash,
+    compute_thread_hash,
+    normalize_created_at,
+)
+from .store import SkeinStore
+
+__all__ = [
+    "SkeinStore",
+    "compute_folio_hash",
+    "compute_thread_hash",
+    "normalize_created_at",
+    "ImportReport",
+    "classify_endpoint",
+    "import_project",
+    "open_legacy",
+]

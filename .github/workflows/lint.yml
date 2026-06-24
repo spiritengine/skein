@@ -40,4 +40,4 @@ jobs:
 
       - name: Type check with mypy
         run: |
-          mypy skein/ client/ --ignore-missing-imports --no-error-summary || true
+          mypy skein/ --exclude '^skein/tests/' --ignore-missing-imports --no-error-summary || true

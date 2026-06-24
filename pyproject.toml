@@ -28,6 +28,9 @@ dependencies = [
     "requests>=2.32.0",
     "GitPython>=3.1.0",
     "jinja2>=3.0.0",
+    # Imported directly by skein/web/app.py to render folio bodies; declared here
+    # so `pip install interskein` provides it rather than relying on a transitive.
+    "markdown-it-py>=3.0.0",
     # Pinned to the reviewed 0.3.x canon line (brief-20260603-n22c: exact-decimal
     # integers, MAX_INT_DIGITS/MAX_DEPTH, Cn-rejection). A 0.4 could change the
     # canonical bytes, so it stays out until a deliberate re-review + a regen of
@@ -58,9 +61,8 @@ dev = [
 ]
 
 [project.scripts]
-skein = "client.cli:main"
-interskein = "skein_next.cli:main"
-mesh = "skein_next.mesh.cli:main"
+skein = "skein.cli:main"
+mesh = "skein.mesh.cli:main"
 
 [project.urls]
 Homepage = "https://github.com/spiritengine/skein"
@@ -73,14 +75,13 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["skein*", "client*"]
+include = ["skein*"]
 
 [tool.setuptools.package-data]
-skein = ["templates/*.md"]
-skein_next = ["web/templates/*.html", "web/static/*.css", "web/static/themes/*.css"]
+skein = ["web/templates/*.html", "web/static/*.css", "web/static/themes/*.css"]
 
 [tool.pytest.ini_options]
-testpaths = ["tests", "skein_next/tests"]
+testpaths = ["skein/tests"]
 asyncio_mode = "auto"
 python_files = ["test_*.py"]
 python_classes = ["Test*"]
@@ -134,7 +135,7 @@ extend-exclude = ["docs"]
 [tool.ruff.lint.per-file-ignores]
 # The signing bit-flip probe deliberately imports after an explanatory setup
 # block (E402) — the staging is intentional, not an accident.
-"tests/test_signing/bit_flip_matrix_probe.py" = ["E402"]
+"skein/tests/test_signing/bit_flip_matrix_probe.py" = ["E402"]
 
 [tool.mypy]
 python_version = "3.10"
@@ -148,8 +149,8 @@ exclude = [
 ]
 
 [tool.coverage.run]
-source = ["skein", "client"]
-omit = ["tests/*", "*.pyc"]
+source = ["skein"]
+omit = ["skein/tests/*", "*.pyc"]
 
 [tool.coverage.report]
 exclude_lines = [

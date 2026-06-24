@@ -17,7 +17,8 @@ IPv6 zone IDs) and skein:finding-20260529-ztp7 (the ten review pins). The
 grammar is SKEIN/federation-specific (type words, stations, aliases), so it
 lives here rather than in knurl. skein:finding-20260529-ahbi records that call.
 
-The old single-colon `project:folio` scheme lives in `skein.address_legacy`.
+The old single-colon `project:folio` scheme has been retired; its parser
+(`skein.address_legacy`) was removed at the Stage 4 cutover.
 
 The layering, per the pins:
   - tokenize() owns pure structure: fragment-first split, `::` split with

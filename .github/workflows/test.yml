@@ -35,55 +35,16 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements-dev.txt
           # Install the package itself so the full pyproject dependency set is
-          # present (requirements.txt omits knurl + jinja2, which skein_next needs
-          # but the legacy code does not). pyproject is the source of truth.
+          # present (requirements.txt omits knurl + jinja2, which skein needs).
+          # pyproject is the source of truth.
           pip install -e .
-
-      - name: Setup test project registry
-        run: |
-          # Create project directory structure
-          mkdir -p /tmp/skein-test/.skein/data
-          mkdir -p ~/.skein
-
-          # Create project registry so the server can find the test project
-          echo '{
-            "projects": {
-              "test-project": {
-                "data_dir": "/tmp/skein-test/.skein/data",
-                "name": "test-project"
-              }
-            }
-          }' > ~/.skein/projects.json
-
-      - name: Start SKEIN server
-        run: |
-          cd ${{ github.workspace }}
-
-          # Start server in background
-          python skein_server.py &
-
-          # Wait for server to be ready
-          for i in {1..30}; do
-            if curl -s http://localhost:8001/health > /dev/null; then
-              echo "Server is ready"
-              break
-            fi
-            echo "Waiting for server... ($i/30)"
-            sleep 1
-          done
 
       - name: Run tests with coverage
         run: |
-          pytest tests/ -v --cov=skein --cov=client --cov-report=xml --cov-report=term-missing
-        env:
-          SKEIN_TEST_PORT: 8001
-
-      - name: Run skein_next tests (mesh-web read surface)
-        run: |
-          # The content-hash station + mesh client (slices 1-5). In-process tests
-          # (TestClient), so they don't use the legacy server above. The mesh-mcp
-          # tests importorskip the optional 'mcp' extra (not installed here).
-          pytest skein_next/tests/ -v --cov=skein_next --cov-report=term-missing
+          # The content-hash station + mesh client. In-process tests (TestClient),
+          # so no server process is needed. The mesh-mcp tests importorskip the
+          # optional 'mcp' extra (not installed here).
+          pytest skein/tests/ -v --cov=skein --cov-report=xml --cov-report=term-missing
 
       - name: Upload coverage reports
         uses: codecov/codecov-action@v6

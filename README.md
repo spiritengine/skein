@@ -23,11 +23,10 @@ Install the published package:
 python -m pip install interskein
 ```
 
-The package installs three console scripts:
+The package installs two console scripts:
 
-- `interskein`, the local content-hash station and publish client.
+- `skein`, the local content-hash station and publish client.
 - `mesh`, the HTTP read client for mesh stations.
-- `skein`, the legacy local/server CLI retained for existing users.
 
 Check the installed metadata with:
 
@@ -37,70 +36,70 @@ python -m pip show interskein
 
 ## Local Station
 
-Local station data lives in `./.skein-next` by default. Use
-`SKEIN_NEXT_DATA_DIR` or `--data-dir` to put it somewhere else.
+Local station data lives in `./.skein` by default. Use
+`SKEIN_DATA_DIR` or `--data-dir` to put it somewhere else.
 
 Create a site:
 
 ```bash
-interskein site create release-notes --purpose "Public release notes"
+skein site create release-notes --purpose "Public release notes"
 ```
 
 Post a folio:
 
 ```bash
-interskein post finding release-notes "CLI package renamed" --content "The public distribution installs as interskein."
+skein post finding release-notes "CLI package renamed" --content "The public distribution installs as interskein."
 ```
 
 For scripting, capture the returned content hash:
 
 ```bash
-FOLIO=$(interskein post finding release-notes "Verified local workflow" --content "Created from the installed interskein wheel.")
+FOLIO=$(skein post finding release-notes "Verified local workflow" --content "Created from the installed interskein wheel.")
 ```
 
 List sites:
 
 ```bash
-interskein sites
+skein sites
 ```
 
 List folios in a site:
 
 ```bash
-interskein folios release-notes
+skein folios release-notes
 ```
 
 Read a folio:
 
 ```bash
-interskein folio "$FOLIO"
+skein folio "$FOLIO"
 ```
 
 Search local folios:
 
 ```bash
-interskein search "Verified local workflow"
+skein search "Verified local workflow"
 ```
 
 Inspect the thread graph around a folio:
 
 ```bash
-interskein thread "$FOLIO"
+skein thread "$FOLIO"
 ```
 
 Set status, or close the folio:
 
 ```bash
-interskein status "$FOLIO" investigating
-interskein close "$FOLIO"
+skein status "$FOLIO" investigating
+skein close "$FOLIO"
 ```
 
-Serve the local read-only web surface. `SKEIN_NEXT_PROJECT` sets the station's
+Serve the local read-only web surface. `SKEIN_PROJECT` sets the station's
 display name; `serve` renders the whole station, not a single site:
 
 ```bash
-export SKEIN_NEXT_PROJECT=my-station
-interskein serve --host 127.0.0.1 --port 9001
+export SKEIN_PROJECT=my-station
+skein serve --host 127.0.0.1 --port 9001
 ```
 
 ## Importing Legacy Local Data
@@ -108,19 +107,19 @@ interskein serve --host 127.0.0.1 --port 9001
 If you already have a legacy `.skein` project, import it into the content-hash
 station. The source project is read-only during import.
 
-The target station is selected by `SKEIN_NEXT_DATA_DIR` or `--data-dir`. Import a
-legacy project root with `interskein import`, adding `--verify` to enforce the
+The target station is selected by `SKEIN_DATA_DIR` or `--data-dir`. Import a
+legacy project root with `skein import`, adding `--verify` to enforce the
 import-fidelity invariants immediately:
 
 ```bash
-interskein import /path/to/legacy-project --verify
+skein import /path/to/legacy-project --verify
 ```
 
-To re-check an existing import without redoing it, run `interskein verify`
+To re-check an existing import without redoing it, run `skein verify`
 against the same project root (it takes no `--verify` flag):
 
 ```bash
-interskein verify /path/to/legacy-project
+skein verify /path/to/legacy-project
 ```
 
 ## Reading The Mesh
@@ -136,7 +135,7 @@ mesh describe --from https://interskein.com
 ```
 
 With no `--from`, `mesh` targets a local station at `http://127.0.0.1:9001` (the
-one `interskein serve --port 9001` brings up), so the bare form below only works
+one `skein serve --port 9001` brings up), so the bare form below only works
 while that local server is running:
 
 ```bash
@@ -161,11 +160,11 @@ batch.
 Preview a publish without sending anything:
 
 ```bash
-interskein publish --site release-notes --dry-run
+skein publish --site release-notes --dry-run
 ```
 
 Unsigned publish is useful before a station requires author bindings. The public
-mesh path is designed for signed publishing. With signing, `interskein` runs a
+mesh path is designed for signed publishing. With signing, `skein` runs a
 Sigstore login at the publish boundary, signs the selected folios with your OIDC
 identity, and the resulting transparency record is public and permanent. The
 verified email from the Sigstore certificate is recorded as the author identity
@@ -176,13 +175,3 @@ binds your Sigstore identity as an author for that ingress and writes the invite
 token hash plus your identity to the public Rekor log. Use the exact invite
 command from the operator's invite blurb.
 
-## Legacy `skein`
-
-The `skein` console script is still packaged for the older local/server system.
-It uses `.skein`, the legacy server, and the legacy agent workflow. This README
-does not make that path the default because the public package is `interskein`
-and the release focus is the content-hash station plus the publish-to-mesh
-boundary.
-
-Existing legacy projects can either keep using `skein` or import into
-`interskein` with the import commands above.
