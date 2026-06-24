@@ -2,7 +2,7 @@
 # skein-dev - Run SKEIN CLI from the local worktree code
 #
 # This wrapper enables testing CLI changes in shard worktrees without
-# needing to reinstall the package. It uses `python -m client.cli` which
+# needing to reinstall the package. It uses `python -m skein` which
 # imports from the current directory rather than the system-installed package.
 #
 # Usage:
@@ -26,7 +26,7 @@ else
     # Walk up to find worktree root
     dir="$(pwd)"
     while [[ "$dir" != "/" ]]; do
-        if [[ -f "$dir/pyproject.toml" ]] && [[ -d "$dir/client" ]]; then
+        if [[ -f "$dir/pyproject.toml" ]] && [[ -d "$dir/skein" ]]; then
             WORKTREE_ROOT="$dir"
             break
         fi
@@ -34,11 +34,11 @@ else
     done
 
     if [[ -z "$WORKTREE_ROOT" ]]; then
-        echo "Error: Could not find SKEIN worktree root (no pyproject.toml with client/ directory)" >&2
+        echo "Error: Could not find SKEIN worktree root (no pyproject.toml with skein/ directory)" >&2
         exit 1
     fi
 fi
 
 # Run the CLI module from the worktree, ensuring local code takes precedence
 cd "$WORKTREE_ROOT"
-exec python -m client.cli "$@"
+exec python -m skein "$@"

@@ -1,8 +1,8 @@
 # interskein web instance — the content-hash station read surface (port 9001).
 #
-#   INTERSKEIN_CORPUS=/path/to/project/.skein-next docker compose up -d --build
+#   INTERSKEIN_CORPUS=/path/to/project/.skein docker compose up -d --build
 #
-# INTERSKEIN_CORPUS points at a project's .skein-next store; it is mounted
+# INTERSKEIN_CORPUS points at a project's .skein store; it is mounted
 # read-only (v0 is read-only — the container never writes the corpus). The
 # reverse proxy terminates TLS for darkive.org / interskein.com and forwards
 # to 9001.
@@ -19,22 +19,22 @@ services:
       # instance publicly regardless of the firewall.
       - "127.0.0.1:9001:9001"
     environment:
-      - SKEIN_NEXT_DATA_DIR=/data
+      - SKEIN_DATA_DIR=/data
       # The station name (page <title>/h1) bootstrap. A station MUST be named:
-      # with no stationfile (.skein-next/stationfile.json) and this var unset, the
+      # with no stationfile (.skein/stationfile.json) and this var unset, the
       # station refuses to start (slice 3 retired the old derive-from-parent
       # fallback). Once a stationfile with a "name" exists it wins over this var,
       # so a rename rides the light deploy path; this stays a harmless fallback.
-      - SKEIN_NEXT_PROJECT=interskein
+      - SKEIN_PROJECT=interskein
       # Public origin for the absolute .md fetch URLs the agent-markdown opener and
       # the "For your agent" box advertise. Set explicitly because nginx fronts the
       # instance on 127.0.0.1:9001 and the request origin would otherwise leak the
       # internal host; a configured value is also immune to Host-header injection.
       # interskein.com is the canonical name (the corpus is content-addressed, so
       # the link resolves from darkive.org too).
-      - SKEIN_NEXT_BASE_URL=https://interskein.com
+      - SKEIN_BASE_URL=https://interskein.com
     volumes:
-      - "${INTERSKEIN_CORPUS:?set INTERSKEIN_CORPUS to a project's .skein-next dir}:/data:ro"
+      - "${INTERSKEIN_CORPUS:?set INTERSKEIN_CORPUS to a project's .skein dir}:/data:ro"
     restart: unless-stopped
     # No curl in the slim image; probe with the venv's python.
     healthcheck:

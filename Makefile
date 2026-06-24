@@ -55,11 +55,11 @@ stop:  ## Stop SKEIN server
 
 test:  ## Run SKEIN tests
 	@echo "🧪 Running SKEIN tests..."
-	@pytest tests/ -v 2>/dev/null || echo "No tests found"
+	@pytest skein/tests/ -v 2>/dev/null || echo "No tests found"
 
 cli-dev:  ## Run CLI from local worktree code (for testing shard changes)
 	@echo "🔧 Running local CLI..."
-	@python -m client.cli $(ARGS)
+	@python -m skein $(ARGS)
 
 health:  ## Check SKEIN server health
 	@echo "🏥 Checking SKEIN health..."
@@ -83,21 +83,21 @@ dev-stop:  ## Stop dev mode and restart systemctl service
 
 lint:  ## Run linters (black, isort, flake8, mypy)
 	@echo "🔍 Running linters..."
-	@black --check skein/ client/ tests/ skein_server.py || true
-	@isort --check-only skein/ client/ tests/ skein_server.py || true
-	@flake8 skein/ client/ tests/ skein_server.py --max-line-length=100 || true
-	@mypy skein/ client/ --ignore-missing-imports || true
+	@black --check skein/ || true
+	@isort --check-only skein/ || true
+	@flake8 skein/ --max-line-length=100 || true
+	@mypy skein/ --ignore-missing-imports || true
 
 format:  ## Format code with black and isort
 	@echo "✨ Formatting code..."
-	@black skein/ client/ tests/ skein_server.py
-	@isort skein/ client/ tests/ skein_server.py
+	@black skein/
+	@isort skein/
 
 docker-build:  ## Build the interskein web instance image
 	@echo "🐳 Building interskein image..."
 	@docker build -t interskein:latest .
 
-docker-up:  ## Start the interskein instance (set INTERSKEIN_CORPUS=/path/to/.skein-next)
+docker-up:  ## Start the interskein instance (set INTERSKEIN_CORPUS=/path/to/.skein)
 	@echo "🐳 Starting interskein (corpus: $(INTERSKEIN_CORPUS))..."
 	@docker compose up -d --build
 

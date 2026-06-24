@@ -18,9 +18,7 @@ WORKDIR /src
 # Only what's needed to install the package; .dockerignore keeps the context
 # lean (no .git, no stores, no worktrees).
 COPY pyproject.toml ./
-COPY client ./client
 COPY skein ./skein
-COPY skein_next ./skein_next
 
 # knurl resolves from PyPI; the rest are manylinux wheels on glibc.
 RUN pip install .
@@ -31,7 +29,7 @@ FROM python:3.12-slim AS runtime
 ENV PATH="/opt/venv/bin:$PATH" \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
-    SKEIN_NEXT_DATA_DIR=/data
+    SKEIN_DATA_DIR=/data
 
 COPY --from=builder /opt/venv /opt/venv
 
@@ -42,9 +40,9 @@ USER interskein
 EXPOSE 9001
 
 # The station data dir is a read-only volume mount at /data (a project's
-# .skein-next). v0 is read-only, so the container never writes the corpus.
+# .skein). v0 is read-only, so the container never writes the corpus.
 VOLUME ["/data"]
 
 # Binds plainly on 9001; the reverse proxy terminates TLS for darkive.org /
 # interskein.com and forwards here.
-CMD ["interskein", "--data-dir", "/data", "serve", "--host", "0.0.0.0", "--port", "9001"]
+CMD ["skein", "--data-dir", "/data", "serve", "--host", "0.0.0.0", "--port", "9001"]

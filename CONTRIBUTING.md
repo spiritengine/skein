@@ -35,7 +35,7 @@ When working in a shard worktree (e.g., via Spindle's `permission="shard"`), the
 
 **Option 1: Use the skein-dev wrapper**
 ```bash
-./skein-dev --help                    # Uses worktree's client/cli.py
+./skein-dev --help                    # Uses worktree's skein/cli.py
 ./skein-dev folio issue-123          # Same commands as skein
 ```
 
@@ -47,8 +47,8 @@ make cli-dev ARGS="folio issue-123"
 
 **Option 3: Run Python module directly**
 ```bash
-python -m client.cli --help
-python -m client.cli folio issue-123
+python -m skein --help
+python -m skein folio issue-123
 ```
 
 All three methods import from the current directory, ensuring your worktree's code is used instead of the installed package.
