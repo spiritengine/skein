@@ -1,8 +1,7 @@
 """Daily-driver CLI for the content-hash station (Slice 3).
 
 A direct, local CLI over :class:`skein.station.Station` — no server, no HTTP
-hop. It serves the daily verbs against the ``.skein/`` data dir, beside the
-legacy ``skein`` command which is never touched:
+hop. It serves the daily verbs against the ``.skein/`` data dir:
 
     post    create a folio in a site
     folio   read one folio
@@ -1291,7 +1290,8 @@ def account_invite_mint(
         f"your coding agent.\n\n"
         f"One-time invite token (expires {expires_iso}):\n  {token}\n\n"
         f"Your agent: follow the bootstrap pack at {origin_display}/onboarding to install "
-        f"the verified interskein CLI (verify the signed install spec FIRST), then redeem:\n\n"
+        f"the verified interskein package — it provides the skein CLI (verify the signed "
+        f"install spec FIRST), then redeem:\n\n"
         f"  skein redeem-invite {token} --to {origin_display} --login\n\n"
         f"Redeeming runs a Sigstore login and writes a record to the PUBLIC Rekor "
         f"transparency log; on a headless box, confirm before proceeding. After "

@@ -41,19 +41,19 @@ def seeded(tmp_path):
         st.store.save_thread(
             from_id=a, to_id="sha256::" + "f" * 64, type="cites", created_at="2026-01-05T00:00:00Z"
         )
-    store = SkeinNextStoreRO(data_dir)
+    store = SkeinStoreRO(data_dir)
     yield {"store": store.store, "a": a, "b": b}
     store.close()
 
 
-class SkeinNextStoreRO:
+class SkeinStoreRO:
     """A throwaway store handle. Writable so the signed-verdict tests can attach a
     bundle sidecar; envelope construction itself only ever reads."""
 
     def __init__(self, data_dir):
-        from skein.store import SkeinNextStore
+        from skein.store import SkeinStore
 
-        self.store = SkeinNextStore(data_dir, check_same_thread=False)
+        self.store = SkeinStore(data_dir, check_same_thread=False)
 
     def close(self):
         self.store.close()
@@ -191,7 +191,7 @@ def lineage_seeded(tmp_path):
         # A GENERIC (non-lineage) cross-reference out of C1, so the partition test
         # has something in the threads block that could (wrongly) cross over.
         st.store.save_thread(from_id=c1, to_id=c2, type="reference", created_at="2026-01-08T00:00:00Z")
-    store = SkeinNextStoreRO(data_dir)
+    store = SkeinStoreRO(data_dir)
     yield {"store": store.store, "r": r, "c1": c1, "c2": c2, "g": g}
     store.close()
 
@@ -267,7 +267,7 @@ def test_lineage_descendants_cycle_safe(tmp_path):
         y = st.post(type="finding", site="proj", title="Y", content="y", created_by="a", created_at="2026-02-02T00:00:00Z")
         st.store.save_thread(from_id=x, to_id=y, type="supersedes", created_at="2026-02-03T00:00:00Z")
         st.store.save_thread(from_id=y, to_id=x, type="supersedes", created_at="2026-02-04T00:00:00Z")
-    store = SkeinNextStoreRO(data_dir)
+    store = SkeinStoreRO(data_dir)
     try:
         env_x = env_mod.build_folio_envelope(store.store, x)
         desc = [d["address"] for d in env_x["asserted"]["descendants"]]
@@ -307,7 +307,7 @@ def test_lineage_descendants_cap_truncates_in_bfs_phase(tmp_path, monkeypatch):
         st.store.save_thread(from_id=g1, to_id=c1, type="supersedes", created_at="2026-04-08T00:00:00Z")
         st.store.save_thread(from_id=g2, to_id=c1, type="forks", created_at="2026-04-09T00:00:00Z")
     monkeypatch.setattr(env_mod, "_DESCENDANTS_MAX", 3)
-    store = SkeinNextStoreRO(data_dir)
+    store = SkeinStoreRO(data_dir)
     try:
         desc = env_mod.build_folio_envelope(store.store, r)["asserted"]["descendants"]
         assert len(desc) == 3  # 4 descendants exist; the 4th is dropped in the BFS phase
@@ -343,7 +343,7 @@ def test_lineage_multiple_parents_and_sibling_dedup(tmp_path):
         # SD is a co-child of BOTH parents -> must be deduped to a single sibling.
         st.store.save_thread(from_id=sd, to_id=p1, type="forks", created_at="2026-05-11T00:00:00Z")
         st.store.save_thread(from_id=sd, to_id=p2, type="supersedes", created_at="2026-05-12T00:00:00Z")
-    store = SkeinNextStoreRO(data_dir)
+    store = SkeinStoreRO(data_dir)
     try:
         lin = env_mod.build_folio_envelope(store.store, m)["asserted"]["lineage"]
         assert {p["address"] for p in lin["parents"]} == {p1, p2}  # both parents kept
@@ -363,7 +363,7 @@ def test_lineage_remote_parent_lists_but_does_not_crash(tmp_path):
         st.create_site("proj", purpose="p")
         child = st.post(type="finding", site="proj", title="Child", content="c", created_by="a", created_at="2026-03-01T00:00:00Z")
         st.store.save_thread(from_id=child, to_id=remote, type="supersedes", created_at="2026-03-02T00:00:00Z")
-    store = SkeinNextStoreRO(data_dir)
+    store = SkeinStoreRO(data_dir)
     try:
         lin = env_mod.build_folio_envelope(store.store, child)["asserted"]["lineage"]
         assert [p["address"] for p in lin["parents"]] == [remote]

@@ -26,7 +26,7 @@ from fastapi.testclient import TestClient
 
 from skein import envelope as env_mod
 from skein.station import Station
-from skein.store import SkeinNextStore
+from skein.store import SkeinStore
 from skein.web.app import ENV_DATA_DIR, ENV_PROJECT, create_app
 
 
@@ -49,7 +49,7 @@ def _seed_then_strip(data_dir, drop):
         st.create_site("s", purpose="p", created_by="t")
         h = st.post("finding", "s", "T", "body here", created_by="t")
     # A second connection (not the closed Station's) does the surgery.
-    surgeon = SkeinNextStore(data_dir)
+    surgeon = SkeinStore(data_dir)
     for table in drop:
         surgeon.conn.execute(f"DROP TABLE IF EXISTS {table}")
     surgeon.conn.commit()
@@ -60,7 +60,7 @@ def _seed_then_strip(data_dir, drop):
 def _assert_serves_unsigned(data_dir, h):
     """The read store must build the folio verdict + envelope WITHOUT raising, and
     the verdict must read UNSIGNED (no covering manifest resolvable)."""
-    ro = SkeinNextStore(data_dir, read_only=True)
+    ro = SkeinStore(data_dir, read_only=True)
     try:
         row = ro.get_folio(h)
         verdict, identity = env_mod.folio_verdict(ro, h, row)
@@ -176,18 +176,18 @@ def test_covered_folio_with_account_bindings_table_absent_degrades(tmp_path, mon
         lambda cb, b: MultiVerifyResult(
             results=[VerifyResult(status=VerifyStatus.VERIFIED, issuer=issuer, subject=subject)],
             overall=VerifyStatus.VERIFIED))
-    with SkeinNextStore(data_dir, read_only=True) as ro:
+    with SkeinStore(data_dir, read_only=True) as ro:
         signed, _ = env_mod.folio_verdict(ro, h, ro.get_folio(h))
     assert signed.startswith("SIGNED"), signed
 
     # Now strip ONLY account_bindings — the step-4 binding query hits a missing
     # table and must degrade to NOT VERIFIED, not raise.
-    surgeon = SkeinNextStore(data_dir)
+    surgeon = SkeinStore(data_dir)
     surgeon.conn.execute("DROP TABLE account_bindings")
     surgeon.conn.commit()
     surgeon.close()
 
-    with SkeinNextStore(data_dir, read_only=True) as ro:
+    with SkeinStore(data_dir, read_only=True) as ro:
         row = ro.get_folio(h)
         verdict, identity = env_mod.folio_verdict(ro, h, row)
         assert verdict == "NOT VERIFIED — unbound signer", verdict
@@ -214,7 +214,7 @@ def _open_rw_then_drop(data_dir, table):
     with Station(data_dir) as st:
         st.create_site("s", purpose="p", created_by="t")
         st.post("finding", "s", "T", "body here", created_by="t")
-    store = SkeinNextStore(data_dir)  # read_write: migration ran, table exists
+    store = SkeinStore(data_dir)  # read_write: migration ran, table exists
     assert store.read_only is False
     store.conn.execute(f"DROP TABLE {table}")
     store.conn.commit()
@@ -254,7 +254,7 @@ def test_read_only_store_account_bindings_absent_degrades(tmp_path):
     store.conn.execute("DROP TABLE constituent_attribution")
     store.conn.commit()
     store.close()  # both tables now absent on disk
-    with SkeinNextStore(tmp_path / ".skein", read_only=True) as ro:
+    with SkeinStore(tmp_path / ".skein", read_only=True) as ro:
         assert ro.read_only is True
         assert ro.get_binding("https://idp", "alice@example.com") is None
         assert ro.get_constituent_proof("blake3:" + "0" * 64) is None
@@ -268,10 +268,10 @@ def test_normal_migrated_corpus_unaffected_both_modes(tmp_path):
     with Station(data_dir) as st:
         st.create_site("s", purpose="p", created_by="t")
         st.store.add_binding(issuer, subject, role="author")
-    with SkeinNextStore(data_dir) as rw:  # read_write
+    with SkeinStore(data_dir) as rw:  # read_write
         assert rw.read_only is False
         assert rw.get_binding(issuer, subject).subject == subject
         assert rw.get_binding(issuer, "nobody@example.com") is None
-    with SkeinNextStore(data_dir, read_only=True) as ro:
+    with SkeinStore(data_dir, read_only=True) as ro:
         assert ro.get_binding(issuer, subject).subject == subject
         assert ro.get_binding(issuer, "nobody@example.com") is None

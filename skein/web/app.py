@@ -45,7 +45,7 @@ from .. import envelope as envelope_mod
 from .. import render as render_mod
 from ..resolve import ResolveError, resolve_to_hash
 from ..stationfile import StationConfig, StationfileError, load_station_config
-from ..store import SkeinNextStore, make_snippet
+from ..store import SkeinStore, make_snippet
 
 logger = logging.getLogger(__name__)
 
@@ -207,9 +207,9 @@ def build_token_css(config: StationConfig) -> str:
     )
 
 
-def get_store() -> Iterator[SkeinNextStore]:
+def get_store() -> Iterator[SkeinStore]:
     """Per-request read-only store with its own connection; closed at request end."""
-    store = SkeinNextStore(get_data_dir(), check_same_thread=False, read_only=True)
+    store = SkeinStore(get_data_dir(), check_same_thread=False, read_only=True)
     try:
         yield store
     finally:
@@ -474,7 +474,7 @@ def create_app() -> FastAPI:
         )
 
     @app.get("/")
-    def index(request: Request, store: SkeinNextStore = Depends(get_store)):
+    def index(request: Request, store: SkeinStore = Depends(get_store)):
         env = _catalog_envelope(store)
         repr_ = _wants_machine(request, None)
         if repr_ is None:
@@ -482,11 +482,11 @@ def create_app() -> FastAPI:
         return _collection_response(request, env, repr_, title=f"Catalog — {config.name}")
 
     @app.get("/.json")
-    def index_json(request: Request, store: SkeinNextStore = Depends(get_store)):
+    def index_json(request: Request, store: SkeinStore = Depends(get_store)):
         return _collection_response(request, _catalog_envelope(store), "json", title="Catalog")
 
     @app.get("/.md")
-    def index_md(request: Request, store: SkeinNextStore = Depends(get_store)):
+    def index_md(request: Request, store: SkeinStore = Depends(get_store)):
         return _collection_response(
             request, _catalog_envelope(store), "markdown", title=f"Catalog — {config.name}"
         )
@@ -524,7 +524,7 @@ def create_app() -> FastAPI:
         request: Request,
         site_id: str,
         type: Optional[str] = None,
-        store: SkeinNextStore = Depends(get_store),
+        store: SkeinStore = Depends(get_store),
     ):
         slug, suffix = split_representation(site_id)
         repr_ = _wants_machine(request, suffix)
@@ -583,7 +583,7 @@ def create_app() -> FastAPI:
     def folio_detail(
         request: Request,
         ref: str,
-        store: SkeinNextStore = Depends(get_store),
+        store: SkeinStore = Depends(get_store),
     ):
         # The signature bundle sub-resource (the dead-end-free provenance link).
         if ref.endswith("/bundle"):
@@ -635,7 +635,7 @@ def create_app() -> FastAPI:
         return JSONResponse(env, status_code=status, headers={"Cache-Control": "no-store"})
 
     @app.post("/resolve")
-    async def resolve_batch(request: Request, store: SkeinNextStore = Depends(get_store)):
+    async def resolve_batch(request: Request, store: SkeinStore = Depends(get_store)):
         """Resolve a list of addresses to an array of envelopes, in request order.
 
         The batch *wrapper* is derived (a query); each *element* is an independent
@@ -709,7 +709,7 @@ def create_app() -> FastAPI:
     def search(
         request: Request,
         q: str = Query("", description="Search query"),
-        store: SkeinNextStore = Depends(get_store),
+        store: SkeinStore = Depends(get_store),
     ):
         env = _search_envelope(store, q)
         repr_ = _wants_machine(request, None)
@@ -721,7 +721,7 @@ def create_app() -> FastAPI:
     def search_json(
         request: Request,
         q: str = Query("", description="Search query"),
-        store: SkeinNextStore = Depends(get_store),
+        store: SkeinStore = Depends(get_store),
     ):
         return _collection_response(request, _search_envelope(store, q), "json", title=f"Search — {q}")
 
@@ -729,7 +729,7 @@ def create_app() -> FastAPI:
     def search_md(
         request: Request,
         q: str = Query("", description="Search query"),
-        store: SkeinNextStore = Depends(get_store),
+        store: SkeinStore = Depends(get_store),
     ):
         return _collection_response(request, _search_envelope(store, q), "markdown", title=f"Search — {q}")
 
@@ -773,15 +773,15 @@ def create_app() -> FastAPI:
         return JSONResponse(doc, headers={"Cache-Control": "no-cache", "Vary": "Accept"})
 
     @app.get("/.well-known/skein")
-    def well_known(request: Request, store: SkeinNextStore = Depends(get_store)):
+    def well_known(request: Request, store: SkeinStore = Depends(get_store)):
         return _describe_response(request, store, None)
 
     @app.get("/.well-known/skein.json")
-    def well_known_json(request: Request, store: SkeinNextStore = Depends(get_store)):
+    def well_known_json(request: Request, store: SkeinStore = Depends(get_store)):
         return _describe_response(request, store, "json")
 
     @app.get("/.well-known/skein.md")
-    def well_known_md(request: Request, store: SkeinNextStore = Depends(get_store)):
+    def well_known_md(request: Request, store: SkeinStore = Depends(get_store)):
         return _describe_response(request, store, "md")
 
     return app

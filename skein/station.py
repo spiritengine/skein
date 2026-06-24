@@ -30,7 +30,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 from skein import address
 
 from .agent import parse_agent_meta, render_agent_content
-from .store import SkeinNextStore
+from .store import SkeinStore
 
 # A bare ``sha256::<hex>`` short-hash reference, 8..63 hex digits. The hardened
 # `::` grammar rejects a *bare* short hash (it has no station to disambiguate
@@ -269,7 +269,7 @@ class Station:
         data_dir: Optional[Union[str, Path]] = None,
         check_same_thread: bool = True,
     ):
-        self.store = SkeinNextStore(data_dir, check_same_thread=check_same_thread)
+        self.store = SkeinStore(data_dir, check_same_thread=check_same_thread)
 
     def close(self) -> None:
         self.store.close()
@@ -534,7 +534,7 @@ class Station:
         last-write-wins ``set_slug`` would leave the loser attached to an orphaned
         site the slug no longer names (finding: concurrent first-register splits
         the roster). So mint + bind run under one ``transaction()`` (``BEGIN
-        IMMEDIATE``) with the guarded :meth:`~SkeinNextStore._register_slug_locked`
+        IMMEDIATE``) with the guarded :meth:`~SkeinStore._register_slug_locked`
         CAS, re-resolving the slug under the write lock: the first writer binds its
         folio; the second sees the bound slug and adopts that one site, minting no
         rival folio. The fast path (slug already a site) skips the lock entirely.

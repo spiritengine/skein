@@ -29,7 +29,7 @@ import pytest
 from skein import wire
 from skein.ingress import ingest
 from skein.station import Station
-from skein.store import SkeinNextStore
+from skein.store import SkeinStore
 
 
 def _tables(conn) -> set:
@@ -127,7 +127,7 @@ def test_read_only_open_unaffected_by_absent_invite_tables(tmp_path):
     d = tmp_path / "corpus" / ".skein"
     snap = _build_pre_migration_corpus(d)
 
-    ro = SkeinNextStore(d, read_only=True, check_same_thread=False)
+    ro = SkeinStore(d, read_only=True, check_same_thread=False)
     try:
         # the read path queries folios/threads, never invites — these must succeed
         n_folios = ro.count_folios()

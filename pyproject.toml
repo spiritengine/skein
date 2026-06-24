@@ -28,6 +28,9 @@ dependencies = [
     "requests>=2.32.0",
     "GitPython>=3.1.0",
     "jinja2>=3.0.0",
+    # Imported directly by skein/web/app.py to render folio bodies; declared here
+    # so `pip install interskein` provides it rather than relying on a transitive.
+    "markdown-it-py>=3.0.0",
     # Pinned to the reviewed 0.3.x canon line (brief-20260603-n22c: exact-decimal
     # integers, MAX_INT_DIGITS/MAX_DEPTH, Cn-rejection). A 0.4 could change the
     # canonical bytes, so it stays out until a deliberate re-review + a regen of
@@ -129,6 +132,11 @@ line-length = 100
 # docs/emoji-codec holds a standalone alphabet-generator script, not package source.
 extend-exclude = ["docs"]
 
+[tool.ruff.lint.per-file-ignores]
+# The signing bit-flip probe deliberately imports after an explanatory setup
+# block (E402) — the staging is intentional, not an accident.
+"skein/tests/test_signing/bit_flip_matrix_probe.py" = ["E402"]
+
 [tool.mypy]
 python_version = "3.10"
 warn_return_any = true
@@ -142,7 +150,7 @@ exclude = [
 
 [tool.coverage.run]
 source = ["skein"]
-omit = ["tests/*", "*.pyc"]
+omit = ["skein/tests/*", "*.pyc"]
 
 [tool.coverage.report]
 exclude_lines = [

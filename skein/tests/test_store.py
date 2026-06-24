@@ -4,12 +4,12 @@ from datetime import datetime
 
 import pytest
 
-from skein.store import SkeinNextStore
+from skein.store import SkeinStore
 
 
 @pytest.fixture
 def store(tmp_path):
-    s = SkeinNextStore(data_dir=tmp_path / ".skein")
+    s = SkeinStore(data_dir=tmp_path / ".skein")
     yield s
     s.close()
 
@@ -177,12 +177,12 @@ def test_alias_reassignment(store):
 
 def test_persists_across_reopen(tmp_path):
     data_dir = tmp_path / ".skein"
-    s1 = SkeinNextStore(data_dir=data_dir)
+    s1 = SkeinStore(data_dir=data_dir)
     h = s1.create_folio(FOLIO)
     s1.set_alias("legacy-1", h)
     s1.close()
 
-    s2 = SkeinNextStore(data_dir=data_dir)
+    s2 = SkeinStore(data_dir=data_dir)
     assert s2.get_folio(h) is not None
     assert s2.resolve_alias("legacy-1") == h
     s2.close()
@@ -193,11 +193,11 @@ def test_persists_across_reopen(tmp_path):
 
 def test_read_only_open_reads_without_writing(tmp_path):
     data_dir = tmp_path / ".skein"
-    s1 = SkeinNextStore(data_dir=data_dir)
+    s1 = SkeinStore(data_dir=data_dir)
     h = s1.create_folio(FOLIO)
     s1.close()
 
-    ro = SkeinNextStore(data_dir=data_dir, read_only=True)
+    ro = SkeinStore(data_dir=data_dir, read_only=True)
     try:
         assert ro.read_only is True
         assert ro.get_folio(h) is not None  # reads fine
@@ -213,7 +213,7 @@ def test_read_only_open_does_not_create_store(tmp_path):
     # rather than silently serving a freshly-created empty one.
     missing = tmp_path / "no-such-station"
     with pytest.raises(Exception):
-        SkeinNextStore(data_dir=missing, read_only=True)
+        SkeinStore(data_dir=missing, read_only=True)
     assert not missing.exists()
 
 

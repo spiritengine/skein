@@ -12,7 +12,7 @@ import json
 
 import pytest
 
-from skein.store import SkeinNextStore
+from skein.store import SkeinStore
 
 
 ROOT_A = "sha256::" + "a" * 64
@@ -26,7 +26,7 @@ DESC = json.dumps({"root": ROOT_A, "leaf_count": 2})
 
 @pytest.fixture
 def store(tmp_path):
-    s = SkeinNextStore(tmp_path / ".skein")
+    s = SkeinStore(tmp_path / ".skein")
     yield s
     s.close()
 

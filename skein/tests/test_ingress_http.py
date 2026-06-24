@@ -153,10 +153,10 @@ def test_real_write_lock_contention_returns_503(app_client, data_dir, tmp_path, 
     # exercising the numeric-code discrimination path (not the manual-exception
     # fallback). Shrink busy_timeout so the contention resolves fast.
     import skein.store as store_mod
-    from skein.store import SkeinNextStore
+    from skein.store import SkeinStore
 
     monkeypatch.setattr(store_mod, "BUSY_TIMEOUT_MS", 50)
-    holder = SkeinNextStore(data_dir, check_same_thread=False)
+    holder = SkeinStore(data_dir, check_same_thread=False)
     holder.conn.execute("BEGIN IMMEDIATE")  # hold the write lock
     try:
         r = app_client.post("/publish/v0/folios", json=_small_unsigned_batch(tmp_path))

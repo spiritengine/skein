@@ -20,7 +20,7 @@ from skein.authorization import (
     bootstrap_operator,
     can_write,
 )
-from skein.store import SkeinNextStore
+from skein.store import SkeinStore
 
 
 # --- in-memory fake BindingStore for the unit cells -------------------------
@@ -132,7 +132,7 @@ def test_principal_built_from_cert_identity_dict():  # A9
 
 @pytest.fixture
 def store(tmp_path):
-    s = SkeinNextStore(tmp_path / ".skein")
+    s = SkeinStore(tmp_path / ".skein")
     yield s
     s.close()
 

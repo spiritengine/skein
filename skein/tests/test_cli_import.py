@@ -23,7 +23,7 @@ from click.testing import CliRunner
 
 from skein.bridge import ImportReport, import_project
 from skein.cli import _fidelity_failures, _StoreCounts, cli
-from skein.store import SkeinNextStore
+from skein.store import SkeinStore
 from skein.tests.test_bridge import (
     FOLIOS,
     SITES,
@@ -74,7 +74,7 @@ def test_import_verify_passes_and_serves_folios(runner, project_root, target):
     assert "FIDELITY OK" in r.output
 
     # The target store now resolves the imported legacy ids to content hashes.
-    with SkeinNextStore(target) as store:
+    with SkeinStore(target) as store:
         h = store.resolve_alias("brief-20260101-aaaa")
         assert h is not None and h.startswith("sha256::")
         assert store.get_folio(h)["title"] == "First brief"
@@ -134,7 +134,7 @@ def test_verify_flag_fails_on_real_hash_collision(runner, tmp_path, target):
     # and the store reconciliation caught the dropped row independently
     assert "count_folios() == folios_carried + sites_carried" in r.output
     # the report itself recorded the real collision
-    with SkeinNextStore(target) as store:
+    with SkeinStore(target) as store:
         report = import_project(
             str(root / ".skein" / "data" / "skein.db"),
             str(root / ".skein" / "data" / "sites"),
@@ -207,7 +207,7 @@ def test_reconciliation_invariants_hold_on_clean_import(project_root, target):
     """The three store-reconciliation equalities hold against real store counts."""
     db = str(project_root / ".skein" / "data" / "skein.db")
     sd = str(project_root / ".skein" / "data" / "sites")
-    with SkeinNextStore(target) as store:
+    with SkeinStore(target) as store:
         report = import_project(db, sd, store)
         # finding 2/3: reconcile the report against what was actually written
         assert store.count_folios() == report.folios_carried + report.sites_carried
@@ -244,12 +244,12 @@ def test_clean_import_qualified_verdict_surfaces_non_gated_loss(
 def test_import_twice_is_idempotent(runner, project_root, target):
     r1 = runner.invoke(cli, ["--data-dir", target, "import", str(project_root)])
     assert r1.exit_code == 0, r1.output
-    with SkeinNextStore(target) as store:
+    with SkeinStore(target) as store:
         first = (store.count_folios(), store.count_threads(), store.list_slugs())
 
     r2 = runner.invoke(cli, ["--data-dir", target, "import", str(project_root)])
     assert r2.exit_code == 0, r2.output
-    with SkeinNextStore(target) as store:
+    with SkeinStore(target) as store:
         second = (store.count_folios(), store.count_threads(), store.list_slugs())
 
     assert first == second

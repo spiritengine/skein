@@ -10,7 +10,7 @@ same binding live per read.
 The only gateable thing is the cert identity (the ``Principal``). ``created_by``
 on a folio and ``weaver`` on a thread are unsigned display content — never an
 authorization input (A5). Bindings live in the per-instance ``account_bindings``
-sidecar (the :class:`~skein.store.SkeinNextStore` methods); this module owns
+sidecar (the :class:`~skein.store.SkeinStore` methods); this module owns
 the pure predicate (``can_write``) and the bootstrap policy (``bootstrap_operator``)
 over a :class:`BindingStore`, so they unit-test against an in-memory fake with no
 crypto and no DB.
@@ -59,7 +59,7 @@ class OperatorAlreadyBootstrapped(Exception):
 class BindingStore(Protocol):
     """The binding surface ``can_write`` / ``bootstrap_operator`` consume.
 
-    Satisfied structurally by :class:`~skein.store.SkeinNextStore` (its
+    Satisfied structurally by :class:`~skein.store.SkeinStore` (its
     account_bindings methods) and by the in-memory fake the unit cells use."""
 
     def get_binding(self, issuer: str, subject: str) -> Optional[Binding]: ...
@@ -107,6 +107,6 @@ def bootstrap_operator(bindings: BindingStore, operator: Principal) -> Binding:
 def default_bindings(store) -> BindingStore:
     """The default BindingStore for the ingress/CLI: the station's own store.
 
-    ``SkeinNextStore`` implements the BindingStore surface directly, so this is
+    ``SkeinStore`` implements the BindingStore surface directly, so this is
     the identity wrapper that names the intent at call sites (Thread E CD6/C13)."""
     return store

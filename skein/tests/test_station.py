@@ -11,7 +11,7 @@ from skein.station import (
     _short,
     _title_line,
 )
-from skein.store import SkeinNextStore
+from skein.store import SkeinStore
 
 
 @pytest.fixture
@@ -25,7 +25,7 @@ def station(tmp_path):
 
 
 def test_search_matches_title_and_content(tmp_path):
-    store = SkeinNextStore(tmp_path / ".skein")
+    store = SkeinStore(tmp_path / ".skein")
     store.create_folio({"type": "finding", "title": "cache collision", "content": "body"})
     store.create_folio({"type": "notion", "title": "unrelated", "content": "shard the cache"})
     store.create_folio({"type": "notion", "title": "nothing", "content": "here"})
@@ -36,7 +36,7 @@ def test_search_matches_title_and_content(tmp_path):
 
 
 def test_search_treats_like_wildcards_literally(tmp_path):
-    store = SkeinNextStore(tmp_path / ".skein")
+    store = SkeinStore(tmp_path / ".skein")
     store.create_folio({"type": "finding", "title": "100% done", "content": "x"})
     store.create_folio({"type": "finding", "title": "not full", "content": "y"})
     # '%' must match the literal percent sign, not act as a wildcard.
@@ -46,7 +46,7 @@ def test_search_treats_like_wildcards_literally(tmp_path):
 
 
 def test_find_by_prefix_unique_and_ambiguous(tmp_path):
-    store = SkeinNextStore(tmp_path / ".skein")
+    store = SkeinStore(tmp_path / ".skein")
     h = store.create_folio({"type": "finding", "title": "t", "content": "c"})
     prefix = h[: len("sha256::") + 6]
     assert store.find_by_prefix(h) == [h]

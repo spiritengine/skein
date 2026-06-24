@@ -136,15 +136,15 @@ def test_rotate_operator_requires_existing_operator(tmp_path):  # D10
 def test_rotate_operator_is_all_or_nothing(tmp_path, monkeypatch):  # D11
     _run(tmp_path, "account", "init-operator", "--issuer", I, "--subject", S)
     # force the new-operator install to fail mid-rotation
-    from skein.store import SkeinNextStore
-    orig = SkeinNextStore.add_binding
+    from skein.store import SkeinStore
+    orig = SkeinStore.add_binding
 
     def boom(self, *a, **k):
         if k.get("event") == "rotated_in":
             raise RuntimeError("install failed")
         return orig(self, *a, **k)
 
-    monkeypatch.setattr(SkeinNextStore, "add_binding", boom)
+    monkeypatch.setattr(SkeinStore, "add_binding", boom)
     r = _run(tmp_path, "account", "rotate-operator", "--new-issuer", I2, "--new-subject", S2)
     assert r.exit_code != 0
     with _open(tmp_path) as st:

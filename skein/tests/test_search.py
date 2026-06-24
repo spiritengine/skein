@@ -4,7 +4,7 @@ title-over-body relevance ranking, and match snippets."""
 import pytest
 
 from skein.station import Station
-from skein.store import SkeinNextStore, make_snippet
+from skein.store import SkeinStore, make_snippet
 
 
 @pytest.fixture
@@ -24,7 +24,7 @@ def store(tmp_path):
         # literal percent
         st.post(type="note", site="proj", title="discount 50% off",
                 content="sale", created_by="a", created_at="2026-01-04T00:00:00Z")
-    s = SkeinNextStore(data_dir, read_only=True)
+    s = SkeinStore(data_dir, read_only=True)
     yield s
     s.close()
 
@@ -86,7 +86,7 @@ def test_term_cap_drops_terms_beyond_limit(tmp_path):
         st.create_site("p", purpose="p")
         st.post(type="finding", site="p", title="capped folio", content=" ".join(present),
                 created_by="a", created_at="2026-01-01T00:00:00Z")
-    s = SkeinNextStore(data_dir, read_only=True)
+    s = SkeinStore(data_dir, read_only=True)
     try:
         # control: the overflow term genuinely matches nothing on its own.
         assert s.search_folios("absentzzz") == []

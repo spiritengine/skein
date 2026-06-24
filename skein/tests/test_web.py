@@ -170,7 +170,7 @@ def _cover_folio(data_dir, content_hash, *, subject="alice@example.com",
     from skein import profile, sign as sign_mod
     from skein.canon import manifest_descriptor_canonical_bytes
     from skein.identity import content_hash_for_bytes
-    from skein.store import SkeinNextStore
+    from skein.store import SkeinStore
 
     def signer(cb):
         preimage = profile.profiled_preimage(profile.CANON_PROFILE_MANIFEST_V1, cb)
@@ -183,7 +183,7 @@ def _cover_folio(data_dir, content_hash, *, subject="alice@example.com",
     ms = sign_mod.sign_manifest([content_hash], signer)
     d = ms["descriptor"]
     mh = content_hash_for_bytes(manifest_descriptor_canonical_bytes(d["root"], d["leaf_count"]))
-    store = SkeinNextStore(data_dir, check_same_thread=False)
+    store = SkeinStore(data_dir, check_same_thread=False)
     with store.transaction():
         store.add_manifest(d["root"], mh, json.dumps(d, sort_keys=True),
                            json.dumps(ms["leaf_list"]), ms["signature_bundle"],

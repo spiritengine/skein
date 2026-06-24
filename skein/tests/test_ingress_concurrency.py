@@ -18,7 +18,7 @@ import pytest
 
 from skein.station import Station
 from skein.ingress import ingest
-from skein.store import SkeinNextStore
+from skein.store import SkeinStore
 from skein import wire
 
 
@@ -76,10 +76,10 @@ def test_failed_begin_immediate_does_not_wedge_store(tmp_path):
     # _in_batch must NOT stay True (which would skip later commits and falsely trip
     # the not-re-entrant guard). The store must be usable once the lock frees.
     d = tmp_path / "s" / ".skein"
-    SkeinNextStore(d).close()  # materialize
+    SkeinStore(d).close()  # materialize
 
-    holder = SkeinNextStore(d, check_same_thread=False)
-    victim = SkeinNextStore(d, check_same_thread=False)
+    holder = SkeinStore(d, check_same_thread=False)
+    victim = SkeinStore(d, check_same_thread=False)
     victim.conn.execute("PRAGMA busy_timeout=50")  # expire the wait fast
 
     holder.conn.execute("BEGIN IMMEDIATE")  # hold the write lock

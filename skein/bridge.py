@@ -71,7 +71,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
 from .legacy_meta import normalize_legacy_meta, render_legacy_meta
-from .store import SkeinNextStore
+from .store import SkeinStore
 
 # A folio id looks like ``<type>-<8-digit-date>-<suffix>``. The date shape alone
 # does not separate a folio ref from a session id (``qm-20260105-201613`` matches
@@ -340,7 +340,7 @@ def _resolve_thread_endpoints(
     from_id: Optional[str],
     to_id: Optional[str],
     legacy_weaver: Optional[str],
-    store: SkeinNextStore,
+    store: SkeinStore,
     folio_ids: Set[str],
     folio_types: Set[str],
     known_actors: Set[str],
@@ -417,7 +417,7 @@ def _resolve_thread_endpoints(
 def import_project(
     legacy_db_path: Union[str, Path],
     sites_dir: Union[str, Path],
-    store: SkeinNextStore,
+    store: SkeinStore,
 ) -> ImportReport:
     """Import one legacy SKEIN project into ``store``. Read-only on the source."""
     report = ImportReport(

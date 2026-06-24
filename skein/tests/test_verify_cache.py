@@ -16,7 +16,7 @@ from skein import signing
 from skein.signing import MultiVerifyResult, VerifyResult, VerifyStatus
 
 from skein import profile, sign as sign_mod, wire
-from skein.store import SkeinNextStore, bundle_hash_for
+from skein.store import SkeinStore, bundle_hash_for
 from skein.station import Station
 from skein.ingress import ingest
 
@@ -28,7 +28,7 @@ BH = "bundlehash-1"
 
 @pytest.fixture
 def store(tmp_path):
-    s = SkeinNextStore(tmp_path / ".skein")
+    s = SkeinStore(tmp_path / ".skein")
     yield s
     s.close()
 
@@ -132,7 +132,7 @@ def test_bundle_hash_one_shared_helper():  # VC11
 
 
 def test_read_verdict_on_missing_verify_cache_table_degrades(tmp_path):  # VC10
-    s = SkeinNextStore(tmp_path / ".skein")
+    s = SkeinStore(tmp_path / ".skein")
     s.conn.execute("DROP TABLE verify_cache")
     s.conn.commit()
     # a get against the now-absent table is a MISS, not an OperationalError
@@ -194,7 +194,7 @@ def test_read_verdict_on_cache_miss_does_not_write(tmp_path, monkeypatch):  # VC
     st, h = _seed_folio(tmp_path)
     _cover(st.store, h, cache_status=None, bind=True)  # cold cache
     st.close()
-    ro = SkeinNextStore(tmp_path / ".skein", read_only=True)
+    ro = SkeinStore(tmp_path / ".skein", read_only=True)
     monkeypatch.setattr(
         signing, "verify_multi",
         lambda cb, b: MultiVerifyResult(
@@ -205,7 +205,7 @@ def test_read_verdict_on_cache_miss_does_not_write(tmp_path, monkeypatch):  # VC
     assert verdict.startswith("SIGNED")  # correct verdict via in-process verify
     ro.close()
     # nothing was written to the cache (read app never writes)
-    check = SkeinNextStore(tmp_path / ".skein")
+    check = SkeinStore(tmp_path / ".skein")
     assert check.conn.execute("SELECT COUNT(*) FROM verify_cache").fetchone()[0] == 0
     check.close()
 

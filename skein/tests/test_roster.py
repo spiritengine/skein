@@ -21,7 +21,7 @@ from skein.station import (
     Station,
     UnknownAgent,
 )
-from skein.store import SkeinNextStore
+from skein.store import SkeinStore
 
 
 @pytest.fixture
@@ -33,7 +33,7 @@ def station(tmp_path):
 
 @pytest.fixture
 def store(tmp_path):
-    s = SkeinNextStore(tmp_path / ".skein")
+    s = SkeinStore(tmp_path / ".skein")
     yield s
     s.close()
 
@@ -643,7 +643,7 @@ def test_concurrent_first_register_one_roster_site(tmp_path):
     # Two cold-start agents racing to mint the reserved roster site must converge
     # on ONE site folio — no orphan that leaves the loser's agent unattached.
     data_dir = tmp_path / ".skein"
-    SkeinNextStore(data_dir).close()  # create the db file first
+    SkeinStore(data_dir).close()  # create the db file first
     barrier = threading.Barrier(2)
     errors = []
 

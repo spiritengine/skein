@@ -3,12 +3,12 @@ unresolved-endpoint query the import report relies on."""
 
 import pytest
 
-from skein.store import SkeinNextStore
+from skein.store import SkeinStore
 
 
 @pytest.fixture
 def store(tmp_path):
-    s = SkeinNextStore(data_dir=tmp_path / ".skein")
+    s = SkeinStore(data_dir=tmp_path / ".skein")
     yield s
     s.close()
 
@@ -51,7 +51,7 @@ def test_transaction_idempotent_inside_batch(store):
 def test_writes_outside_transaction_still_commit(store):
     store.create_folio(FOLIO)
     # a fresh connection to the same file sees it -> it was committed
-    other = SkeinNextStore(data_dir=store.data_dir)
+    other = SkeinStore(data_dir=store.data_dir)
     try:
         assert other.count_folios() == 1
     finally:

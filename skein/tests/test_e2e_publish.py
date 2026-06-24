@@ -21,7 +21,7 @@ from skein import profile, sign as sign_mod, wire
 from skein import publish as pub_mod
 from skein.ingress import ingest
 from skein.station import Station
-from skein.store import SkeinNextStore
+from skein.store import SkeinStore
 from skein.envelope import folio_verdict
 
 
@@ -108,7 +108,7 @@ def test_e2e_bound_signed_publish_accepted(client, instance, provider, monkeypat
     ack = result["ack"]
     assert len(ack["accepted"]) == 2  # site folio + finding
     # read surface: SIGNED, attributed to the MANIFEST signer; verify_cache warmed
-    ro = SkeinNextStore(instance.store.data_dir, read_only=True)
+    ro = SkeinStore(instance.store.data_dir, read_only=True)
     try:
         for h in ack["accepted"]:
             verdict, identity = folio_verdict(ro, h, ro.get_folio(h))
@@ -192,7 +192,7 @@ def test_e2e_read_cache_hit_after_ingest(client, instance, monkeypatch):  # E6
     ingest(instance, batch, verifier=_ok_verifier, require_signed=True)
     finding = _finding_hash(batch)
     # second read hits verify_cache and does not re-run Sigstore
-    ro = SkeinNextStore(instance.store.data_dir, read_only=True)
+    ro = SkeinStore(instance.store.data_dir, read_only=True)
     calls = []
     monkeypatch.setattr(
         signing, "verify_multi",
@@ -225,7 +225,7 @@ def test_read_open_uses_mode_ro_not_immutable_against_wal(tmp_path, monkeypatch)
         return real_connect(database, *a, **k)
 
     monkeypatch.setattr(sqlite3, "connect", spy_connect)
-    ro = SkeinNextStore(tmp_path / ".skein", read_only=True)
+    ro = SkeinStore(tmp_path / ".skein", read_only=True)
     ro.close()
     assert any("mode=ro" in u for u in uris)
     assert not any("immutable=1" in u for u in uris)  # mode=ro resolved; no fallback
@@ -237,7 +237,7 @@ def test_concurrent_ingest_then_read_sees_committed_write(tmp_path):  # E11
     inst.create_site("s", purpose="p", created_by="t")
     h = inst.post("finding", "s", "T", "b", created_by="t")  # committed
     # a fresh read store opened mode=ro sees the committed write (no torn/stale read)
-    ro = SkeinNextStore(tmp_path / ".skein", read_only=True)
+    ro = SkeinStore(tmp_path / ".skein", read_only=True)
     try:
         assert ro.get_folio(h) is not None
     finally:

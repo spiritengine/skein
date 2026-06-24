@@ -146,11 +146,11 @@ def test_status_unknown_ref_errors(runner, data_dir):
 
 
 def test_status_ambiguous_ref_errors(runner, data_dir):
-    from skein.store import SkeinNextStore
+    from skein.store import SkeinStore
 
     run(runner, data_dir, "site", "create", "proj")  # initializes the store
     shared = "sha256::abcdef000000"
-    with SkeinNextStore(data_dir) as store:
+    with SkeinStore(data_dir) as store:
         for tail in ("1111", "2222"):
             store.conn.execute(
                 "INSERT INTO folios (content_hash, type, title, content) VALUES (?,?,?,?)",

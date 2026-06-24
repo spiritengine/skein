@@ -16,10 +16,10 @@ from .identity import (
     compute_thread_hash,
     normalize_created_at,
 )
-from .store import SkeinNextStore
+from .store import SkeinStore
 
 __all__ = [
-    "SkeinNextStore",
+    "SkeinStore",
     "compute_folio_hash",
     "compute_thread_hash",
     "normalize_created_at",

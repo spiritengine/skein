@@ -14,7 +14,7 @@ import sqlite3
 import pytest
 
 from skein.bridge import classify_endpoint, import_project, open_legacy
-from skein.store import SkeinNextStore
+from skein.store import SkeinStore
 
 # Legacy column sets, mirroring skein/storage.py (the bridge reads these by name).
 _LEGACY_SCHEMA = """
@@ -74,7 +74,7 @@ def make_sites_dir(base, sites):
 
 @pytest.fixture
 def store(tmp_path):
-    s = SkeinNextStore(data_dir=tmp_path / ".skein")
+    s = SkeinStore(data_dir=tmp_path / ".skein")
     yield s
     s.close()
 
@@ -583,7 +583,7 @@ def test_all_zero_flag_column_not_reported_as_loss(tmp_path, store):
     )
     conn.commit()
     conn.close()
-    store2 = SkeinNextStore(data_dir=tmp_path / ".skein2")
+    store2 = SkeinStore(data_dir=tmp_path / ".skein2")
     report2 = import_project(db2, sites_dir, store2)
     assert report2.dropped_folio_columns.get("archived") == 1
     store2.close()

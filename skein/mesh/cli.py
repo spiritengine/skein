@@ -1,7 +1,7 @@
 """The ``mesh`` CLI — the client-side content-hash mesh entrypoint.
 
-Distinct from the legacy ``skein`` CLI (which speaks to the old human-id server):
-``mesh`` talks to a content-hash station over the HTTP wire. ``mesh fetch`` is
+``mesh`` talks to a content-hash station over the HTTP wire (the local ``skein``
+CLI works directly against the on-disk station). ``mesh fetch`` is
 the headline verb — resolve an address, strict-verify it locally, print the
 agent-markdown rendering, and exit with a fork-F code so it composes in scripts.
 """

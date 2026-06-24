@@ -11,7 +11,7 @@ from __future__ import annotations
 import pytest
 
 from skein.resolve import ResolveError, resolve_to_hash, _StoreStationIndex
-from skein.store import SkeinNextStore
+from skein.store import SkeinStore
 
 FULL_A = "a" * 64
 FULL_B = "b" * 64
@@ -125,7 +125,7 @@ def test_resolve_error_rejects_unknown_code():
 
 
 def test_station_index_strips_algo_prefix(tmp_path):
-    store = SkeinNextStore(tmp_path / ".skein")
+    store = SkeinStore(tmp_path / ".skein")
     try:
         h = store.create_folio(
             {
@@ -146,7 +146,7 @@ def test_station_index_strips_algo_prefix(tmp_path):
 
 
 def test_short_hash_resolves_through_real_store(tmp_path):
-    store = SkeinNextStore(tmp_path / ".skein")
+    store = SkeinStore(tmp_path / ".skein")
     try:
         h = store.create_folio(
             {

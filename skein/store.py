@@ -5,8 +5,9 @@ and aliases hang off the same content-addressed model. This module owns storage
 and querying only; it does not classify thread endpoints (folio-hash vs actor id)
 — that is the import bridge's job in Slice 2.
 
-Data lives under ``.skein/`` (separate from legacy ``.skein/``, which is
-never touched). The schema deliberately omits the legacy ``status``/``assigned_to``
+Data lives under ``.skein/``: the content store is ``.skein/store.db``. Any
+legacy ``.skein/data/`` tree is only ever read by ``skein import`` and is never
+written here. The schema deliberately omits the legacy ``status``/``assigned_to``
 folio columns — skein is thread-native from the start.
 """
 
@@ -336,12 +337,12 @@ CREATE INDEX IF NOT EXISTS idx_folios_type ON folios(type);
 """
 
 
-class SkeinNextStore:
+class SkeinStore:
     """Content-hash-native folio/thread/alias store backed by SQLite.
 
     **Single-threaded per instance (not internally synchronized).** A store wraps
     one SQLite connection and a bare ``_in_batch`` transaction flag with no lock,
-    so a single ``SkeinNextStore`` MUST NOT be shared across threads — concurrent
+    so a single ``SkeinStore`` MUST NOT be shared across threads — concurrent
     use could interleave ``transaction()`` toggles and commit one caller's writes
     outside another's transaction (zr29 MEDIUM #7). The supported concurrency model
     is a connection (and store) per thread/request: the web surface opens one store
@@ -439,7 +440,7 @@ class SkeinNextStore:
             self.conn.commit()
 
     @contextmanager
-    def transaction(self) -> Iterator["SkeinNextStore"]:
+    def transaction(self) -> Iterator["SkeinStore"]:
         """Batch many writes into a single commit.
 
         Per-write commits make a 10k-row import I/O-bound (one fsync per row).
@@ -495,7 +496,7 @@ class SkeinNextStore:
         else:
             self.conn.execute(f"RELEASE {name}")
 
-    def __enter__(self) -> "SkeinNextStore":
+    def __enter__(self) -> "SkeinStore":
         return self
 
     def __exit__(self, *exc) -> None:

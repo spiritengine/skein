@@ -5,12 +5,10 @@ SHARD Worktree Management
 Manages git worktrees for SHARD agent coordination workflow.
 Provides core functions for creating, cleaning up, and listing SHARDs.
 
-Ported into the content-hash package (agent-coordination port, Stage 1). This is
-a verbatim copy of the legacy ``skein/shard.py`` engine — pure local git plus a
-``.skein/shards.db`` SQLite sidecar, no HTTP. It was COPIED rather than moved
-because legacy ``client/cli.py`` still imports ``skein.shard`` and must keep
-running until the Stage 4 cutover. The two copies stay in lockstep until then;
-the legacy one is deleted at cutover.
+The shard engine for the content-hash package — pure local git plus a
+``.skein/shards.db`` SQLite sidecar, no HTTP. Originally copied from the legacy
+``skein/shard.py`` during the agent-coordination port (Stage 1); the legacy
+package was deleted at the Stage 4 cutover, so this is now the sole copy.
 """
 
 import os

@@ -73,7 +73,7 @@ def test_redeem_route_real_write_lock_returns_503(tmp_path, monkeypatch):
     and raise the driver SQLITE_BUSY OperationalError; the route must map it to a
     retryable 503, NOT an uncaught 500. Mirrors the /publish real-lock test."""
     import skein.store as store_mod
-    from skein.store import SkeinNextStore
+    from skein.store import SkeinStore
 
     d = tmp_path / "inst" / ".skein"
     s = Station(d)
@@ -88,7 +88,7 @@ def test_redeem_route_real_write_lock_returns_503(tmp_path, monkeypatch):
     monkeypatch.setattr(store_mod, "BUSY_TIMEOUT_MS", 50)  # expire the wait fast
     client = TestClient(create_app())
 
-    holder = SkeinNextStore(d, check_same_thread=False)
+    holder = SkeinStore(d, check_same_thread=False)
     holder.conn.execute("BEGIN IMMEDIATE")  # hold the write lock
     try:
         # The unused-token path's first write (reserve_redeem_attempt) can't take the

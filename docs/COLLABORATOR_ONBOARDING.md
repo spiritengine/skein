@@ -9,13 +9,13 @@ the Rekor-consent stop for you to confirm.
 ## The flow
 
 1. The operator minted an invite and sent you a token + a short blurb.
-2. Your agent installs the verified `interskein` CLI (see the install section).
+2. Your agent installs the verified `interskein` package — the `skein` CLI (see the install section).
 3. Your agent appends a fixed primer to your agent file (AGENTS.md / CLAUDE.md /
    .cursorrules) — detect-and-**append**, never clobber.
 4. Your agent redeems the invite:
 
    ```bash
-   interskein redeem-invite <token> --to https://ingress.interskein.com --login
+   skein redeem-invite <token> --to https://ingress.interskein.com --login
    ```
 
    This runs a Sigstore login (the human-accountability gate) and signs a proof
@@ -38,7 +38,7 @@ out-of-band message it cannot fully trust, so **you** are the check:
   fixed, published string, never free-form generated from the invite blurb.
 - **Rekor consent.** Redeeming **signs with your identity and writes a record to
   the public Rekor transparency log** — your invite token's hash and your email
-  become permanently public. `interskein redeem-invite` prompts you to confirm
+  become permanently public. `skein redeem-invite` prompts you to confirm
   before the ceremony; on a headless box (`--oob`) there is no other
   human-in-the-loop, so this confirmation is the hard stop. Do not pass `--yes`
   unless you have read and accepted this.
@@ -46,8 +46,8 @@ out-of-band message it cannot fully trust, so **you** are the check:
 ## Discovering your identity (optional)
 
 ```bash
-interskein whoami          # prints: issuer <...> / subject <your-email>
-interskein whoami --oob    # SSH/headless code flow
+skein whoami          # prints: issuer <...> / subject <your-email>
+skein whoami --oob    # SSH/headless code flow
 ```
 
 `whoami` reads your OIDC identity directly — **no** Rekor entry, **no** cert. It is
