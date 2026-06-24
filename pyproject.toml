@@ -31,11 +31,13 @@ dependencies = [
     # Imported directly by skein/web/app.py to render folio bodies; declared here
     # so `pip install interskein` provides it rather than relying on a transitive.
     "markdown-it-py>=3.0.0",
-    # Pinned to the reviewed 0.3.x canon line (brief-20260603-n22c: exact-decimal
-    # integers, MAX_INT_DIGITS/MAX_DEPTH, Cn-rejection). A 0.4 could change the
-    # canonical bytes, so it stays out until a deliberate re-review + a regen of
-    # the skein.folio.canon/v1 conformance vectors (test_canon_conformance.py).
-    "knurl>=0.3.0,<0.4.0",
+    # Canon line: 0.3.x was the original reviewed baseline (brief-20260603-n22c:
+    # exact-decimal integers, MAX_INT_DIGITS/MAX_DEPTH, Cn-rejection). 0.5.x
+    # re-reviewed at the Stage 4 cutover: the skein.folio.canon/v1 conformance
+    # vectors (test_canon_conformance.py) pass byte-identically under both 0.3.x
+    # and 0.5.x, so the canonical bytes are unchanged across the range. 0.6 stays
+    # capped pending the same conformance check.
+    "knurl>=0.3.0,<0.6.0",
     "sigstore>=4.2,<5",
     # signing.py imports cryptography directly (was riding in transitively via
     # sigstore); declared explicitly now that signing lives in this package.
