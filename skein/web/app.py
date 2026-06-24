@@ -390,7 +390,7 @@ def create_app() -> FastAPI:
     data_theme = config.tokens.get("default_theme")
 
     app = FastAPI(
-        title="SKEIN (next)",
+        title="SKEIN",
         description="Content-addressed SKEIN read surface (machine wire + themed HTML)",
         version="0.1.0",
     )

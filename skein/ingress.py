@@ -448,7 +448,7 @@ def create_app() -> FastAPI:
         )
 
     app = FastAPI(
-        title="SKEIN (next) — ingress",
+        title="SKEIN — ingress",
         description="client->instance publish ingress",
         version="0.0.1",
     )
