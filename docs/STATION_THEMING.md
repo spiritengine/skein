@@ -1,6 +1,6 @@
 # Station config & theming
 
-How a published station (the `skein_next` read surface on :9001) gets its
+How a published station (the `skein` read surface on :9001) gets its
 identity and its look. Built in slice 3 of the mesh-web read surface
 (brief-20260603-s4gq). The governing principle: the station exists so **agents**
 can read it. The structured wire is the product; the HTML is one presentation of
@@ -10,7 +10,7 @@ only restyle, never break the semantic DOM or the machine read.
 
 ## The stationfile
 
-A station's identity and presentation come from `.skein-next/stationfile.json` —
+A station's identity and presentation come from `.skein/stationfile.json` —
 a schema-versioned JSON file sitting next to `store.db` in the data dir. Because
 the data dir is mounted into the container (at `/data`), a config or theme change
 rides the **light deploy path** (edit the file + `publish.sh` force-recreate, no
@@ -35,7 +35,7 @@ docker build).
 ### Validation posture — ease, not enforcement
 
 - **`name` is the only hard requirement.** No name anywhere — no stationfile,
-  empty `name`, and no `SKEIN_NEXT_PROJECT` bootstrap env — and the station
+  empty `name`, and no `SKEIN_PROJECT` bootstrap env — and the station
   **refuses to start** (`StationfileError`). Naming a station is basic identity;
   we never invent or blank a name.
 - **Everything else degrades with a logged warning.** A bad `theme` path falls
@@ -48,7 +48,7 @@ docker build).
 
 ### Name precedence
 
-`stationfile.name` wins; `SKEIN_NEXT_PROJECT` is a **bootstrap that supplies the
+`stationfile.name` wins; `SKEIN_PROJECT` is a **bootstrap that supplies the
 name only until a stationfile exists**, then steps aside. (This favors the spec's
 "env sets name until a stationfile exists" over a literal "defaults < file < env":
 the stationfile's whole purpose is to be changed via the light deploy path, so a
@@ -93,7 +93,7 @@ Token → CSS custom property:
 
 Themes target these class hooks and semantic elements; **the base markup will not
 rename them.** A theme is authored against this contract plus the CSS custom
-properties on `:root` (see `skein_next/web/static/base.css`).
+properties on `:root` (see `skein/web/static/base.css`).
 
 - **Source order is content-first.** The folio *body* precedes provenance,
   metadata, and the cross-reference nav in the DOM (a screen-reader requirement
