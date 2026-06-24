@@ -2,44 +2,63 @@
 
 ## Overview
 
-SKEIN is a FastAPI server with a CLI client. Agents collaborate through sites, folios, and threads.
+skein is a local, content-addressed knowledge store with a direct CLI — no
+server in the local path. Agents collaborate through sites, folios, and threads.
+A folio's identity *is* its content hash; there are no human-assigned ids.
+Publishing to the shared mesh is a separate, signed boundary.
 
 ## Storage
 
-Hybrid approach:
-- **SQLite** (`skein.db`) - Logs and screenshots (time-series, searchable)
-- **JSON files** - Agents, sites, folios, threads (human-readable, git-friendly)
+Each project has an isolated store at `.skein/store.db` (SQLite, content-hash
+native). The CLI opens it directly — there is no HTTP hop for local operations.
+The shard-coordination sidecar lives alongside it at `.skein/shards.db` with
+`.skein/rites.yaml`.
 
-Each project gets isolated storage in `.skein/data/`.
+## Core concepts
 
-## Core Concepts
+- **Agent** — a participant (AI or human) with an id, tracked on the roster.
+- **Site** — a workspace/context grouping folios.
+- **Folio** — a unit of content (finding, issue, brief, plan, …), addressed by
+  its content hash.
+- **Thread** — a typed edge between folios (and actors) for status, replies, or
+  linking.
 
-- **Agent** - A participant (AI or human) with a unique ID
-- **Site** - A workspace/context for collaboration
-- **Folio** - A unit of content (finding, issue, brief, plan)
-- **Thread** - A connection between folios for status, assignment, or linking
-
-## Data Flow
+## Data flow
 
 ```
-CLI → HTTP Request → FastAPI Routes → Storage Layer → .skein/data/
-                          ↓
-                    X-Project-Id header determines data directory
+CLI → Station → SkeinStore → .skein/store.db
 ```
 
-## Project Isolation
+The canonical bytes of a folio (`canon.py`) determine its hash; the hash is the
+identity used everywhere, including across the mesh.
 
-1. `skein init --project NAME` creates `.skein/` directory
-2. CLI detects `.skein/` by walking up directory tree
-3. Server uses `X-Project-Id` header to route to correct storage
-4. Global registry at `~/.skein/projects.json` tracks all projects
+## Project isolation
 
-## Key Files
+1. The CLI detects `.skein/` by walking up the directory tree (the store is
+   created on first write).
+2. Each project's content lives in its own `.skein/store.db`.
+3. A global registry at `~/.skein/projects.json` tracks known projects.
+
+## Publish / mesh boundary
+
+Local folios stay local until published. `skein publish` sends selected folios
+to an instance's ingress; signed publishing runs a Sigstore ceremony at that
+boundary (`signing.py`) and records the author identity. `mesh` reads stations
+over HTTP and strict-verifies fetched folios locally. `skein serve` exposes a
+read-only web surface for a station.
+
+## Key files
 
 ```
 skein/
-├── routes.py    # API endpoints
-├── storage.py   # LogDatabase + JSONStore classes
-├── models.py    # Pydantic models
-└── utils.py     # ID generation, caching
+├── store.py      # SkeinStore — content-hash SQLite store
+├── station.py    # Station — the local store + roster API
+├── cli.py        # the `skein` CLI
+├── canon.py      # canonical bytes (folio hashing)
+├── signing.py    # Sigstore signing/verification
+├── address.py    # mesh address grammar + resolution
+├── mesh/         # the `mesh` HTTP read client
+├── web/          # read-only web surface (skein serve)
+├── ingress.py    # publish write surface (instance side)
+└── bridge.py     # read-only import of legacy SKEIN projects
 ```

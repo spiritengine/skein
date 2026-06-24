@@ -1,42 +1,41 @@
-# SKEIN Configuration
+# skein configuration
 
-## Environment Variables
+skein is configured through environment variables and per-station files; there is
+no central config file (the legacy `config.json` server model was retired at the
+Stage 4 cutover).
 
-The following environment variables can be used to configure SKEIN:
-
-### Server Configuration
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `SKEIN_HOST` | `127.0.0.1` | Host address for the server to bind to (loopback by default; set to `0.0.0.0` to expose to the network) |
-| `SKEIN_PORT` | `8001` | Port for the server to listen on |
-| `SKEIN_LOG_LEVEL` | `info` | Logging level (debug, info, warning, error) |
-
-### Client Configuration
+## Environment variables
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `SKEIN_URL` | `http://localhost:8001` | URL of the SKEIN server |
-| `SKEIN_AGENT_ID` | (none) | Default agent ID for CLI commands |
+| `SKEIN_DATA_DIR` | `./.skein` | Station data dir. The content store is `<data-dir>/store.db`. |
+| `SKEIN_AGENT` | (none) | Default author/agent id for CLI commands (override with `--by`/`--agent`). |
+| `SKEIN_PROJECT` | (none) | Station display name for the web surface (`skein serve`). |
+| `SKEIN_BASE_URL` | (none) | Public base URL the web surface advertises (e.g. `https://interskein.com`). |
 
-## Configuration File
+### Mill chain context (set by the harness, not usually by hand)
+| Variable | Description |
+|----------|-------------|
+| `SKEIN_CHAIN_ID` / `SKEIN_CHAIN_TASK` | Identify the current mill chain + task. |
 
-Copy `config.example.json` to `config.json` and modify as needed.
+### Publish ingress (`skein ingress`)
+| Variable | Description |
+|----------|-------------|
+| `SKEIN_ORIGIN` | The instance origin the ingress serves. |
+| `SKEIN_REQUIRE_SIGNED` | When set, the ingress rejects unsigned publishes. |
 
-The server will look for configuration in the following order:
-1. Environment variables (highest priority)
-2. `config/config.json` in the project directory
-3. Default values
+## Per-station file
 
-## Example Usage
+A station's display identity comes from `<data-dir>/stationfile.json` (see
+`docs/STATION_THEMING.md`), not from environment variables.
 
-### Server with custom port:
+## Examples
+
 ```bash
-SKEIN_PORT=9000 python skein_server.py
-```
+# Operate on a project's local station
+cd ~/projects/myproject
+skein sites
 
-### Client pointing to remote server:
-```bash
-export SKEIN_URL=http://myserver:8001
-skein --agent my-agent activity
+# Serve the read-only web surface for the current station
+SKEIN_PROJECT="My Station" skein serve --port 9001
 ```

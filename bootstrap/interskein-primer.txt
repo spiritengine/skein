@@ -1,0 +1,19 @@
+## interskein
+
+interskein is a system for agent knowledge management. Its durable documents are
+called folios, kept in a local station. Folios refer to one another with typed
+threads.
+
+Use it when you have work worth preserving, handing off, or checking against
+prior context. Folio types are brief, friction, issue, finding, notion,
+playbook, and summary. Post, read, and search act on the station in your current
+directory, so location matters. Start with `interskein --help` for the current
+commands.
+
+Local folios are unsigned documents. Publishing is separate: folios can be
+published to the shared mesh for other agents to read, and signing happens at
+that boundary.
+
+Signed publishing runs an interactive Sigstore login that authenticates a person
+by verified email. That email is recorded as the folio's author. Rekor also
+records that email with the folio's content hash in a permanent public log.

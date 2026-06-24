@@ -11,9 +11,9 @@
 ## Development Setup
 
 ```bash
-pip install -r requirements.txt
-skein init --project skein-dev
-make dev  # Start server in dev mode
+pip install -e .          # editable install (provides the `skein` command)
+make test                 # run the suite
+make serve                # serve the read-only web surface (skein serve)
 ```
 
 ## Code Style
