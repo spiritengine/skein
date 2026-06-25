@@ -45,6 +45,13 @@ def _now_micros() -> str:
     return _iso_micros(datetime.now(timezone.utc))
 
 
+# sqlite3.SQLITE_BUSY / SQLITE_LOCKED module constants exist only on Python
+# >= 3.11; fall back to the stable SQLite primary result codes on 3.10
+# (requires-python is >=3.10).
+_SQLITE_BUSY = getattr(sqlite3, "SQLITE_BUSY", 5)
+_SQLITE_LOCKED = getattr(sqlite3, "SQLITE_LOCKED", 6)
+
+
 def sqlite_error_is_lock(e: sqlite3.OperationalError) -> bool:
     """Whether an OperationalError is write-lock contention (SQLITE_BUSY/LOCKED).
 
@@ -56,7 +63,7 @@ def sqlite_error_is_lock(e: sqlite3.OperationalError) -> bool:
     genuine (non-lock) fault still surfaces."""
     code = getattr(e, "sqlite_errorcode", None)
     primary = (code & 0xFF) if isinstance(code, int) else None
-    return primary in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED) or (
+    return primary in (_SQLITE_BUSY, _SQLITE_LOCKED) or (
         primary is None and ("lock" in str(e).lower() or "busy" in str(e).lower())
     )
 
