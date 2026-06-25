@@ -138,6 +138,8 @@ extend-exclude = ["docs"]
 # The signing bit-flip probe deliberately imports after an explanatory setup
 # block (E402) — the staging is intentional, not an accident.
 "skein/tests/test_signing/bit_flip_matrix_probe.py" = ["E402"]
+# Tests use terse fixture names by convention (e.g. I = OIDC issuer, S = subject).
+"skein/tests/**" = ["E741"]
 
 [tool.mypy]
 python_version = "3.10"

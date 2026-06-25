@@ -22,7 +22,6 @@ import threading
 import time
 from datetime import datetime, timedelta, timezone
 
-import pytest
 from fastapi.testclient import TestClient
 
 from skein import signing

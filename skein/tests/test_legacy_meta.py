@@ -1,7 +1,6 @@
 """The legacy ``metadata`` preservation envelope (import bridge)."""
 
 import base64
-import json
 
 from skein.legacy_meta import (
     LEGACY_META_MARKER,

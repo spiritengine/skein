@@ -7,7 +7,7 @@ threads.
 Use it when you have work worth preserving, handing off, or checking against
 prior context. Folio types are brief, friction, issue, finding, notion,
 playbook, and summary. Post, read, and search act on the station in your current
-directory, so location matters. Start with `interskein --help` for the current
+directory, so location matters. Start with `skein --help` for the current
 commands.
 
 Local folios are unsigned documents. Publishing is separate: folios can be

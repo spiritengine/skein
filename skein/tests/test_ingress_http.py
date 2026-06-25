@@ -9,7 +9,6 @@ depth atop the fronting proxy's client_max_body_size).
 
 from __future__ import annotations
 
-import json
 
 import pytest
 from fastapi.testclient import TestClient

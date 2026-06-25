@@ -22,7 +22,6 @@ corpus (one with NO invite tables, as the live host has today):
 from __future__ import annotations
 
 import sqlite3
-from datetime import datetime, timedelta, timezone
 
 import pytest
 
