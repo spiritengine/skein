@@ -1257,6 +1257,12 @@ def account_invite_mint(
     delta = _parse_duration(expires)
     origin = origin or os.environ.get("SKEIN_ORIGIN")
     token = secrets.token_urlsafe(32)  # 32 bytes = 256-bit CSPRNG token
+    # The token is handed back to a human and pasted as a positional CLI arg to
+    # `invite revoke` / `redeem-invite`; a leading "-" would be parsed as an
+    # option (Click usage error, exit 2). Re-roll the (~1/64) leading-"-" tokens;
+    # 256-bit entropy is unaffected for any practical purpose.
+    while token.startswith("-"):
+        token = secrets.token_urlsafe(32)
     token_h = hash_token(token)
     expires_at = datetime.now(timezone.utc) + delta
     with _open_station(ctx) as st:
