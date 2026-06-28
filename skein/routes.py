@@ -5,7 +5,8 @@ SKEIN FastAPI routes.
 import logging
 import base64
 import re
-from datetime import datetime, timezone
+import time
+from datetime import datetime, timedelta, timezone
 from typing import List, Optional, Dict, Any
 from pathlib import Path
 from fastapi import APIRouter, HTTPException, Query, Header, Depends
@@ -52,6 +53,7 @@ from .utils import (
     enrich_folios_with_status,
     parse_relative_time,
     generate_agent_name,
+    format_relative_time,
 )
 
 logger = logging.getLogger(__name__)
@@ -267,9 +269,6 @@ async def get_roster_enriched(
     - Working site they're posting to
     - Folio count and last folio type
     """
-    from .utils import format_relative_time
-    from datetime import timedelta, timezone
-
     agents = store.get_agents(status=status)
     all_folios = store.get_folios()
 
@@ -458,27 +457,29 @@ async def get_sites_timestamps(
     return result
 
 
+def _raise_site_not_found(site_id: str, store: JSONStore) -> None:
+    """Raise a 404 with active-site suggestions in the detail message."""
+    all_sites = store.get_sites()
+    active_sites = [s for s in all_sites if s.status == "active"]
+    if active_sites:
+        site_ids = [s.site_id for s in active_sites[:50]]
+        suffix = f" (+{len(active_sites) - 50} more)" if len(active_sites) > 50 else ""
+        raise HTTPException(
+            status_code=404,
+            detail=f"Site '{site_id}' not found. Active sites: {', '.join(site_ids)}{suffix}. Run 'skein sites' for full list.",
+        )
+    raise HTTPException(
+        status_code=404,
+        detail=f"Site '{site_id}' not found. No active sites exist - create one with 'skein site create <id> \"description\"'",
+    )
+
+
 @router.get("/sites/{site_id}", response_model=Site)
 async def get_site(site_id: str, store: JSONStore = Depends(get_project_store)):
     """Get specific site."""
     site = store.get_site(site_id)
     if not site:
-        # Include available active sites in error message for better UX
-        all_sites = store.get_sites()
-        active_sites = [s for s in all_sites if s.status == "active"]
-        if active_sites:
-            site_ids = [s.site_id for s in active_sites[:50]]
-            suffix = (
-                f" (+{len(active_sites) - 50} more)" if len(active_sites) > 50 else ""
-            )
-            raise HTTPException(
-                status_code=404,
-                detail=f"Site '{site_id}' not found. Active sites: {', '.join(site_ids)}{suffix}. Run 'skein sites' for full list.",
-            )
-        raise HTTPException(
-            status_code=404,
-            detail=f"Site '{site_id}' not found. No active sites exist - create one with 'skein site create <id> \"description\"'",
-        )
+        _raise_site_not_found(site_id, store)
     return site
 
 
@@ -540,6 +541,8 @@ GENERIC_TITLES = {
     "task",
 }
 
+_DEFAULT_TITLE_EXAMPLE = 'e.g., "Clear description of what this folio is about"'
+
 TITLE_EXAMPLES = {
     "brief": 'e.g., "Implement OAuth for API endpoints" or "Fix race condition in websocket handler"',
     "issue": 'e.g., "Agents crash when site_id contains spaces" or "Memory leak in long-running sessions"',
@@ -584,9 +587,7 @@ def validate_folio_title(title: str, folio_type: str) -> str:
     """
     # Must have a title
     if not title or not title.strip():
-        example = TITLE_EXAMPLES.get(
-            folio_type, 'e.g., "Clear description of what this folio is about"'
-        )
+        example = TITLE_EXAMPLES.get(folio_type, _DEFAULT_TITLE_EXAMPLE)
         raise HTTPException(
             status_code=400,
             detail=f"{folio_type.capitalize()} needs a title that describes what it's about.\n\n{example}",
@@ -616,9 +617,7 @@ def validate_folio_title(title: str, folio_type: str) -> str:
 
     # Check for generic/lazy titles
     if title.lower() in GENERIC_TITLES:
-        example = TITLE_EXAMPLES.get(
-            folio_type, 'e.g., "Clear description of what this folio is about"'
-        )
+        example = TITLE_EXAMPLES.get(folio_type, _DEFAULT_TITLE_EXAMPLE)
         raise HTTPException(
             status_code=400,
             detail=f'"{title}" is too generic - what\'s this {folio_type} actually about?\n\n{example}',
@@ -626,9 +625,7 @@ def validate_folio_title(title: str, folio_type: str) -> str:
 
     # Check minimum length (avoid "ok", "done", etc.)
     if len(title) < 10:
-        example = TITLE_EXAMPLES.get(
-            folio_type, 'e.g., "Clear description of what this folio is about"'
-        )
+        example = TITLE_EXAMPLES.get(folio_type, _DEFAULT_TITLE_EXAMPLE)
         raise HTTPException(
             status_code=400,
             detail=f'"{title}" is too brief ({len(title)} chars) - give a bit more detail so others know what this covers.\n\n{example}',
@@ -639,6 +636,19 @@ def validate_folio_title(title: str, folio_type: str) -> str:
         title = title[:97] + "..."
 
     return title
+
+
+HYPOTHESIS_VERDICTS = {
+    "confirmed",
+    "disconfirmed",
+    "inconclusive",
+    "deferred",
+    "blocked",
+}
+
+HYPOTHESIS_PRIORITIES = {"high", "medium", "low"}
+
+PRIORITY_ORDER = {"high": 0, "medium": 1, "low": 2}
 
 
 @router.post("/sites/{site_id}/folios")
@@ -664,22 +674,7 @@ async def post_to_site(
     # Verify site exists
     site = store.get_site(site_id)
     if not site:
-        # Include available active sites in error message for better UX
-        all_sites = store.get_sites()
-        active_sites = [s for s in all_sites if s.status == "active"]
-        if active_sites:
-            site_ids = [s.site_id for s in active_sites[:50]]
-            suffix = (
-                f" (+{len(active_sites) - 50} more)" if len(active_sites) > 50 else ""
-            )
-            raise HTTPException(
-                status_code=404,
-                detail=f"Site '{site_id}' not found. Active sites: {', '.join(site_ids)}{suffix}. Run 'skein sites' for full list.",
-            )
-        raise HTTPException(
-            status_code=404,
-            detail=f"Site '{site_id}' not found. No active sites exist - create one with 'skein site create <id> \"description\"'",
-        )
+        _raise_site_not_found(site_id, store)
 
     created_by = x_agent_id or "unknown"
     folio_id = generate_folio_id(folio_create.type)
@@ -854,6 +849,26 @@ async def get_folio(
     return folio
 
 
+def _resolve_qualified_address(
+    folio_id: str, store: JSONStore
+) -> tuple:
+    """Resolve a possibly-qualified ``project:folio_id`` address.
+
+    Returns ``(store, folio_id)`` — either the original pair (unqualified) or
+    the target project's store and the bare folio ID (qualified).
+    """
+    parsed = parse_address(folio_id)
+    if parsed.is_qualified:
+        target_store = get_named_project_store(parsed.project)
+        if not target_store:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Project '{parsed.project}' not found in registry",
+            )
+        return target_store, parsed.folio_id
+    return store, folio_id
+
+
 @router.patch("/folios/{folio_id}")
 async def update_folio(
     folio_id: str,
@@ -863,17 +878,7 @@ async def update_folio(
     store: JSONStore = Depends(get_project_store),
 ):
     """Update folio fields (title, content, status, assigned_to, archived)."""
-    parsed = parse_address(folio_id)
-    if parsed.is_qualified:
-        # Explicit project — resolve to that project's store
-        target_store = get_named_project_store(parsed.project)
-        if not target_store:
-            raise HTTPException(
-                status_code=404,
-                detail=f"Project '{parsed.project}' not found in registry",
-            )
-        store = target_store
-        folio_id = parsed.folio_id
+    store, folio_id = _resolve_qualified_address(folio_id, store)
 
     folio = store.get_folio(folio_id)
     if not folio:
@@ -950,17 +955,7 @@ async def move_folio(
     Updates the folio's site_id and physically relocates the file.
     Optionally records a thread with the move reason.
     """
-    parsed = parse_address(folio_id)
-    if parsed.is_qualified:
-        target_store = get_named_project_store(parsed.project)
-        if not target_store:
-            raise HTTPException(
-                status_code=404,
-                detail=f"Project '{parsed.project}' not found in registry",
-            )
-        store = target_store
-        folio_id = parsed.folio_id
-
+    store, folio_id = _resolve_qualified_address(folio_id, store)
     created_by = x_agent_id or "unknown"
 
     try:
@@ -1189,8 +1184,6 @@ async def unified_search(
         limit: Results per resource type (max 500)
         offset: Skip first N results
     """
-    import time
-
     start_time = time.time()
 
     # Parse resources
@@ -1665,6 +1658,25 @@ async def store_yield(
     return {"success": True, "sack_id": sack_id, "chain_id": yield_request.chain_id}
 
 
+def _build_yield(y: Dict[str, Any]) -> "Yield":
+    return Yield(
+        sack_id=y["sack_id"],
+        chain_id=y["chain_id"],
+        task_id=y["task_id"],
+        agent_id=y.get("agent_id"),
+        timestamp=datetime.fromisoformat(y["timestamp"]),
+        status=y["status"],
+        outcome=y.get("outcome") or "",
+        artifacts=y.get("artifacts") or [],
+        notes=y.get("notes"),
+        duration_seconds=y.get("duration_seconds"),
+        tokens_used=y.get("tokens_used"),
+        shard_path=y.get("shard_path"),
+        tender_id=y.get("tender_id"),
+        metadata=y.get("metadata") or {},
+    )
+
+
 @router.get("/yields/chain/{chain_id}", response_model=List[Yield])
 async def get_chain_yields(
     chain_id: str, log_db: LogDatabase = Depends(get_project_log_db)
@@ -1675,26 +1687,7 @@ async def get_chain_yields(
     Used by The Hand to inspect what happened in a chain.
     """
     yields_data = log_db.get_chain_yields(chain_id)
-
-    return [
-        Yield(
-            sack_id=y["sack_id"],
-            chain_id=y["chain_id"],
-            task_id=y["task_id"],
-            agent_id=y.get("agent_id"),
-            timestamp=datetime.fromisoformat(y["timestamp"]),
-            status=y["status"],
-            outcome=y.get("outcome") or "",
-            artifacts=y.get("artifacts") or [],
-            notes=y.get("notes"),
-            duration_seconds=y.get("duration_seconds"),
-            tokens_used=y.get("tokens_used"),
-            shard_path=y.get("shard_path"),
-            tender_id=y.get("tender_id"),
-            metadata=y.get("metadata") or {},
-        )
-        for y in yields_data
-    ]
+    return [_build_yield(y) for y in yields_data]
 
 
 @router.get("/yields/{sack_id}", response_model=Yield)
@@ -1705,22 +1698,7 @@ async def get_yield(sack_id: str, log_db: LogDatabase = Depends(get_project_log_
     if not yield_data:
         raise HTTPException(status_code=404, detail="Yield not found")
 
-    return Yield(
-        sack_id=yield_data["sack_id"],
-        chain_id=yield_data["chain_id"],
-        task_id=yield_data["task_id"],
-        agent_id=yield_data.get("agent_id"),
-        timestamp=datetime.fromisoformat(yield_data["timestamp"]),
-        status=yield_data["status"],
-        outcome=yield_data.get("outcome") or "",
-        artifacts=yield_data.get("artifacts") or [],
-        notes=yield_data.get("notes"),
-        duration_seconds=yield_data.get("duration_seconds"),
-        tokens_used=yield_data.get("tokens_used"),
-        shard_path=yield_data.get("shard_path"),
-        tender_id=yield_data.get("tender_id"),
-        metadata=yield_data.get("metadata") or {},
-    )
+    return _build_yield(yield_data)
 
 
 @router.get("/yields/status/{status}", response_model=List[Yield])
@@ -1733,26 +1711,7 @@ async def get_yields_by_status(
     Useful for finding blocked work across all chains.
     """
     yields_data = log_db.get_yields_by_status(status)
-
-    return [
-        Yield(
-            sack_id=y["sack_id"],
-            chain_id=y["chain_id"],
-            task_id=y["task_id"],
-            agent_id=y.get("agent_id"),
-            timestamp=datetime.fromisoformat(y["timestamp"]),
-            status=y["status"],
-            outcome=y.get("outcome") or "",
-            artifacts=y.get("artifacts") or [],
-            notes=y.get("notes"),
-            duration_seconds=y.get("duration_seconds"),
-            tokens_used=y.get("tokens_used"),
-            shard_path=y.get("shard_path"),
-            tender_id=y.get("tender_id"),
-            metadata=y.get("metadata") or {},
-        )
-        for y in yields_data
-    ]
+    return [_build_yield(y) for y in yields_data]
 
 
 @router.get("/yields/agent/{agent_id}", response_model=List[Yield])
@@ -1761,43 +1720,12 @@ async def get_agent_yields(
 ):
     """Get all yields by a specific agent."""
     yields_data = log_db.get_agent_yields(agent_id)
-
-    return [
-        Yield(
-            sack_id=y["sack_id"],
-            chain_id=y["chain_id"],
-            task_id=y["task_id"],
-            agent_id=y.get("agent_id"),
-            timestamp=datetime.fromisoformat(y["timestamp"]),
-            status=y["status"],
-            outcome=y.get("outcome") or "",
-            artifacts=y.get("artifacts") or [],
-            notes=y.get("notes"),
-            duration_seconds=y.get("duration_seconds"),
-            tokens_used=y.get("tokens_used"),
-            shard_path=y.get("shard_path"),
-            tender_id=y.get("tender_id"),
-            metadata=y.get("metadata") or {},
-        )
-        for y in yields_data
-    ]
+    return [_build_yield(y) for y in yields_data]
 
 
 # ============================================================================
 # Hypothesis Endpoints
 # ============================================================================
-
-HYPOTHESIS_VERDICTS = {
-    "confirmed",
-    "disconfirmed",
-    "inconclusive",
-    "deferred",
-    "blocked",
-}
-
-HYPOTHESIS_PRIORITIES = {"high", "medium", "low"}
-
-PRIORITY_ORDER = {"high": 0, "medium": 1, "low": 2}
 
 
 class HypothesisVerdict(BaseModel):
