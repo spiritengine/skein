@@ -101,12 +101,19 @@ def sqlite_error_is_lock(e: sqlite3.OperationalError) -> bool:
     to the primary byte so lock-family extended codes count too, and fall back to
     the (stable) message text only when there is no code at all. Used by the ingress
     publish + redeem routes to degrade a transient lock to a retryable 503 while a
-    genuine (non-lock) fault still surfaces."""
+    genuine (non-lock) fault still surfaces.
+
+    The module-level ``sqlite3.SQLITE_BUSY``/``SQLITE_LOCKED`` constants are
+    ALSO Python >= 3.11 only -- getattr with a None default, not a bare
+    attribute access, so this doesn't AttributeError on 3.10 before the
+    ``primary is None`` fallback ever gets a chance to run."""
     code = getattr(e, "sqlite_errorcode", None)
     primary = (code & 0xFF) if isinstance(code, int) else None
-    return primary in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED) or (
-        primary is None and ("lock" in str(e).lower() or "busy" in str(e).lower())
-    )
+    if primary is not None:
+        busy = getattr(sqlite3, "SQLITE_BUSY", None)
+        locked = getattr(sqlite3, "SQLITE_LOCKED", None)
+        return primary in (busy, locked)
+    return "lock" in str(e).lower() or "busy" in str(e).lower()
 
 
 # verify_multi statuses meaning "could not check" — never cached, must re-verify.

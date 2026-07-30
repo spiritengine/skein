@@ -29,7 +29,12 @@ jobs:
       - name: Install linting dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install ruff mypy types-requests
+          # Install from requirements-dev.txt (not an ad-hoc unpinned list) so
+          # lint uses the same pinned ruff version as local dev and `test.yml`
+          # -- an unpinned `pip install ruff` drifts to whatever's newest on
+          # each run, and a new ruff release enabling new default rules can
+          # fail the build on code nobody touched.
+          pip install -r requirements-dev.txt
 
       # Formatting is NOT gated: the codebase is hand-formatted (black/isort, 100
       # cols) and a wholesale `ruff format` reflow would churn carefully-written

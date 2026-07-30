@@ -2217,13 +2217,17 @@ class LogDatabase:
                 )
                 return 0
 
-        # Collect all folio JSON files
+        # Collect all folio JSON files. Sorted, not raw iterdir()/glob() order
+        # -- both are filesystem-dependent with no ordering guarantee, and a
+        # duplicate slug across sites relies on "first wins" below being
+        # deterministic (it previously wasn't: which file counted as "first"
+        # could differ by OS/filesystem).
         folio_files = []
-        for site_dir in sites_dir.iterdir():
+        for site_dir in sorted(sites_dir.iterdir()):
             if site_dir.is_dir():
                 folios_dir = site_dir / "folios"
                 if folios_dir.exists():
-                    folio_files.extend(folios_dir.glob("*.json"))
+                    folio_files.extend(sorted(folios_dir.glob("*.json")))
 
         if not folio_files:
             return 0

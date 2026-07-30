@@ -37,6 +37,8 @@ from skein.migrations.drop_refs_control import migrate_db
 from skein.models import Thread
 from skein.utils import generate_thread_id
 
+REPO_ROOT = Path(__file__).resolve().parent.parent
+
 
 @pytest.fixture
 def tmp_dir():
@@ -280,7 +282,7 @@ class TestAuditRound2Regressions:
             [sys.executable, "-m", "skein.migrations.verify_threads_control",
              str(tmp_dir / "post.db")],
             capture_output=True, text=True,
-            cwd="/home/patrick/projects/skein")
+            cwd=REPO_ROOT)
         out = proc.stdout
         assert "SKIP" in out and "oracle inapplicable" in out, out
         assert "NOTHING VERIFIED" in out, out
