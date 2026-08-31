@@ -6714,6 +6714,59 @@ def shard_list(ctx, active, filter_agent, output_json):
         raise click.ClickException(f"Failed to list SHARDs: {e}")
 
 
+@shard.command("where")
+@click.argument("worktree_name")
+@click.option("--path-only", is_flag=True, help="Print just the worktree path")
+@click.option("--json", "output_json", is_flag=True, help="Output as JSON")
+@click.pass_context
+def shard_where(ctx, worktree_name, output_json, path_only):
+    """
+    Show where a SHARD's worktree lives and which repo it came from.
+
+    SHARD worktrees live outside the project tree (under SKEIN_HOME, or
+    wherever SKEIN_WORKTREES_DIR points), so this is how you find one. The
+    origin repo is read from the worktree's own .git file, so it stays
+    correct even if the worktree has been moved.
+
+    Examples:
+        skein shard where my-feature-20260113-001
+        cd "$(skein shard where my-feature-20260113-001 --path-only)"
+        skein shard where my-feature-20260113-001 --json
+    """
+    shard_worktree = get_shard_worktree_module()
+
+    try:
+        location = shard_worktree.get_shard_location(worktree_name)
+    except shard_worktree.ShardError as e:
+        raise click.ClickException(str(e))
+    except Exception as e:
+        raise click.ClickException(f"Failed to locate SHARD: {e}")
+
+    if path_only:
+        click.echo(location["worktree_path"])
+        return
+
+    if output_json:
+        import json
+
+        click.echo(json.dumps(location, indent=2))
+        return
+
+    click.echo(f"SHARD: {location['worktree_name']}")
+    click.echo(f"  Worktree:     {location['worktree_path']}")
+    click.echo(f"  Origin repo:  {location['project_root']}")
+    if location["branch_name"]:
+        click.echo(f"  Branch:       {location['branch_name']}")
+    click.echo(f"  Worktrees in: {location['worktrees_dir']}")
+
+    if not location["exists"]:
+        click.echo()
+        click.echo(f"⚠️  Worktree directory does not exist ({location['source']} path)")
+    elif not location["registered"]:
+        click.echo()
+        click.echo("⚠️  Directory exists but git does not list it as a worktree")
+
+
 @shard.command("show")
 @click.argument("worktree_name")
 @click.pass_context
@@ -7011,7 +7064,7 @@ def shard_graft(ctx, worktree_name):
         skein shard graft my-shard-001
 
     After resolving conflicts (if any):
-        cd worktrees/my-shard-001-graft/
+        cd <graft worktree path, printed above>
         git add <resolved files>
         git commit
         skein shard merge my-shard-001-graft
@@ -7198,8 +7251,9 @@ def shard_merge(ctx, worktree_name, explicit_caller_cwd):
                     click.echo("\nCleanup worktree chain:")
                     click.echo(f"  → skein shard cleanup {root} --chain")
                     click.echo("\nThis will remove:")
+                    worktrees_dir = shard_worktree.get_worktrees_dir()
                     for wt in chain:
-                        click.echo(f"  - worktrees/{wt}/")
+                        click.echo(f"  - {worktrees_dir / wt}/")
             else:
                 click.echo("\nCleanup worktree:")
                 click.echo(f"  → skein shard cleanup {worktree_name}")

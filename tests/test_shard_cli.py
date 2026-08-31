@@ -454,6 +454,134 @@ class TestShardCleanupCli:
         assert shard_module.cleanup_calls == []
 
 
+def _make_where_shard_module(**overrides):
+    """Return a mock shard module wired up for `shard where` tests."""
+    m = MagicMock()
+
+    class ShardError(Exception):
+        pass
+
+    m.ShardError = ShardError
+    location = {
+        "worktree_name": "demo-shard-20260101-001",
+        "worktree_path": "/home/agent/.skein/worktrees/skein-ab12cd34/demo-shard-20260101-001",
+        "worktrees_dir": "/home/agent/.skein/worktrees/skein-ab12cd34",
+        "project_root": "/home/agent/projects/skein",
+        "branch_name": "shard-demo-shard-20260101-001",
+        "exists": True,
+        "registered": True,
+        "source": "git",
+    }
+    location.update(overrides)
+    m.get_shard_location.return_value = location
+    return m
+
+
+class TestShardWhereCli:
+    def test_where_prints_path_and_origin_repo(self):
+        runner = CliRunner()
+        shard_module = _make_where_shard_module()
+
+        with patch("client.cli.get_shard_worktree_module", return_value=shard_module):
+            result = runner.invoke(
+                cli,
+                ["shard", "where", "demo-shard-20260101-001"],
+                catch_exceptions=False,
+            )
+
+        assert result.exit_code == 0, result.output
+        assert "/home/agent/.skein/worktrees/skein-ab12cd34/demo-shard-20260101-001" in (
+            result.output
+        )
+        assert "/home/agent/projects/skein" in result.output
+        assert "shard-demo-shard-20260101-001" in result.output
+        assert "⚠️" not in result.output
+
+    def test_path_only_prints_a_bare_path(self):
+        """WHY: The point of --path-only is `cd "$(skein shard where X --path-only)"`,
+        which breaks if anything else is on stdout."""
+        runner = CliRunner()
+        shard_module = _make_where_shard_module()
+
+        with patch("client.cli.get_shard_worktree_module", return_value=shard_module):
+            result = runner.invoke(
+                cli,
+                ["shard", "where", "demo-shard-20260101-001", "--path-only"],
+                catch_exceptions=False,
+            )
+
+        assert result.exit_code == 0, result.output
+        assert result.output.strip() == (
+            "/home/agent/.skein/worktrees/skein-ab12cd34/demo-shard-20260101-001"
+        )
+
+    def test_json_output_is_the_full_location(self):
+        import json
+
+        runner = CliRunner()
+        shard_module = _make_where_shard_module()
+
+        with patch("client.cli.get_shard_worktree_module", return_value=shard_module):
+            result = runner.invoke(
+                cli,
+                ["shard", "where", "demo-shard-20260101-001", "--json"],
+                catch_exceptions=False,
+            )
+
+        assert result.exit_code == 0, result.output
+        payload = json.loads(result.output)
+        assert payload["project_root"] == "/home/agent/projects/skein"
+        assert payload["source"] == "git"
+
+    def test_missing_worktree_is_flagged(self):
+        runner = CliRunner()
+        shard_module = _make_where_shard_module(
+            exists=False, registered=False, source="expected"
+        )
+
+        with patch("client.cli.get_shard_worktree_module", return_value=shard_module):
+            result = runner.invoke(
+                cli,
+                ["shard", "where", "demo-shard-20260101-001"],
+                catch_exceptions=False,
+            )
+
+        assert result.exit_code == 0, result.output
+        assert "does not exist" in result.output
+        assert "expected" in result.output
+
+    def test_unregistered_worktree_is_flagged(self):
+        """WHY: A directory git no longer tracks is a different problem from a
+        missing one, and needs a different fix."""
+        runner = CliRunner()
+        shard_module = _make_where_shard_module(
+            exists=True, registered=False, source="database"
+        )
+
+        with patch("client.cli.get_shard_worktree_module", return_value=shard_module):
+            result = runner.invoke(
+                cli,
+                ["shard", "where", "demo-shard-20260101-001"],
+                catch_exceptions=False,
+            )
+
+        assert result.exit_code == 0, result.output
+        assert "does not list it as a worktree" in result.output
+
+    def test_shard_error_becomes_a_clean_cli_error(self):
+        runner = CliRunner()
+        shard_module = _make_where_shard_module()
+        shard_module.get_shard_location.side_effect = shard_module.ShardError(
+            "Worktree name is required"
+        )
+
+        with patch("client.cli.get_shard_worktree_module", return_value=shard_module):
+            result = runner.invoke(cli, ["shard", "where", "x"])
+
+        assert result.exit_code != 0
+        assert "Worktree name is required" in result.output
+
+
 def _make_tender_shard_module(project_name="warp"):
     """Return a mock shard module wired up for tender tests."""
     m = MagicMock()

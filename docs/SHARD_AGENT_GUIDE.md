@@ -7,7 +7,7 @@
 ## What Are Shards?
 
 Shards provide isolated git worktrees for agents to work in parallel without conflicts. Each shard is:
-- A separate working directory (`worktrees/<shard-name>/`)
+- A separate working directory, living OUTSIDE the project tree (see below)
 - An isolated git branch (`shard-<shard-name>`)
 - Tracked in SQLite with metadata (base commit, creation time, etc.)
 
@@ -16,6 +16,16 @@ Shards provide isolated git worktrees for agents to work in parallel without con
 - Master branch stays clean until work is reviewed
 - Easy to abandon work that doesn't pan out
 - Built-in drift detection shows when your work diverged from master
+
+**Where shard worktrees live:** under `<SKEIN_HOME>/worktrees/<project>-<hash>/<shard-name>/`
+(default `~/.skein/worktrees/...`), not inside your project directory. This is deliberate — a
+shard is where an agent actively edits files, and nesting that inside the project meant any
+consuming app's own file watcher (dev-server hot-reload, build tooling, etc.) would see shard
+activity as changes to the host project itself. Set `SKEIN_WORKTREES_DIR` to override the
+location explicitly — it can point anywhere, and nothing requires the word "worktrees" in it.
+Use `skein shard where <name>` (below) to find a shard's directory; examples that show
+`cd worktrees/<name>/` are shorthand for "cd into the shard's directory", never a literal
+relative path.
 
 ---
 
@@ -29,7 +39,7 @@ skein shard spawn my-feature
 # Creates: worktrees/my-feature-20260113-001/
 
 # 2. Work in the shard
-cd worktrees/my-feature-20260113-001/
+cd "$(skein shard where my-feature-20260113-001 --path-only)"
 # ... make changes ...
 git add . && git commit -m "Implement feature"
 
@@ -66,7 +76,7 @@ skein shard spawn implement-spec --brief brief-20260113-xyz
 ```
 
 **What it does:**
-- Creates `worktrees/<name>-YYYYMMDD-NNN/` directory
+- Creates a `<name>-YYYYMMDD-NNN/` worktree directory under `<SKEIN_HOME>/worktrees/<project>-<hash>/`
 - Creates `shard-<name>-YYYYMMDD-NNN` branch from current master
 - Records base commit in SQLite for drift tracking
 - Returns path to new worktree
@@ -74,9 +84,45 @@ skein shard spawn implement-spec --brief brief-20260113-xyz
 **Output:**
 ```
 Spawned SHARD: fix-bug-20260113-001
-  Path: /home/patrick/projects/skein/worktrees/fix-bug-20260113-001
+  Path: /home/patrick/.skein/worktrees/skein-3f9a2b1c/fix-bug-20260113-001
   Branch: shard-fix-bug-20260113-001
 ```
+
+### `skein shard where <name>`
+
+Find a shard's worktree and the repo it came from. Since worktrees live outside
+the project tree, this is how you get back to one.
+
+```bash
+skein shard where fix-bug-20260113-001
+
+# cd straight into it
+cd "$(skein shard where fix-bug-20260113-001 --path-only)"
+
+# machine-readable
+skein shard where fix-bug-20260113-001 --json
+```
+
+**Output:**
+```
+SHARD: fix-bug-20260113-001
+  Worktree:     /home/patrick/.skein/worktrees/skein-3f9a2b1c/fix-bug-20260113-001
+  Origin repo:  /home/patrick/projects/skein
+  Branch:       shard-fix-bug-20260113-001
+  Worktrees in: /home/patrick/.skein/worktrees/skein-3f9a2b1c
+```
+
+Shards created by an older skein, back when worktrees lived at
+`<project>/worktrees/<name>/`, are still found by `where`, `list`, `merge`, and
+`cleanup` — the old location is searched, though never written to. Nothing needs
+migrating by hand.
+
+The origin repo is read from the worktree's own `.git` file, which git writes as
+`gitdir: /path/to/repo/.git/worktrees/<name>`. That pointer travels with the
+worktree, so the answer stays correct even if the worktree has been moved by
+hand or `SKEIN_WORKTREES_DIR` has since changed. If the directory is missing or
+git no longer tracks it, the command says so rather than printing a path that
+isn't there.
 
 ### `skein shard review <name>`
 
@@ -690,10 +736,10 @@ Worktree was deleted manually. Clean up branch:
 git branch -D shard-my-feature-20260113-001
 ```
 
-Or recreate worktree (if work is valuable):
+Or recreate worktree (if work is valuable), under your SKEIN_HOME worktrees dir:
 
 ```bash
-git worktree add worktrees/my-feature-20260113-001 shard-my-feature-20260113-001
+git worktree add ~/.skein/worktrees/<project>-<hash>/my-feature-20260113-001 shard-my-feature-20260113-001
 ```
 
 ---
