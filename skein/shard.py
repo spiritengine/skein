@@ -6,6 +6,7 @@ Manages git worktrees for SHARD agent coordination workflow.
 Provides core functions for creating, cleaning up, and listing SHARDs.
 """
 
+import hashlib
 import os
 import re
 import json
@@ -18,6 +19,8 @@ try:
     import git
 except ImportError:
     git = None
+
+from skein.storage import skein_home
 
 
 class ShardError(Exception):
@@ -33,6 +36,7 @@ class ShardError(Exception):
 SHARD_DB_SCHEMA = """
 CREATE TABLE IF NOT EXISTS shards (
     worktree_name TEXT PRIMARY KEY,
+    worktree_path TEXT,
     parent_worktree TEXT,
     base_commit TEXT NOT NULL,
     base_branch TEXT DEFAULT 'master',
@@ -70,14 +74,23 @@ def _get_db_connection() -> sqlite3.Connection:
     conn.executescript(SHARD_DB_SCHEMA)
     conn.commit()
 
-    # Migrate: add base_branch column if missing (for existing DBs)
+    # Migrate: add columns missing from DBs created by older versions
     try:
         cursor = conn.execute("PRAGMA table_info(shards)")
         columns = {row[1] for row in cursor.fetchall()}
-        if "base_branch" not in columns:
-            conn.execute(
-                "ALTER TABLE shards ADD COLUMN base_branch TEXT DEFAULT 'master'"
-            )
+        migrations = (
+            (
+                "base_branch",
+                "ALTER TABLE shards ADD COLUMN base_branch TEXT DEFAULT 'master'",
+            ),
+            ("worktree_path", "ALTER TABLE shards ADD COLUMN worktree_path TEXT"),
+        )
+        added = False
+        for column, statement in migrations:
+            if column not in columns:
+                conn.execute(statement)
+                added = True
+        if added:
             conn.commit()
     except Exception:
         pass  # Best effort migration
@@ -94,20 +107,30 @@ def _record_shard_metadata(
     description: Optional[str] = None,
     parent_worktree: Optional[str] = None,
     base_branch: Optional[str] = None,
+    worktree_path: Optional[str] = None,
 ) -> None:
-    """Record shard metadata in SQLite database."""
+    """Record shard metadata in SQLite database.
+
+    worktree_path is stored so a shard stays locatable even if the worktrees
+    directory later moves (SKEIN_WORKTREES_DIR changes, SKEIN_HOME differs
+    between callers). Falls back to the current worktrees dir when the caller
+    doesn't supply one.
+    """
     if base_branch is None:
         base_branch = _detect_default_branch()
+    if worktree_path is None:
+        worktree_path = str(get_worktrees_dir() / worktree_name)
     conn = _get_db_connection()
     try:
         conn.execute(
             """
             INSERT OR REPLACE INTO shards
-            (worktree_name, base_commit, base_branch, created_at, spawned_by, brief_id, description, parent_worktree, status)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active')
+            (worktree_name, worktree_path, base_commit, base_branch, created_at, spawned_by, brief_id, description, parent_worktree, status)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active')
         """,
             (
                 worktree_name,
+                worktree_path,
                 base_commit,
                 base_branch,
                 created_at.isoformat(),
@@ -276,19 +299,11 @@ def _find_project_root() -> Path:
                 # Found the real project root
                 return current
             elif git_path.is_file():
-                # This is a worktree - read the file to find the actual repo
-                # Format: gitdir: /path/to/main/repo/.git/worktrees/name
-                try:
-                    with open(git_path) as f:
-                        gitdir_line = f.read().strip()
-                    if gitdir_line.startswith("gitdir: "):
-                        gitdir_path = gitdir_line[8:]  # Remove 'gitdir: ' prefix
-                        # Extract main repo path: /.../repo/.git/worktrees/name -> /.../repo
-                        main_repo = Path(gitdir_path).parent.parent.parent
-                        if (main_repo / ".git").is_dir():
-                            return main_repo
-                except Exception:
-                    pass
+                # This is a worktree - its .git file names the origin repo,
+                # which is what makes a worktree traceable from anywhere.
+                origin = _origin_repo_of_worktree(current)
+                if origin is not None:
+                    return origin
         current = current.parent
 
     # Fallback: couldn't find git repo
@@ -296,6 +311,26 @@ def _find_project_root() -> Path:
         "Not in a git repository. Run 'skein shard' commands from within a git repo, "
         "or set SKEIN_PROJECT env var."
     )
+
+
+def _default_worktrees_dir(project_root: Path) -> Path:
+    """Compute where shard worktrees live for a given project.
+
+    Worktrees deliberately live OUTSIDE the project's own directory tree
+    (under SKEIN_HOME, keyed by project name + a short hash of the resolved
+    project path to avoid collisions between same-named repos in different
+    locations). A shard worktree is where an agent actively edits files —
+    nesting that inside the project meant every consuming app's own file
+    watcher (dev-server hot-reload, build tooling, etc.) would see shard
+    activity as changes to the host project itself. Set SKEIN_WORKTREES_DIR
+    to override this location explicitly.
+    """
+    override = os.environ.get("SKEIN_WORKTREES_DIR")
+    if override:
+        return Path(override).resolve()
+    resolved = project_root.resolve()
+    digest = hashlib.sha256(str(resolved).encode()).hexdigest()[:8]
+    return skein_home() / "worktrees" / f"{resolved.name}-{digest}"
 
 
 # Lazy-initialized project root. None means not yet resolved.
@@ -309,7 +344,7 @@ def get_project_root() -> Path:
     global _PROJECT_ROOT, _WORKTREES_DIR
     if _PROJECT_ROOT is None:
         _PROJECT_ROOT = _find_project_root()
-        _WORKTREES_DIR = _PROJECT_ROOT / "worktrees"
+        _WORKTREES_DIR = _default_worktrees_dir(_PROJECT_ROOT)
     return _PROJECT_ROOT
 
 
@@ -319,6 +354,77 @@ def get_worktrees_dir() -> Path:
     if _WORKTREES_DIR is None:
         get_project_root()  # This sets _WORKTREES_DIR
     return _WORKTREES_DIR
+
+
+def legacy_worktrees_dir() -> Path:
+    """
+    Where shard worktrees lived before they moved out of the project tree.
+
+    Nothing is ever created here. It is searched so that worktrees spawned by
+    an older skein stay listable - and therefore mergeable and cleanable -
+    after upgrading, instead of silently disappearing from `shard list`.
+    """
+    return get_project_root() / "worktrees"
+
+
+def shard_search_dirs() -> List[Path]:
+    """
+    Every directory that may hold this project's shard worktrees.
+
+    New shards always go to get_worktrees_dir(); the legacy in-project
+    location is included for discovery only (see legacy_worktrees_dir).
+    """
+    dirs = [get_worktrees_dir()]
+    legacy = legacy_worktrees_dir()
+    if legacy not in dirs:
+        dirs.append(legacy)
+    return dirs
+
+
+def _path_forms(path: Path) -> List[Path]:
+    """
+    Return a path plus its symlink-resolved form, when they differ.
+
+    Both are needed because git reports worktree paths already resolved
+    (/private/var on macOS) while SKEIN_HOME may still be expressed through
+    the symlink (/var) - comparing only one form misses real matches.
+    """
+    forms = [path]
+    try:
+        resolved = path.resolve()
+    except OSError:
+        return forms
+    if resolved != path:
+        forms.append(resolved)
+    return forms
+
+
+def _is_known_shard_location(path: Path) -> bool:
+    """
+    Check whether a path lives inside a directory that holds our shards.
+
+    Uses path containment rather than testing for the substring "worktrees".
+    SKEIN_WORKTREES_DIR can point anywhere, so a path that holds shards need
+    not contain that word - and a path that contains it need not be ours.
+
+    Args:
+        path: Path to test
+
+    Returns:
+        True if path is inside (or equal to) a shard worktrees directory
+    """
+    try:
+        search_dirs = shard_search_dirs()
+    except ShardError:
+        return False
+
+    candidates = _path_forms(path)
+    return any(
+        candidate.is_relative_to(base)
+        for search_dir in search_dirs
+        for base in _path_forms(search_dir)
+        for candidate in candidates
+    )
 
 
 def set_project_root(path: str) -> None:
@@ -337,7 +443,7 @@ def set_project_root(path: str) -> None:
         raise ShardError(f"Not a git repository: {path}")
 
     _PROJECT_ROOT = project_path
-    _WORKTREES_DIR = _PROJECT_ROOT / "worktrees"
+    _WORKTREES_DIR = _default_worktrees_dir(_PROJECT_ROOT)
 
 
 def _get_repo() -> "git.Repo":
@@ -615,8 +721,9 @@ def spawn_shard(
         )
 
     worktrees_dir = get_worktrees_dir()
-    # Ensure worktrees directory exists
-    worktrees_dir.mkdir(exist_ok=True)
+    # Ensure worktrees directory exists (now outside the project tree, so
+    # intermediate SKEIN_HOME/worktrees/ parents may not exist yet either)
+    worktrees_dir.mkdir(parents=True, exist_ok=True)
 
     # Generate date and sequence
     date = datetime.now(timezone.utc).strftime("%Y%m%d")
@@ -657,6 +764,7 @@ def spawn_shard(
         description=description,
         parent_worktree=parent_worktree_name,  # Track nested shard relationship
         base_branch=base_branch,
+        worktree_path=str(worktree_path.absolute()),
     )
 
     # Return SHARD info
@@ -866,9 +974,11 @@ def list_shards(active_only: bool = True) -> List[Dict[str, str]]:
     for line in worktree_output.splitlines():
         if line.startswith("worktree "):
             if current_worktree:
-                # Process previous worktree
+                # Process previous worktree. No pre-filter here: deciding
+                # whether a path is one of ours is _parse_worktree_info's job,
+                # and it does a proper containment check.
                 path = current_worktree.get("worktree")
-                if path and "worktrees/" in path:
+                if path:
                     shard_info = _parse_worktree_info(path)
                     if shard_info:
                         shards.append(shard_info)
@@ -879,7 +989,7 @@ def list_shards(active_only: bool = True) -> List[Dict[str, str]]:
     # Don't forget last worktree
     if current_worktree:
         path = current_worktree.get("worktree")
-        if path and "worktrees/" in path:
+        if path:
             shard_info = _parse_worktree_info(path)
             if shard_info:
                 shards.append(shard_info)
@@ -901,19 +1011,12 @@ def _parse_worktree_info(worktree_path: str) -> Optional[Dict[str, str]]:
         SHARD info dict or None if not a SHARD worktree
     """
     path = Path(worktree_path)
-    worktrees_dir = get_worktrees_dir()
 
-    # Check if this is in our worktrees directory
-    # Use path containment check rather than fragile string matching
-    try:
-        if worktrees_dir.exists() and worktrees_dir.is_dir():
-            path.relative_to(worktrees_dir)  # Raises ValueError if not contained
-        elif "worktrees/" not in str(path):
-            return None
-    except ValueError:
-        # Path is not inside worktrees_dir
-        if "worktrees/" not in str(path):
-            return None
+    # Check if this is in our worktrees directory. Containment only - a shard
+    # is ours because of where it sits, not because its path spells
+    # "worktrees" (see _is_known_shard_location).
+    if not _is_known_shard_location(path):
+        return None
 
     worktree_name = path.name
 
@@ -965,6 +1068,109 @@ def get_shard_status(worktree_name: str) -> Optional[Dict[str, str]]:
     for shard in shards:
         if shard["worktree_name"] == worktree_name:
             return shard
+    return None
+
+
+def get_shard_location(worktree_name: str) -> Dict[str, Any]:
+    """
+    Report where a SHARD's worktree lives and which repo it came from.
+
+    Answers the two questions that arise once worktrees no longer sit inside
+    the project tree: where is it, and what is it a worktree of. The origin
+    repo is read from the worktree's own .git file, so the answer stays
+    correct even if the worktree has been moved by hand.
+
+    Args:
+        worktree_name: Worktree directory name (or full path, which is
+            normalized to its final component)
+
+    Returns:
+        Dict with keys:
+        - worktree_name
+        - worktree_path: best known location (recorded, live, or expected)
+        - worktrees_dir: the configured worktrees directory
+        - project_root: the repo this shard's worktree belongs to
+        - branch_name: shard branch, or None if unknown
+        - exists: whether worktree_path is present on disk
+        - registered: whether git currently lists it as a worktree
+        - source: where worktree_path came from ("git", "database", or
+          "expected" when the shard is unknown to both)
+
+    Raises:
+        ShardError: if the name is not a valid shard name
+    """
+    worktree_name = Path(worktree_name).name
+    if not worktree_name:
+        raise ShardError("Worktree name is required")
+
+    worktrees_dir = get_worktrees_dir()
+
+    # Prefer git's live answer, fall back to what we recorded at spawn, and
+    # fall back again to where the shard would go if it were created now.
+    shard_info = get_shard_status(worktree_name)
+    metadata = _get_shard_metadata(worktree_name) or {}
+    recorded_path = metadata.get("worktree_path")
+
+    if shard_info:
+        worktree_path = Path(shard_info["worktree_path"])
+        source = "git"
+    elif recorded_path:
+        worktree_path = Path(recorded_path)
+        source = "database"
+    else:
+        worktree_path = worktrees_dir / worktree_name
+        source = "expected"
+
+    branch_name = None
+    if shard_info:
+        branch_name = shard_info.get("branch_name")
+    elif recorded_path or metadata:
+        branch_name = f"shard-{worktree_name}"
+
+    # Resolve the origin repo from the worktree itself when we can - this is
+    # the location-independent answer, and it beats our own configuration.
+    project_root = _origin_repo_of_worktree(worktree_path)
+    if project_root is None:
+        project_root = get_project_root()
+
+    return {
+        "worktree_name": worktree_name,
+        "worktree_path": str(worktree_path),
+        "worktrees_dir": str(worktrees_dir),
+        "project_root": str(project_root),
+        "branch_name": branch_name,
+        "exists": worktree_path.exists(),
+        "registered": shard_info is not None,
+        "source": source,
+    }
+
+
+def _origin_repo_of_worktree(worktree_path: Path) -> Optional[Path]:
+    """
+    Resolve the repo a linked worktree belongs to, by reading its .git file.
+
+    A linked worktree's .git is a file containing
+    "gitdir: /path/to/repo/.git/worktrees/<name>", which points home no matter
+    where the worktree itself has been placed.
+
+    Returns:
+        The origin repo path, or None if it can't be determined
+    """
+    git_path = worktree_path / ".git"
+    try:
+        if not git_path.is_file():
+            return None
+        gitdir_line = git_path.read_text().strip()
+    except OSError:
+        return None
+
+    if not gitdir_line.startswith("gitdir: "):
+        return None
+
+    # /.../repo/.git/worktrees/<name> -> /.../repo
+    main_repo = Path(gitdir_line[len("gitdir: ") :].strip()).parent.parent.parent
+    if (main_repo / ".git").is_dir():
+        return main_repo
     return None
 
 
@@ -2081,6 +2287,7 @@ def graft_shard(
         parent_worktree=worktree_name,
         description=f"Graft of {worktree_name} for conflict resolution",
         base_branch=base_branch,
+        worktree_path=str(graft_worktree_path.absolute()),
     )
 
     # Cherry-pick the shard's commits onto the new base as a SINGLE range
@@ -2254,29 +2461,33 @@ def detect_shard_environment() -> Optional[Dict[str, str]]:
         SHARD info dict if in a SHARD, None otherwise
         Dict contains: worktree_name, worktree_path, branch_name, name, date, seq
     """
-    cwd = Path.cwd()
-
-    # Check if we're in a worktree directory
-    if "worktrees" not in str(cwd):
-        return None
-
-    # Try to find the worktree root (should contain .git file pointing to main repo)
-    current = cwd
+    # Walk up looking for a worktree root. A linked worktree marks itself with
+    # a .git *file* (pointing back at the origin repo); a real repo root has a
+    # .git *directory*, which means we've left worktree territory.
+    #
+    # Deliberately no check on the shape of cwd: shards live wherever
+    # SKEIN_WORKTREES_DIR says, so an agent's ability to tell it is inside a
+    # shard must not depend on the word "worktrees" appearing in its path.
+    current = Path.cwd()
     worktree_root = None
 
     while current != current.parent:
-        git_file = current / ".git"
-        if git_file.exists() and git_file.is_file():
+        git_path = current / ".git"
+        if git_path.is_file():
             # This is a worktree (not main repo which has .git directory)
             worktree_root = current
             break
+        if git_path.is_dir():
+            # Reached a real repo root without passing through a worktree
+            return None
         current = current.parent
 
     if not worktree_root:
         return None
 
-    # Check if this worktree is in our worktrees directory
-    if not str(worktree_root).startswith(str(get_worktrees_dir())):
+    # Check if this worktree is in our worktrees directory. Containment, not a
+    # string prefix: /tmp/worktrees-backup must not match /tmp/worktrees.
+    if not _is_known_shard_location(worktree_root):
         return None
 
     # Get worktree name
