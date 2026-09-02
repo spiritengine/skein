@@ -8999,7 +8999,12 @@ def shard_stash(ctx, description, stash_agent, base_branch):
             except Exception:
                 pass
             try:
-                shard_worktree.cleanup_shard(worktree_name, keep_branch=False)
+                # Roll back the seconds-old shard; its only contents are the
+                # failed stash apply (the stash itself was just restored), so
+                # discarding is safe. The empty branch deletes by merge proof.
+                shard_worktree.cleanup_shard(
+                    worktree_name, keep_branch=False, discard_uncommitted=True
+                )
             except Exception:
                 pass
             raise click.ClickException(f"Failed to apply stash to new shard: {e}")
