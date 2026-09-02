@@ -1,0 +1,1111 @@
+#!/usr/bin/env python3
+"""
+Phase-1 suite for location-independent shards (WU-8 of brief-20260902-zpxe).
+
+Pins the pinned grammar (corpus over every clause), the state-handling
+matrix, the cleanup authority model (merge proof or --delete-unmerged-branch,
+with M1's no-row/no-base refusal), detached bindings, read purity, the
+frozen CLI/JSON contracts, and every intentional behavior change enumerated
+in the plan's section 8. Knuth refinements (finding-20260902-5t8f) are
+covered where marked: M1, O1, O3, O4, O5, O6, O8.
+"""
+
+import json
+import os
+import shutil
+import subprocess
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Generator
+from unittest.mock import patch
+
+import pytest
+from click.testing import CliRunner
+
+from skein.shard import (
+    ShardError,
+    cleanup_graft_chain,
+    cleanup_shard,
+    detect_shard_environment,
+    get_chain_cleanup_plan,
+    get_graft_chain,
+    get_shard_git_info,
+    get_shard_status,
+    get_triage_extras,
+    graft_shard,
+    list_shards,
+    merge_shard,
+    parse_shard_name,
+    reconcile_shards,
+    resolve_shard,
+    set_project_root,
+    shard_name_from_branch,
+    spawn_shard,
+    _get_db_connection,
+    _get_db_path,
+    _get_next_sequence,
+    _get_shard_metadata,
+    _placement_path,
+)
+
+
+# =============================================================================
+# FIXTURES
+# =============================================================================
+
+
+def _git(repo: Path, *args: str) -> str:
+    result = subprocess.run(
+        ["git", *args], cwd=repo, check=True, capture_output=True, text=True
+    )
+    return result.stdout
+
+
+@pytest.fixture
+def repo(tmp_path: Path) -> Generator[Path, None, None]:
+    """Isolated git repo on master, shard module pointed at it."""
+    import skein.shard as shard_module
+
+    repo_path = tmp_path / "phase1_repo"
+    repo_path.mkdir()
+    _git(repo_path, "init")
+    _git(repo_path, "config", "user.email", "test@example.com")
+    _git(repo_path, "config", "user.name", "Test User")
+    (repo_path / "README.md").write_text("# Phase 1\n")
+    _git(repo_path, "add", ".")
+    _git(repo_path, "commit", "-m", "Initial commit")
+    _git(repo_path, "branch", "-M", "master")
+
+    shard_module._PROJECT_ROOT = None
+    shard_module._WORKTREES_DIR = None
+    set_project_root(str(repo_path))
+
+    original_cwd = os.getcwd()
+    os.chdir(repo_path)
+
+    yield repo_path
+
+    os.chdir(original_cwd)
+    shard_module._PROJECT_ROOT = None
+    shard_module._WORKTREES_DIR = None
+
+
+def _commit_work(worktree: Path, filename: str = "work.txt") -> None:
+    (worktree / filename).write_text("work\n")
+    _git(worktree, "add", ".")
+    _git(worktree, "commit", "-m", f"work on {filename}")
+
+
+def _skein_dir_snapshot(repo: Path) -> dict:
+    """Byte-level snapshot of .skein (DB plus any sidecars)."""
+    skein_dir = repo / ".skein"
+    if not skein_dir.exists():
+        return {}
+    return {
+        str(p.relative_to(skein_dir)): p.read_bytes()
+        for p in sorted(skein_dir.rglob("*"))
+        if p.is_file()
+    }
+
+
+# =============================================================================
+# PINNED GRAMMAR CORPUS (Decision A; behavior change 2)
+# =============================================================================
+
+GRAMMAR_VALID = [
+    # plain
+    "foo-20260902-001",
+    "a-20260101-999",
+    # dashed stems (internal dashes allowed)
+    "api-v2-fix-20260902-001",
+    "prudence-ignite-0823-20260824-001",
+    # graft suffixes, single and repeated, canonical name keeps them
+    "foo-20260902-001-graft",
+    "foo-20260902-001-graft-graft",
+    # 'graft' inside the stem is left alone (only terminal suffixes strip)
+    "foo-graft-20260902-001",
+    # boundary sequences
+    "foo-20260902-001",
+    "foo-20260902-999",
+    # calendar edges that are real dates
+    "foo-20240229-001",  # leap day
+    "foo-20261231-001",
+]
+
+GRAMMAR_INVALID = [
+    # too few segments
+    "",
+    "foo",
+    "foo-123",
+    "300dcef3",  # Spindle fallback spool id shape
+    "codex-14c128f6",  # Spindle codex fallback shape
+    # empty stem
+    "-20260902-001",
+    # date: wrong width
+    "foo-bar-123",  # today's parser accepted this
+    "foo-2026090-001",
+    "foo-202609021-001",
+    # date: non-digit / non-ascii
+    "foo-2026090a-001",
+    "foo-²0260902-001",
+    # date: calendar-invalid
+    "foo-20261341-001",
+    "foo-20260230-001",
+    "foo-20260900-001",
+    # sequence: width and range
+    "foo-20260902-1",
+    "foo-20260902-0001",
+    "foo-20260902-000",
+    "foo-20260902-1000",
+    "foo-20260902-01a",
+    # graft that strips down to an invalid residue
+    "foo-123-graft",
+    "-20260902-001-graft",
+]
+
+
+class TestPinnedGrammar:
+    @pytest.mark.parametrize("name", GRAMMAR_VALID)
+    def test_valid_names_parse(self, name):
+        parsed = parse_shard_name(name)
+        assert parsed is not None, name
+        assert parsed["name"] == name  # canonical name keeps graft suffixes
+
+    @pytest.mark.parametrize("name", GRAMMAR_INVALID)
+    def test_invalid_names_rejected(self, name):
+        assert parse_shard_name(name) is None, name
+
+    def test_graft_depth_counted(self):
+        assert parse_shard_name("foo-20260902-001")["graft_depth"] == 0
+        assert parse_shard_name("foo-20260902-001-graft")["graft_depth"] == 1
+        assert parse_shard_name("foo-20260902-001-graft-graft")["graft_depth"] == 2
+
+    def test_stem_extraction(self):
+        assert parse_shard_name("api-v2-fix-20260902-001")["stem"] == "api-v2-fix"
+
+    def test_branch_derivation_normalizes_refs_heads(self):
+        # O1: porcelain reports refs/heads/<branch>
+        assert (
+            shard_name_from_branch("refs/heads/shard-foo-20260902-001")
+            == "foo-20260902-001"
+        )
+        assert shard_name_from_branch("shard-foo-20260902-001") == "foo-20260902-001"
+
+    def test_branch_without_prefix_is_not_a_shard(self):
+        assert shard_name_from_branch("worktree-foo-20260902-001") is None
+        assert shard_name_from_branch("master") is None
+        assert shard_name_from_branch(None) is None
+
+    def test_shard_branch_failing_grammar_is_not_a_shard(self):
+        assert shard_name_from_branch("shard-300dcef3") is None
+        assert shard_name_from_branch("refs/heads/shard-foo-bar-123") is None
+
+
+# =============================================================================
+# MEMBERSHIP FIXTURE MATRIX (WU-1)
+# =============================================================================
+
+
+class TestMembershipMatrix:
+    def test_full_worktree_zoo(self, repo: Path, tmp_path: Path):
+        """One of each worktree class; list_shards returns exactly the members
+        and triage surfaces the rest."""
+        # legacy member (in-tree, made by hand like the live 17)
+        legacy = repo / "worktrees" / "legacy-20260101-001"
+        _git(repo, "worktree", "add", str(legacy), "-b", "shard-legacy-20260101-001")
+
+        # arbitrary-location member
+        outside = tmp_path / "elsewhere" / "roamer-20260101-001"
+        _git(repo, "worktree", "add", str(outside), "-b", "shard-roamer-20260101-001")
+
+        # member moved to a changed basename
+        moved_src = repo / "worktrees" / "mover-20260101-001"
+        _git(repo, "worktree", "add", str(moved_src), "-b", "shard-mover-20260101-001")
+        moved_dst = tmp_path / "renamed-thing"
+        _git(repo, "worktree", "move", str(moved_src), str(moved_dst))
+
+        # non-shard worktree inside worktrees/
+        maint = repo / "worktrees" / "incident-47-toolchain"
+        _git(repo, "worktree", "add", str(maint), "-b", "maintenance/incident-47")
+
+        # grammar-shaped dirname on a worktree-* branch (CC isolation shape)
+        impostor = repo / "worktrees" / "impostor-20260101-001"
+        _git(repo, "worktree", "add", str(impostor), "-b", "worktree-impostor")
+
+        # Spindle fallback: shard-<hex8>
+        fallback = repo / "worktrees" / "300dcef3"
+        _git(repo, "worktree", "add", str(fallback), "-b", "shard-300dcef3")
+
+        # detached bound member (row binds the path)
+        bound = repo / "worktrees" / "bound-20260101-001"
+        _git(repo, "worktree", "add", str(bound), "-b", "shard-bound-20260101-001")
+        conn = _get_db_connection()
+        conn.execute(
+            "INSERT OR REPLACE INTO shards "
+            "(worktree_name, worktree_path, base_commit, base_branch, created_at, status) "
+            "VALUES (?, ?, 'abc', 'master', '2026-01-01T00:00:00+00:00', 'active')",
+            ("bound-20260101-001", str(bound)),
+        )
+        conn.commit()
+        conn.close()
+        _git(bound, "checkout", "--detach")
+
+        # detached unbound worktree
+        unbound = repo / "worktrees" / "unbound-20260101-001"
+        _git(repo, "worktree", "add", str(unbound), "-b", "shard-unbound-20260101-001")
+        _git(unbound, "checkout", "--detach")
+        _git(repo, "branch", "-D", "shard-unbound-20260101-001")
+
+        # branch-only shard (branch survives, no worktree)
+        _git(repo, "branch", "shard-ghost-20260101-001", "master")
+
+        names = {s["worktree_name"] for s in list_shards()}
+        assert names == {
+            "legacy-20260101-001",
+            "roamer-20260101-001",
+            "mover-20260101-001",
+            "bound-20260101-001",
+        }
+
+        by_name = {s["worktree_name"]: s for s in list_shards()}
+        assert by_name["mover-20260101-001"]["worktree_path"] == str(moved_dst)
+        assert by_name["bound-20260101-001"]["detached"] is True
+        assert by_name["bound-20260101-001"]["source"] == "db"
+        assert by_name["legacy-20260101-001"]["source"] == "git"
+
+        extras = get_triage_extras()
+        assert "shard-300dcef3" in [f["branch"] for f in extras["foreign"]]
+        assert str(unbound) in [d["path"] for d in extras["detached_unbound"]]
+        assert "ghost-20260101-001" in [b["name"] for b in extras["branch_only"]]
+        moved_names = [m["worktree_name"] for m in extras["moved"]]
+        assert "mover-20260101-001" in moved_names
+
+        # maintenance and worktree-* impostor appear nowhere as members
+        all_member_paths = {s["worktree_path"] for s in list_shards()}
+        assert str(maint) not in all_member_paths
+        assert str(impostor) not in all_member_paths
+
+    def test_db_absent_detached_degrades_to_unbound(self, repo: Path):
+        """WU-1 acceptance: list_shards succeeds with no DB; detached entries
+        surface as unbound rather than crashing."""
+        wt = repo / "worktrees" / "det-20260101-001"
+        _git(repo, "worktree", "add", str(wt), "-b", "shard-det-20260101-001")
+        _git(wt, "checkout", "--detach")
+
+        db_path = _get_db_path()
+        if db_path.exists():
+            db_path.unlink()
+
+        members = list_shards()
+        assert members == []
+        extras = get_triage_extras()
+        assert str(wt) in [d["path"] for d in extras["detached_unbound"]]
+
+
+# =============================================================================
+# DETACHED BINDINGS (Decision A; O5; behavior change 6)
+# =============================================================================
+
+
+class TestDetachedBindings:
+    def _spawn_and_detach(self, name: str):
+        info = spawn_shard(name)
+        _git(Path(info["worktree_path"]), "checkout", "--detach")
+        return info
+
+    def test_bound_detached_is_a_member_via_row(self, repo: Path):
+        info = self._spawn_and_detach("rebaser")
+        member = get_shard_status(info["worktree_name"])
+        assert member is not None
+        assert member["detached"] is True
+        assert member["source"] == "db"
+        assert member["branch_name"] == info["branch_name"]
+
+        resolution = resolve_shard(info["worktree_name"])
+        assert resolution["detached"] is True
+        assert resolution["source"] == "db"
+        assert Path(resolution["path"]) == Path(info["worktree_path"])
+
+    def test_unbound_detached_refuses_destructive_ops(self, repo: Path):
+        """Without a binding, the shard's name only reaches its branch —
+        never the detached directory — so cleanup refuses branch-only."""
+        info = self._spawn_and_detach("unbound")
+        # Remove the binding: clear the recorded path
+        conn = _get_db_connection()
+        conn.execute(
+            "UPDATE shards SET worktree_path = NULL WHERE worktree_name = ?",
+            (info["worktree_name"],),
+        )
+        conn.commit()
+        conn.close()
+
+        assert get_shard_status(info["worktree_name"]) is None
+
+        with pytest.raises(ShardError, match="branch-only"):
+            cleanup_shard(info["worktree_name"])
+
+        # branch untouched
+        assert "shard-" + info["worktree_name"] in _git(repo, "branch")
+
+    def test_duplicate_bindings_are_ambiguous_and_refuse(self, repo: Path):
+        """O5: multiple rows claiming one detached path are corrupt state -
+        triage-only, destructive operations refuse."""
+        info = self._spawn_and_detach("dupe")
+        conn = _get_db_connection()
+        conn.execute(
+            "INSERT OR REPLACE INTO shards "
+            "(worktree_name, worktree_path, base_commit, base_branch, created_at, status) "
+            "VALUES (?, ?, 'abc', 'master', '2026-01-01T00:00:00+00:00', 'active')",
+            ("phantom-20260101-001", info["worktree_path"]),
+        )
+        conn.commit()
+        conn.close()
+
+        extras = get_triage_extras()
+        amb_paths = [a["path"] for a in extras["detached_ambiguous"]]
+        assert info["worktree_path"] in amb_paths
+
+        resolution = resolve_shard(info["worktree_name"])
+        assert resolution["ambiguous"] is True
+        with pytest.raises(ShardError, match="multiple DB rows"):
+            cleanup_shard(info["worktree_name"])
+
+    def test_attached_member_wins_over_stale_binding(self, repo: Path):
+        """O5: a row whose name is attached elsewhere cannot bind a detached
+        tree; the attached git member wins and the tree stays unbound."""
+        info = spawn_shard("winner")
+        # Detached scratch tree at some path
+        scratch = repo / "worktrees" / "scratch-tree"
+        _git(repo, "worktree", "add", "--detach", str(scratch))
+        # Corrupt the winner's row to claim the scratch path
+        conn = _get_db_connection()
+        conn.execute(
+            "UPDATE shards SET worktree_path = ? WHERE worktree_name = ?",
+            (str(scratch), info["worktree_name"]),
+        )
+        conn.commit()
+        conn.close()
+
+        resolution = resolve_shard(info["worktree_name"])
+        assert resolution["source"] == "git"
+        assert Path(resolution["path"]) == Path(info["worktree_path"])
+
+        extras = get_triage_extras()
+        assert str(scratch) in [d["path"] for d in extras["detached_unbound"]]
+
+
+# =============================================================================
+# CLEANUP AUTHORITY (invariant 6; M1; O6; O8; behavior change 7)
+# =============================================================================
+
+
+class TestCleanupAuthority:
+    def test_no_commit_shard_deletes_under_merge_proof(self, repo: Path):
+        info = spawn_shard("empty")
+        result = cleanup_shard(info["worktree_name"])
+        assert result["branch_deleted"] is True
+        assert result["merged"] is True
+        assert result["row_deleted"] is True
+        assert info["branch_name"] not in _git(repo, "branch")
+
+    def test_unmerged_attached_refuses_without_override(self, repo: Path):
+        info = spawn_shard("unmerged")
+        _commit_work(Path(info["worktree_path"]))
+
+        with pytest.raises(ShardError, match="not provably merged"):
+            cleanup_shard(info["worktree_name"])
+
+        # No partial action: worktree, branch, and row all stay
+        assert Path(info["worktree_path"]).exists()
+        assert info["branch_name"] in _git(repo, "branch")
+        assert _get_shard_metadata(info["worktree_name"]) is not None
+
+    def test_discard_uncommitted_alone_is_not_deletion_authority(self, repo: Path):
+        """--yes maps to discard_uncommitted; it must never delete a branch."""
+        info = spawn_shard("yes-only")
+        _commit_work(Path(info["worktree_path"]))
+
+        with pytest.raises(ShardError, match="not provably merged"):
+            cleanup_shard(info["worktree_name"], discard_uncommitted=True)
+
+        assert info["branch_name"] in _git(repo, "branch")
+
+    def test_override_deletes_branch_and_row_together(self, repo: Path):
+        info = spawn_shard("override")
+        _commit_work(Path(info["worktree_path"]))
+
+        result = cleanup_shard(info["worktree_name"], delete_unmerged_branch=True)
+        assert result["branch_deleted"] is True
+        assert result["merged"] is False
+        assert info["branch_name"] not in _git(repo, "branch")
+        assert _get_shard_metadata(info["worktree_name"]) is None
+
+    def test_keep_branch_preserves_row_and_clears_path(self, repo: Path):
+        """Invariant 11: metadata follows the branch."""
+        info = spawn_shard("keeper")
+        _commit_work(Path(info["worktree_path"]))
+
+        result = cleanup_shard(info["worktree_name"], keep_branch=True,
+                               discard_uncommitted=True)
+        assert result["branch_preserved"] is True
+        assert result["path_cleared"] is True
+
+        row = _get_shard_metadata(info["worktree_name"])
+        assert row is not None
+        assert row["worktree_path"] is None
+        assert row["base_branch"] == "master"  # lineage intact
+        assert info["branch_name"] in _git(repo, "branch")
+
+    def test_no_row_no_base_refusal(self, repo: Path):
+        """M1 regression: without a row and without --base there is no base
+        to prove a merge against - refuse rather than guess, even for a
+        branch that IS in fact merged."""
+        wt = repo / "worktrees" / "norow-20260101-001"
+        _git(repo, "worktree", "add", str(wt), "-b", "shard-norow-20260101-001")
+
+        with pytest.raises(ShardError, match="no recorded base branch"):
+            cleanup_shard("norow-20260101-001")
+
+        assert wt.exists()
+        assert "shard-norow-20260101-001" in _git(repo, "branch")
+
+    def test_no_row_explicit_base_provides_proof(self, repo: Path):
+        wt = repo / "worktrees" / "norow2-20260101-001"
+        _git(repo, "worktree", "add", str(wt), "-b", "shard-norow2-20260101-001")
+
+        result = cleanup_shard("norow2-20260101-001", base_branch="master")
+        assert result["branch_deleted"] is True
+        assert result["merged"] is True
+
+    def test_no_row_override_still_works(self, repo: Path):
+        wt = repo / "worktrees" / "norow3-20260101-001"
+        _git(repo, "worktree", "add", str(wt), "-b", "shard-norow3-20260101-001")
+        _commit_work(wt)
+
+        result = cleanup_shard("norow3-20260101-001", delete_unmerged_branch=True)
+        assert result["branch_deleted"] is True
+        assert result["merged"] is False
+
+    def test_missing_worktree_preserves_branch_and_row(self, repo: Path):
+        """State matrix 'missing': prune the registration, keep the unmerged
+        branch AND its row, clearing only worktree_path."""
+        info = spawn_shard("vanisher")
+        _commit_work(Path(info["worktree_path"]))
+        shutil.rmtree(info["worktree_path"])
+
+        result = cleanup_shard(info["worktree_name"])
+        assert result["worktree_pruned"] is True
+        assert result["branch_preserved"] is True
+        assert result["branch_deleted"] is False
+        assert result["path_cleared"] is True
+        assert "branch --merged" in result["message"]
+
+        row = _get_shard_metadata(info["worktree_name"])
+        assert row is not None
+        assert row["worktree_path"] is None
+        assert row["base_branch"] == "master"
+        assert info["branch_name"] in _git(repo, "branch")
+
+        # Now branch-only: mutating commands refuse (invariant 12)
+        with pytest.raises(ShardError, match="branch-only"):
+            cleanup_shard(info["worktree_name"])
+
+    def test_missing_worktree_merged_branch_deletes_with_row(self, repo: Path):
+        info = spawn_shard("vanmerged")
+        shutil.rmtree(info["worktree_path"])
+
+        result = cleanup_shard(info["worktree_name"])
+        assert result["worktree_pruned"] is True
+        assert result["branch_deleted"] is True
+        assert result["row_deleted"] is True
+        assert info["branch_name"] not in _git(repo, "branch")
+
+    def test_missing_worktree_override_deletes(self, repo: Path):
+        info = spawn_shard("vanoverride")
+        _commit_work(Path(info["worktree_path"]))
+        shutil.rmtree(info["worktree_path"])
+
+        result = cleanup_shard(info["worktree_name"], delete_unmerged_branch=True)
+        assert result["branch_deleted"] is True
+        assert _get_shard_metadata(info["worktree_name"]) is None
+
+    def test_merge_refuses_missing_worktree(self, repo: Path):
+        info = spawn_shard("mergegone")
+        _commit_work(Path(info["worktree_path"]))
+        shutil.rmtree(info["worktree_path"])
+
+        with pytest.raises(ShardError, match="missing"):
+            merge_shard(info["worktree_name"])
+
+    def test_squash_merged_branch_still_needs_override(self, repo: Path):
+        """O6: ancestry is the only proof. An externally squash-merged branch
+        reads as unmerged - the safe direction - and needs the override."""
+        info = spawn_shard("squashed")
+        _commit_work(Path(info["worktree_path"]))
+        _git(repo, "merge", "--squash", info["branch_name"])
+        _git(repo, "commit", "-m", "squash of shard")
+
+        with pytest.raises(ShardError, match="not provably merged"):
+            cleanup_shard(info["worktree_name"])
+
+        result = cleanup_shard(info["worktree_name"], delete_unmerged_branch=True)
+        assert result["branch_deleted"] is True
+        assert result["merged"] is False
+
+    def test_locked_worktree_refuses(self, repo: Path):
+        """O8: locked porcelain entries resist prune/remove; fail safely."""
+        info = spawn_shard("padlock")
+        _git(repo, "worktree", "lock", info["worktree_path"])
+        try:
+            with pytest.raises(ShardError, match="locked"):
+                cleanup_shard(info["worktree_name"])
+            assert Path(info["worktree_path"]).exists()
+        finally:
+            _git(repo, "worktree", "unlock", info["worktree_path"])
+            cleanup_shard(info["worktree_name"])
+
+    def test_dirty_tree_refuses_without_confirmation(self, repo: Path):
+        info = spawn_shard("dirty")
+        (Path(info["worktree_path"]) / "junk.txt").write_text("junk")
+
+        with pytest.raises(ShardError, match="uncommitted changes"):
+            cleanup_shard(info["worktree_name"])
+
+        assert Path(info["worktree_path"]).exists()
+        result = cleanup_shard(info["worktree_name"], discard_uncommitted=True)
+        assert result["worktree_removed"] is True
+
+    def test_branch_only_names_refused_by_merge_too(self, repo: Path):
+        _git(repo, "branch", "shard-ghosty-20260101-001", "master")
+        with pytest.raises(ShardError, match="branch-only"):
+            merge_shard("ghosty-20260101-001")
+
+    def test_merge_without_row_requires_explicit_base(self, repo: Path):
+        wt = repo / "worktrees" / "nb-20260101-001"
+        _git(repo, "worktree", "add", str(wt), "-b", "shard-nb-20260101-001")
+        _commit_work(wt)
+
+        with pytest.raises(ShardError, match="--base"):
+            merge_shard("nb-20260101-001")
+
+        result = merge_shard("nb-20260101-001", base_branch="master")
+        assert result["success"] is True
+
+
+# =============================================================================
+# CHAIN CLEANUP (O7 taken conservatively; degraded-metadata refusal)
+# =============================================================================
+
+
+class TestChainCleanup:
+    def _make_chain(self, repo: Path):
+        info = spawn_shard("chainroot")
+        _commit_work(Path(info["worktree_path"]))
+        # advance master so the graft has a reason to exist
+        (repo / "advance.txt").write_text("advance\n")
+        _git(repo, "add", ".")
+        _git(repo, "commit", "-m", "advance master")
+        graft = graft_shard(info["worktree_name"])
+        return info, graft
+
+    def test_chain_refuses_without_parentage_rows(self, repo: Path):
+        """The -graft suffix is never proof of parentage."""
+        wt = repo / "worktrees" / "orph-20260101-001-graft"
+        _git(repo, "worktree", "add", str(wt), "-b", "shard-orph-20260101-001-graft")
+
+        with pytest.raises(ShardError, match="parentage"):
+            cleanup_graft_chain("orph-20260101-001-graft")
+
+        assert wt.exists()
+
+    def test_chain_plan_discloses_per_link(self, repo: Path):
+        info, graft = self._make_chain(repo)
+        plan = get_chain_cleanup_plan(info["worktree_name"])
+        names = [p["worktree_name"] for p in plan]
+        assert names == [info["worktree_name"], graft["graft_worktree_name"]]
+        for link in plan:
+            assert link["proof_base"] == "master"
+            assert link["merged"] is False  # both carry unmerged commits
+
+    def test_chain_without_override_preserves_unmerged_links(self, repo: Path):
+        info, graft = self._make_chain(repo)
+        result = cleanup_graft_chain(
+            info["worktree_name"], discard_uncommitted=True
+        )
+        # Both links refuse (attached, unmerged, no override): nothing removed
+        assert result["success"] is False
+        assert result["removed"] == []
+        assert info["branch_name"] in _git(repo, "branch")
+        assert "shard-" + graft["graft_worktree_name"] in _git(repo, "branch")
+
+    def test_chain_with_override_removes_all_links(self, repo: Path):
+        info, graft = self._make_chain(repo)
+        result = cleanup_graft_chain(
+            info["worktree_name"],
+            delete_unmerged_branch=True,
+            discard_uncommitted=True,
+        )
+        assert result["success"] is True
+        assert len(result["removed"]) == 2
+        assert info["branch_name"] not in _git(repo, "branch")
+
+    def test_mixed_location_chain_traverses(self, repo: Path, tmp_path: Path):
+        """Chains legitimately span locations; each link resolves
+        independently through the resolver."""
+        info, graft = self._make_chain(repo)
+        moved = tmp_path / "relocated-root"
+        _git(repo, "worktree", "move", info["worktree_path"], str(moved))
+
+        chain = get_graft_chain(info["worktree_name"])
+        assert chain == [info["worktree_name"], graft["graft_worktree_name"]]
+
+        result = cleanup_graft_chain(
+            info["worktree_name"],
+            delete_unmerged_branch=True,
+            discard_uncommitted=True,
+        )
+        assert result["success"] is True
+        assert not moved.exists()
+
+
+# =============================================================================
+# SEQUENCE FROM BRANCHES (Decision C; behavior change 9)
+# =============================================================================
+
+
+class TestSequenceFromBranches:
+    def test_branch_without_directory_still_advances_sequence(self, repo: Path):
+        """A cleaned-up worktree whose branch survives must not cause a
+        collision on the next spawn."""
+        info = spawn_shard("seqskip")
+        _commit_work(Path(info["worktree_path"]))
+        cleanup_shard(info["worktree_name"], keep_branch=True,
+                      discard_uncommitted=True)
+        assert not Path(info["worktree_path"]).exists()
+
+        info2 = spawn_shard("seqskip")
+        assert info2["worktree_name"] != info["worktree_name"]
+        assert info2["worktree_name"].endswith("-002")
+
+    def test_only_grammar_valid_suffixes_counted(self, repo: Path):
+        today = datetime.now(timezone.utc).strftime("%Y%m%d")
+        _git(repo, "branch", f"shard-seqx-{today}-002", "master")
+        _git(repo, "branch", f"shard-seqx-{today}-002-graft", "master")
+        # Non-three-digit suffix is not a sequence
+        _git(repo, "branch", f"shard-seqx-{today}-7", "master")
+
+        assert _get_next_sequence("seqx", today) == 3
+
+    def test_directories_do_not_drive_allocation(self, repo: Path):
+        today = datetime.now(timezone.utc).strftime("%Y%m%d")
+        fake = repo / "worktrees" / f"dirsonly-{today}-005"
+        fake.mkdir(parents=True)
+        assert _get_next_sequence("dirsonly", today) == 1
+
+
+# =============================================================================
+# RECONCILE (WU-6)
+# =============================================================================
+
+
+class TestReconcile:
+    def test_binds_rowless_member_without_inventing_lineage(self, repo: Path):
+        wt = repo / "worktrees" / "legacyrec-20260101-001"
+        _git(repo, "worktree", "add", str(wt), "-b", "shard-legacyrec-20260101-001")
+
+        summary = reconcile_shards()
+        assert summary["bound"] == 1
+
+        row = _get_shard_metadata("legacyrec-20260101-001")
+        assert row is not None
+        assert row["worktree_path"] == str(wt)
+        # Never invented: base_commit unknown-empty, base_branch explicit
+        # NULL (NOT the column default 'master') so it can't feed merge proof
+        assert row["base_commit"] == ""
+        assert row["base_branch"] is None
+
+        # M1 tie-in: a reconciled row still refuses base-less deletion
+        _commit_work(wt)
+        with pytest.raises(ShardError, match="no recorded base branch"):
+            cleanup_shard("legacyrec-20260101-001", discard_uncommitted=True)
+
+    def test_corrects_moved_path(self, repo: Path, tmp_path: Path):
+        info = spawn_shard("recmove")
+        moved = tmp_path / "rehomed"
+        _git(repo, "worktree", "move", info["worktree_path"], str(moved))
+
+        assert _get_shard_metadata(info["worktree_name"])["worktree_path"] == (
+            info["worktree_path"]
+        )
+        summary = reconcile_shards()
+        assert summary["updated"] == 1
+        assert _get_shard_metadata(info["worktree_name"])["worktree_path"] == str(
+            moved
+        )
+
+    def test_clears_gone_paths_and_never_deletes_rows(self, repo: Path):
+        info = spawn_shard("recgone")
+        _commit_work(Path(info["worktree_path"]))
+        shutil.rmtree(info["worktree_path"])
+        _git(repo, "worktree", "prune")
+
+        summary = reconcile_shards()
+        assert summary["cleared"] == 1
+
+        row = _get_shard_metadata(info["worktree_name"])
+        assert row is not None  # row survives (branch does)
+        assert row["worktree_path"] is None
+        assert row["base_branch"] == "master"
+
+    def test_idempotent(self, repo: Path):
+        spawn_shard("rectwice")
+        first = reconcile_shards()
+        second = reconcile_shards()
+        assert second["bound"] == 0
+        assert second["updated"] == 0
+        assert second["cleared"] == 0
+        assert first["unchanged"] + first["updated"] + first["bound"] >= 1
+
+
+# =============================================================================
+# READ PURITY (O4; behavior change 11)
+# =============================================================================
+
+
+class TestReadPurity:
+    def test_reads_never_create_skein_dir(self, repo: Path):
+        skein_dir = repo / ".skein"
+        assert not skein_dir.exists()
+
+        list_shards()
+        get_triage_extras()
+        with pytest.raises(ShardError):
+            resolve_shard("nothing-20260101-001")
+
+        assert not skein_dir.exists()
+
+    def test_observational_commands_leave_db_and_sidecars_byte_identical(
+        self, repo: Path
+    ):
+        info = spawn_shard("purity")
+        _commit_work(Path(info["worktree_path"]))
+
+        before = _skein_dir_snapshot(repo)
+        db_path = _get_db_path()
+        db_path.chmod(0o444)
+        try:
+            list_shards()
+            resolve_shard(info["worktree_name"])
+            get_shard_status(info["worktree_name"])
+            get_shard_git_info(info["worktree_name"])
+            get_triage_extras()
+            detect_shard_environment()
+        finally:
+            db_path.chmod(0o644)
+
+        after = _skein_dir_snapshot(repo)
+        assert before == after  # bytes, names, and sidecar absence all equal
+
+
+# =============================================================================
+# NO ENVIRONMENT PARTICIPATION (invariant 7)
+# =============================================================================
+
+
+class TestNoEnvEffect:
+    def test_skein_worktrees_dir_has_no_effect(self, repo: Path, tmp_path, monkeypatch):
+        """Phase 1-3 contract: no placement environment variable exists;
+        setting one from PR 7's era changes nothing."""
+        elsewhere = tmp_path / "env-target"
+        monkeypatch.setenv("SKEIN_WORKTREES_DIR", str(elsewhere))
+
+        info = spawn_shard("envproof")
+        try:
+            assert Path(info["worktree_path"]).is_relative_to(repo / "worktrees")
+            assert not elsewhere.exists()
+            resolution = resolve_shard(info["worktree_name"])
+            assert Path(resolution["path"]) == Path(info["worktree_path"])
+        finally:
+            cleanup_shard(info["worktree_name"])
+
+
+# =============================================================================
+# WU-0 REGRESSION: shard apply / shard test PROJECT_ROOT crash
+# =============================================================================
+
+
+class TestApplyAndTestCommands:
+    def test_shard_apply_no_longer_crashes(self, repo: Path):
+        info = spawn_shard("applier")
+        _commit_work(Path(info["worktree_path"]), "applied_file.txt")
+
+        runner = CliRunner()
+        with patch("client.cli.make_request", side_effect=Exception("no server")):
+            from client.cli import cli
+
+            result = runner.invoke(
+                cli,
+                ["shard", "apply", info["worktree_name"], "--no-confirm"],
+                catch_exceptions=False,
+            )
+
+        assert "AttributeError" not in result.output
+        assert result.exit_code == 0, result.output
+        assert (repo / "applied_file.txt").exists()
+        _git(repo, "checkout", "--", ".")
+        (repo / "applied_file.txt").unlink()
+
+    def test_shard_test_reaches_rites_loading(self, repo: Path):
+        """The crash was before rites even loaded; now the command proceeds
+        to the (expected) no-rites error instead of AttributeError."""
+        info = spawn_shard("tester")
+
+        runner = CliRunner()
+        with patch("client.cli.make_request", side_effect=Exception("no server")):
+            from client.cli import cli
+
+            result = runner.invoke(cli, ["shard", "test", info["worktree_name"]])
+
+        assert "AttributeError" not in result.output
+        assert "No rites defined" in result.output
+
+
+# =============================================================================
+# CONTRACT GOLDENS (section 7; WU-8)
+# =============================================================================
+
+
+class TestContracts:
+    def _invoke(self, args, **kwargs):
+        from client.cli import cli
+
+        runner = CliRunner()
+        with patch(
+            "client.cli.make_request", return_value={"thread_id": "th-test-1"}
+        ):
+            return runner.invoke(cli, args, catch_exceptions=False, **kwargs)
+
+    def test_spawn_human_lines_frozen(self, repo: Path):
+        """Spindle/Mill/Loom parse '  Branch: ' and '  Worktree: ' verbatim."""
+        result = self._invoke(["shard", "spawn", "--agent", "golden"])
+        assert result.exit_code == 0, result.output
+
+        lines = result.output.splitlines()
+        branch_lines = [l for l in lines if l.startswith("  Branch: ")]
+        worktree_lines = [l for l in lines if l.startswith("  Worktree: ")]
+        assert len(branch_lines) == 1
+        assert len(worktree_lines) == 1
+        branch = branch_lines[0][len("  Branch: ") :]
+        wt_path = worktree_lines[0][len("  Worktree: ") :]
+        assert branch.startswith("shard-golden-")
+        assert Path(wt_path).is_absolute()
+        assert Path(wt_path).exists()
+
+        cleanup_shard(branch[len("shard-") :])
+
+    def test_spawn_json_contract(self, repo: Path):
+        result = self._invoke(["shard", "spawn", "--agent", "jsonspawn", "--json"])
+        assert result.exit_code == 0, result.output
+        payload = json.loads(result.output)
+        assert set(payload.keys()) == {
+            "worktree_name",
+            "worktree_path",
+            "branch_name",
+            "name",
+            "base_branch",
+            "project_root",
+        }
+        assert payload["base_branch"] == "master"
+        assert Path(payload["project_root"]).resolve() == repo.resolve()
+        cleanup_shard(payload["worktree_name"])
+
+    def test_list_json_keeps_and_extends_keys(self, repo: Path):
+        info = spawn_shard("lister")
+        try:
+            result = self._invoke(["shard", "list", "--json"])
+            assert result.exit_code == 0, result.output
+            payload = json.loads(result.output)
+            entry = next(
+                e for e in payload if e["worktree_name"] == info["worktree_name"]
+            )
+            # Long-standing keys
+            for key in ("worktree_name", "worktree_path", "branch_name", "name",
+                        "date", "seq"):
+                assert key in entry, key
+            # Additive keys
+            for key in ("exists", "source", "detached", "branch"):
+                assert key in entry, key
+            assert entry["source"] == "git"
+            assert entry["seq"] == info["worktree_name"][-3:]
+        finally:
+            cleanup_shard(info["worktree_name"])
+
+    def test_where_bare_path_on_stdout(self, repo: Path):
+        info = spawn_shard("wherereal")
+        try:
+            result = self._invoke(
+                ["shard", "where", info["worktree_name"], "--path-only"]
+            )
+            assert result.exit_code == 0, result.output
+            assert result.output.strip() == info["worktree_path"]
+        finally:
+            cleanup_shard(info["worktree_name"])
+
+    def test_cleanup_yes_alone_never_deletes_branch_cli(self, repo: Path):
+        """--yes is confirmation-skip only (behavior change 7, CLI level)."""
+        info = spawn_shard("cliyes")
+        _commit_work(Path(info["worktree_path"]))
+
+        from client.cli import cli
+
+        runner = CliRunner()
+        with patch("client.cli.make_request", return_value={}):
+            result = runner.invoke(
+                cli, ["shard", "cleanup", info["worktree_name"], "--yes"]
+            )
+
+        assert result.exit_code != 0
+        assert "not provably merged" in result.output
+        assert info["branch_name"] in _git(repo, "branch")
+
+        with patch("client.cli.make_request", return_value={}):
+            result = runner.invoke(
+                cli,
+                [
+                    "shard",
+                    "cleanup",
+                    info["worktree_name"],
+                    "--yes",
+                    "--delete-unmerged-branch",
+                ],
+            )
+        assert result.exit_code == 0, result.output
+        assert info["branch_name"] not in _git(repo, "branch")
+
+
+# =============================================================================
+# SITE DERIVATION (Decision D; behavior change 10)
+# =============================================================================
+
+
+class TestSiteDerivation:
+    def test_basename_derivation_matches_path_parse_for_projects_layout(
+        self, repo: Path
+    ):
+        """For a repo at ~/projects/<name>, the old path-parse and the new
+        basename derivation are byte-identical: <name>-development."""
+        import client.cli as cli_module
+        import skein.shard as shard_module
+
+        derived = cli_module._derive_shard_site(shard_module)
+        assert derived == f"{repo.name}-development"
+
+    def test_derivation_works_outside_projects_layout(self, tmp_path: Path):
+        """Repos outside ~/projects previously misparsed; now derive from
+        the origin repo basename."""
+        import client.cli as cli_module
+        import skein.shard as shard_module
+
+        outside = tmp_path / "deep" / "nested" / "warpcore"
+        outside.mkdir(parents=True)
+        _git(outside, "init")
+        _git(outside, "config", "user.email", "t@e.com")
+        _git(outside, "config", "user.name", "T")
+        (outside / "x").write_text("x")
+        _git(outside, "add", ".")
+        _git(outside, "commit", "-m", "init")
+
+        shard_module._PROJECT_ROOT = None
+        shard_module._WORKTREES_DIR = None
+        set_project_root(str(outside))
+        try:
+            assert cli_module._derive_shard_site(shard_module) == (
+                "warpcore-development"
+            )
+        finally:
+            shard_module._PROJECT_ROOT = None
+            shard_module._WORKTREES_DIR = None
+
+    def test_review_site_config_override(self, repo: Path):
+        import client.cli as cli_module
+        import skein.shard as shard_module
+
+        skein_dir = repo / ".skein"
+        skein_dir.mkdir(exist_ok=True)
+        (skein_dir / "config.json").write_text(
+            json.dumps({"review_site": "custom-review"})
+        )
+        try:
+            assert cli_module._derive_shard_site(shard_module) == "custom-review"
+        finally:
+            (skein_dir / "config.json").unlink()
+
+
+# =============================================================================
+# RESOLVER JOIN INVARIANT (Decision B hard invariant)
+# =============================================================================
+
+
+class TestNoJoinOutsidePlacement:
+    def test_no_worktrees_dir_name_join_outside_placement_path(self):
+        """Repo-wide check: `get_worktrees_dir() / <name>` may only be
+        computed inside _placement_path (spawn/graft/guess all route through
+        it)."""
+        shard_src = Path(__file__).parent.parent / "skein" / "shard.py"
+        text = shard_src.read_text()
+
+        join_lines = [
+            (i + 1, line)
+            for i, line in enumerate(text.splitlines())
+            if ("get_worktrees_dir() /" in line or "worktrees_dir / " in line)
+            and not line.lstrip().startswith("#")
+            and "`" not in line  # prose in docstrings, not code
+        ]
+        # The single allowed site is _placement_path's return
+        assert len(join_lines) == 1, join_lines
+        assert "return get_worktrees_dir() / worktree_name" in join_lines[0][1]
+
+        cli_src = Path(__file__).parent.parent / "client" / "cli.py"
+        cli_text = cli_src.read_text()
+        assert "get_worktrees_dir() /" not in cli_text
+        assert "worktrees_dir / " not in cli_text
+
+
+# =============================================================================
+# MOVED MEMBERS: EVERY OPERATION (behavior change 4, full lifecycle)
+# =============================================================================
+
+
+class TestMovedMemberLifecycle:
+    def test_status_diff_merge_after_basename_change(self, repo: Path, tmp_path):
+        info = spawn_shard("fullmove")
+        _commit_work(Path(info["worktree_path"]))
+        moved = tmp_path / "totally-different-name"
+        _git(repo, "worktree", "move", info["worktree_path"], str(moved))
+
+        # status / git info
+        member = get_shard_status(info["worktree_name"])
+        assert member is not None
+        git_info = get_shard_git_info(info["worktree_name"])
+        assert git_info["commits_ahead"] == 1
+        assert git_info["working_tree"] == "clean"
+
+        # detect from inside the moved worktree
+        original_cwd = os.getcwd()
+        try:
+            os.chdir(moved)
+            detected = detect_shard_environment()
+            assert detected is not None
+            assert detected["worktree_name"] == info["worktree_name"]
+        finally:
+            os.chdir(original_cwd)
+
+        # merge (mutating op) works and cleans up at the moved location
+        result = merge_shard(info["worktree_name"])
+        assert result["success"] is True
+        assert not moved.exists()
+        assert (repo / "work.txt").exists()
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

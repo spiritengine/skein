@@ -7,9 +7,9 @@
 ## What Are Shards?
 
 Shards provide isolated git worktrees for agents to work in parallel without conflicts. Each shard is:
-- A separate working directory, living OUTSIDE the project tree (see below)
-- An isolated git branch (`shard-<shard-name>`)
-- Tracked in SQLite with metadata (base commit, creation time, etc.)
+- An isolated git branch (`shard-<shard-name>`) — this IS the shard's identity
+- A worktree directory (disposable and reconstructible from the branch)
+- Tracked in SQLite with metadata (base commit, base branch, lineage)
 
 **Why shards?**
 - Agents can work independently without blocking each other
@@ -17,15 +17,37 @@ Shards provide isolated git worktrees for agents to work in parallel without con
 - Easy to abandon work that doesn't pan out
 - Built-in drift detection shows when your work diverged from master
 
-**Where shard worktrees live:** under `<SKEIN_HOME>/worktrees/<project>-<hash>/<shard-name>/`
-(default `~/.skein/worktrees/...`), not inside your project directory. This is deliberate — a
-shard is where an agent actively edits files, and nesting that inside the project meant any
-consuming app's own file watcher (dev-server hot-reload, build tooling, etc.) would see shard
-activity as changes to the host project itself. Set `SKEIN_WORKTREES_DIR` to override the
-location explicitly — it can point anywhere, and nothing requires the word "worktrees" in it.
-Use `skein shard where <name>` (below) to find a shard's directory; examples that show
-`cd worktrees/<name>/` are shorthand for "cd into the shard's directory", never a literal
-relative path.
+**What makes something a shard (membership):** the worktree's actual
+checked-out branch is `shard-<name>` where `<name>` matches the pinned
+grammar: strip any terminal `-graft` suffixes, then split from the right
+into a nonempty dashed stem, a valid calendar `YYYYMMDD` date, and an exact
+three-digit sequence `001`–`999`. The directory basename matching the shard
+name is only a creation convention — `git worktree move` to any location or
+basename is fully supported, and every command keeps working, because
+identity lives in the branch, never in the path. A detached-HEAD worktree
+(mid-rebase) is recognized only through its recorded `worktree_path` in the
+shard database; run `skein shard reconcile` before risky rebases so that
+binding exists.
+
+That grammar is a reserved namespace: tools that create non-shard `shard-*`
+branches (like Spindle fallback worktrees, `shard-<hex8>`) must never emit
+`{stem}-{valid date}-{001–999}` shaped names.
+
+**Durability:** the branch (in git) is the durable membership — it survives
+re-clones and `.skein/` loss. The database row is the durable metadata
+(ownership, base branch, graft lineage) and follows the branch: whenever
+cleanup preserves a branch it preserves the row too, clearing only the
+recorded path. The worktree directory is disposable; recreate it from the
+branch at any time with `git worktree add <path> shard-<name>` (which, by
+construction, makes it a member again — this is the manual revive
+mechanism).
+
+**Where shard worktrees live:** new spawns go under `<repo>/worktrees/` by
+default (placement is a creation-time policy only and never affects an
+existing shard). Use `skein shard where <name>` (below) to find any shard's
+directory; examples that show `cd worktrees/<name>/` are shorthand for "cd
+into the shard's directory", never a literal relative path — prefer
+`cd "$(skein shard where <name> --path-only)"`.
 
 ---
 
@@ -76,22 +98,24 @@ skein shard spawn implement-spec --brief brief-20260113-xyz
 ```
 
 **What it does:**
-- Creates a `<name>-YYYYMMDD-NNN/` worktree directory under `<SKEIN_HOME>/worktrees/<project>-<hash>/`
+- Creates a `<name>-YYYYMMDD-NNN/` worktree directory under `<repo>/worktrees/`
 - Creates `shard-<name>-YYYYMMDD-NNN` branch from current master
-- Records base commit in SQLite for drift tracking
-- Returns path to new worktree
+- Records base commit, base branch, and worktree path in SQLite
+- Returns path to new worktree (`--json` for a machine-readable form)
 
 **Output:**
 ```
 Spawned SHARD: fix-bug-20260113-001
-  Path: /home/patrick/.skein/worktrees/skein-3f9a2b1c/fix-bug-20260113-001
+  Path: /home/patrick/projects/skein/worktrees/fix-bug-20260113-001
   Branch: shard-fix-bug-20260113-001
 ```
 
 ### `skein shard where <name>`
 
-Find a shard's worktree and the repo it came from. Since worktrees live outside
-the project tree, this is how you get back to one.
+Print a shard's worktree path — the reliable way to get to one, wherever it
+lives. Resolution authority is git first (so it follows `git worktree move`
+automatically), then the recorded database path, then — only as a labeled
+guess — the computed placement default.
 
 ```bash
 skein shard where fix-bug-20260113-001
@@ -103,26 +127,23 @@ cd "$(skein shard where fix-bug-20260113-001 --path-only)"
 skein shard where fix-bug-20260113-001 --json
 ```
 
-**Output:**
-```
-SHARD: fix-bug-20260113-001
-  Worktree:     /home/patrick/.skein/worktrees/skein-3f9a2b1c/fix-bug-20260113-001
-  Origin repo:  /home/patrick/projects/skein
-  Branch:       shard-fix-bug-20260113-001
-  Worktrees in: /home/patrick/.skein/worktrees/skein-3f9a2b1c
-```
+The bare resolved path goes to stdout; notes and warnings go to stderr. Exit
+codes are honest: a guessed path exits non-zero (pass `--expected` if a
+guess is what you wanted), a branch-only shard (branch survives, no
+worktree) exits non-zero with a revive hint, and an unknown name errors with
+near-miss suggestions rather than printing a fabricated path.
 
-Shards created by an older skein, back when worktrees lived at
-`<project>/worktrees/<name>/`, are still found by `where`, `list`, `merge`, and
-`cleanup` — the old location is searched, though never written to. Nothing needs
-migrating by hand.
+Shards at the historical `<project>/worktrees/<name>/` location and shards
+moved anywhere else are equally first-class: discovery reads git's own
+worktree list, so location never hides a shard. Nothing needs migrating.
 
-The origin repo is read from the worktree's own `.git` file, which git writes as
-`gitdir: /path/to/repo/.git/worktrees/<name>`. That pointer travels with the
-worktree, so the answer stays correct even if the worktree has been moved by
-hand or `SKEIN_WORKTREES_DIR` has since changed. If the directory is missing or
-git no longer tracks it, the command says so rather than printing a path that
-isn't there.
+### `skein shard reconcile`
+
+Explicitly refresh recorded worktree paths from git (the only non-lifecycle
+write path). Creates minimal rows for members that lack one — name and path
+only, never invented lineage — corrects paths after moves, and clears paths
+whose worktrees are gone. Never deletes rows; idempotent. Run it before a
+risky rebase so a detached worktree stays bound to its shard.
 
 ### `skein shard review <name>`
 
@@ -328,7 +349,7 @@ Then merge:
 
 ### `skein shard cleanup <name>`
 
-Remove worktree and branch after merge.
+Remove a shard's worktree; delete its branch only under explicit authority.
 
 ```bash
 # Clean up single shard
@@ -336,27 +357,37 @@ skein shard cleanup fix-bug-20260113-001
 
 # Clean up entire graft chain
 skein shard cleanup fix-bug-20260113-001 --chain
+
+# Explicitly delete a branch that is NOT provably merged (you assume the loss)
+skein shard cleanup fix-bug-20260113-001 --delete-unmerged-branch
 ```
 
-**With `--chain` flag:**
-Removes all worktrees in the graft lineage:
-- `fix-bug-20260113-001` (original)
-- `fix-bug-20260113-001-graft`
-- `fix-bug-20260113-001-graft-graft` (if master moved again)
+**Branch deletion has exactly two authorities:**
 
-**Output:**
-```
-Tracing worktree chain for: fix-bug-20260113-001
+1. **Merge proof** — an ancestry check showing the branch is contained in
+   its recorded base branch (or a base you name with `--base`). The base is
+   never guessed: with no recorded base and no `--base`, cleanup refuses
+   rather than assume `master`. Note the proof is ancestry-only — a branch
+   integrated by squash-merge or rebase does NOT read as merged (its
+   commits aren't in the base's ancestry), which is the safe direction; use
+   the override once you've verified the work landed.
+2. **`--delete-unmerged-branch`** — the explicit override, and the only way
+   to delete a branch that is not provably merged.
 
-Found chain:
-  fix-bug-20260113-001 (original)
-  └─ fix-bug-20260113-001-graft
+`--yes` skips confirmation prompts only (including the discard-uncommitted
+prompt); it is never deletion authority.
 
-Removing 2 worktrees...
-✓ Removed worktrees/fix-bug-20260113-001/
-✓ Removed worktrees/fix-bug-20260113-001-graft/
-✓ Deleted 2 branches
-```
+**When the branch survives** (`--keep-branch`, or refusal, or a
+missing-directory prune), its metadata row survives with it — only the
+recorded path is cleared. The shard becomes *branch-only*: visible in
+triage with revive guidance, refused by every mutating command, revivable
+with `git worktree add <path> shard-<name>`.
+
+**With `--chain`:** removes the whole graft lineage. Chain traversal
+requires recorded parentage (the `-graft` name suffix is never treated as
+proof); authority is checked per link against each link's own base, and the
+plan is disclosed link by link before you confirm — one `--yes` cannot
+silently authorize deleting an unrelated link.
 
 ---
 
@@ -730,16 +761,25 @@ sqlite3 .skein/shards.db "SELECT worktree_name, parent_worktree FROM shards"
 
 ### Shard worktree missing but branch exists
 
-Worktree was deleted manually. Clean up branch:
+Worktree was deleted manually. Run cleanup — it prunes the stale worktree
+registration while PRESERVING an unmerged branch and its metadata (path
+cleared), so nothing is lost by accident:
 
 ```bash
-git branch -D shard-my-feature-20260113-001
+skein shard cleanup my-feature-20260113-001
 ```
 
-Or recreate worktree (if work is valuable), under your SKEIN_HOME worktrees dir:
+Recreate the worktree if the work is valuable (this is the manual revive
+mechanism — any path works, membership comes from the branch):
 
 ```bash
-git worktree add ~/.skein/worktrees/<project>-<hash>/my-feature-20260113-001 shard-my-feature-20260113-001
+git worktree add worktrees/my-feature-20260113-001 shard-my-feature-20260113-001
+```
+
+Or delete the branch deliberately once you're sure:
+
+```bash
+skein shard cleanup my-feature-20260113-001 --delete-unmerged-branch
 ```
 
 ---
