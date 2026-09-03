@@ -6794,11 +6794,12 @@ def shard_where(ctx, worktree_name, output_json, path_only, expected):
     except Exception as e:
         raise click.ClickException(f"Failed to locate SHARD: {e}")
 
-    branch_only = (
-        not resolution["registered"]
-        and resolution["branch_exists"]
-        and resolution["source"] == "guess"
-    )
+    # Branch-only is defined by git state alone — no registration, branch
+    # survives — regardless of which source answered. A row whose recorded
+    # path outlived the registration (hand prune, git worktree remove,
+    # collateral prune) still names a branch-only shard: exiting zero with
+    # the dead path would send `cd "$(... --path-only)"` somewhere gone.
+    branch_only = not resolution["registered"] and resolution["branch_exists"]
     guessed = resolution["source"] == "guess"
 
     if output_json:
@@ -7137,8 +7138,14 @@ def shard_cleanup(
     try:
         if chain:
             # Per-link disclosure BEFORE confirmation: one vague yes must not
-            # silently authorize unrelated links.
-            plan = shard_worktree.get_chain_cleanup_plan(worktree_name)
+            # silently authorize unrelated links or discard undisclosed
+            # work. The plan is computed with the same explicit --base the
+            # execution passes down, so the disclosed authority is exactly
+            # the authority applied.
+            plan = shard_worktree.get_chain_cleanup_plan(
+                worktree_name, base_branch=base_branch
+            )
+            dirty_links = [l for l in plan if l.get("dirty_files")]
             if plan:
                 click.echo(f"Chain cleanup plan for: {worktree_name}\n")
                 for link in plan:
@@ -7162,13 +7169,23 @@ def shard_cleanup(
                             else f"NOT merged into {link['proof_base']} - link will refuse without --delete-unmerged-branch"
                         )
                     click.echo(f"  {name}: {status}")
+                    if link.get("dirty_files"):
+                        click.echo(
+                            "      uncommitted changes that will be DISCARDED:"
+                        )
+                        for dirty_line in link["dirty_files"]:
+                            click.echo(f"        {dirty_line}")
                 click.echo()
 
             if not assume_yes:
-                click.confirm(
-                    "Proceed with chain cleanup exactly as disclosed above?",
-                    abort=True,
-                )
+                prompt = "Proceed with chain cleanup exactly as disclosed above?"
+                if dirty_links:
+                    prompt = (
+                        "This will DISCARD the uncommitted changes listed "
+                        "above. Proceed with chain cleanup exactly as "
+                        "disclosed?"
+                    )
+                click.confirm(prompt, abort=True)
 
             result = shard_worktree.cleanup_graft_chain(
                 worktree_name,
@@ -7176,7 +7193,10 @@ def shard_cleanup(
                 caller_cwd=caller_cwd,
                 delete_unmerged_branch=delete_unmerged,
                 base_branch=base_branch,
-                discard_uncommitted=True,
+                # Discard only what was disclosed and confirmed (or --yes,
+                # the confirmation skip): a link that turned dirty after
+                # disclosure refuses instead of being silently wiped.
+                discard_uncommitted=assume_yes or bool(dirty_links),
             )
 
             if result["removed"]:
@@ -7201,7 +7221,7 @@ def shard_cleanup(
             # confirmation skip; interactively, a dirty tree is surfaced and
             # confirmed before retrying.
             try:
-                result = shard_worktree.cleanup_shard(
+                result = shard_worktree._cleanup_shard_detailed(
                     worktree_name,
                     keep_branch=keep_branch,
                     caller_cwd=caller_cwd,
@@ -7213,7 +7233,7 @@ def shard_cleanup(
                 if "uncommitted changes" in str(e) and not assume_yes:
                     click.echo(str(e))
                     click.confirm("Discard these uncommitted changes?", abort=True)
-                    result = shard_worktree.cleanup_shard(
+                    result = shard_worktree._cleanup_shard_detailed(
                         worktree_name,
                         keep_branch=keep_branch,
                         caller_cwd=caller_cwd,
@@ -7423,34 +7443,33 @@ def shard_merge(ctx, worktree_name, explicit_caller_cwd, base_branch):
         metadata = None  # Will use minimal metadata if gather fails
 
     try:
-        # First, show drift context
+        # Drift context is display only. The merge base itself is the --base
+        # option or the shard's recorded metadata, resolved inside
+        # merge_shard under the degraded-metadata contract — the
+        # drift-derived value is never passed as authority, because its
+        # rowless fallback is the detected default branch, exactly the
+        # guess that contract forbids.
         drift_info = shard_worktree.get_shard_drift_info(worktree_name)
         master_ahead = drift_info.get("base_commits_ahead", 0)
-        base_branch = drift_info.get("base_branch")
-        if base_branch is None:
-            try:
-                from skein import shard as shard_module
+        display_base = base_branch or drift_info.get("base_branch") or "unknown"
 
-                base_branch = shard_module._detect_default_branch()
-            except Exception:
-                base_branch = "unknown"
-
-        click.echo(f"Testing integration with current {base_branch}...")
+        click.echo(f"Testing integration with current {display_base}...")
 
         result = shard_worktree.merge_shard(
             worktree_name, caller_cwd=caller_cwd, base_branch=base_branch
         )
+        merged_base = result.get("base_branch") or display_base
 
         if result["success"]:
             # Show drift context in success message
             if master_ahead > 0:
                 click.echo(
-                    f"✓ Clean integration (applied onto current {base_branch}, {master_ahead} commits ahead)"
+                    f"✓ Clean integration (applied onto current {merged_base}, {master_ahead} commits ahead)"
                 )
             else:
                 click.echo("✓ Clean integration")
             click.echo()
-            click.echo(f"Merging to {base_branch}...")
+            click.echo(f"Merging to {merged_base}...")
             click.echo(result["message"])
 
             # Post tender folio with status=complete and auto-close it
@@ -7890,14 +7909,19 @@ def shard_tender(ctx, worktree_name, site, reviewer, summary, status, confidence
     if not shard_info:
         raise click.ClickException(f"SHARD not found: {worktree_name}")
 
-    # Tender is a mutating lifecycle op: refresh the recorded path if the
-    # worktree has moved since it was written.
+    # Tender is a mutating lifecycle op: it creates or completes the row
+    # (minimal, no invented lineage) and refreshes a moved path. Failures
+    # surface — a tender that cannot record its binding must not pretend it
+    # did, or a later detach silently loses membership.
     try:
-        shard_worktree._refresh_row_path_if_moved(
-            worktree_name, shard_info["worktree_path"]
+        shard_worktree._bind_member_row(
+            shard_info["worktree_name"], shard_info["worktree_path"]
         )
-    except Exception:
-        pass
+    except Exception as e:
+        raise click.ClickException(
+            f"Failed to record shard metadata while tendering "
+            f"{worktree_name}: {e}"
+        )
 
     # Gather tender metadata
     try:

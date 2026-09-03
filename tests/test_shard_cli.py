@@ -21,7 +21,9 @@ class _MockShardModule:
     def __init__(self):
         self.cleanup_calls = []
 
-    def cleanup_shard(
+    # The CLI consumes the detailed dict; the public cleanup_shard keeps
+    # its long-standing bool contract.
+    def _cleanup_shard_detailed(
         self,
         worktree_name,
         keep_branch=False,
@@ -625,11 +627,39 @@ class TestShardWhereCli:
         assert result.exit_code == 0, result.output
         assert "missing" in result.output
 
-    def test_db_source_is_noted(self):
-        """WHY: A recorded path git no longer lists is a different problem
-        from a missing directory, and needs a different fix."""
+    def test_db_source_branch_only_exits_nonzero_with_revive_hint(self):
+        """WHY: Branch-only is git state — no registration, surviving
+        branch — regardless of source. A row whose path outlived the
+        registration (hand prune, worktree remove, collateral prune) must
+        not let `cd "$(... --path-only)"` exit clean with a dead path."""
         runner = CliRunner()
-        shard_module = _make_where_shard_module(source="db", registered=False)
+        shard_module = _make_where_shard_module(
+            source="db", registered=False, branch_exists=True, exists=False
+        )
+
+        with patch("client.cli.get_shard_worktree_module", return_value=shard_module):
+            result = runner.invoke(
+                cli, ["shard", "where", "demo-shard-20260101-001"]
+            )
+
+        assert result.exit_code != 0
+        assert "git worktree add" in result.output
+
+        with patch("client.cli.get_shard_worktree_module", return_value=shard_module):
+            result = runner.invoke(
+                cli,
+                ["shard", "where", "demo-shard-20260101-001", "--path-only"],
+            )
+        assert result.exit_code != 0
+
+    def test_db_source_without_surviving_branch_is_noted(self):
+        """WHY: A recorded path git no longer lists, with no surviving
+        branch, is a stale-row problem, not a branch-only shard — the note
+        still renders and the exit stays zero."""
+        runner = CliRunner()
+        shard_module = _make_where_shard_module(
+            source="db", registered=False, branch_exists=False
+        )
 
         with patch("client.cli.get_shard_worktree_module", return_value=shard_module):
             result = runner.invoke(
@@ -660,6 +690,7 @@ def _make_tender_shard_module(project_name="warp"):
     m = MagicMock()
     m.get_project_root.return_value = f"/home/patrick/projects/{project_name}"
     m.get_shard_status.return_value = {
+        "worktree_name": "demo-shard-001",
         "worktree_path": f"/home/patrick/projects/{project_name}/worktrees/demo-shard-001",
     }
     m.get_tender_metadata.return_value = {
