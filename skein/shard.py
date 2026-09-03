@@ -1061,15 +1061,53 @@ def _undisclosed_dirty(
     return list(dirty_files)
 
 
-def _restore_worktree_path(worktree_name: str, prior_path: Optional[str]) -> None:
-    """Best-effort compensation when a git mutation fails after the
-    pre-clear: put the recorded path back so a recoverable failure does not
-    strand a detached binding. Restore failure is swallowed — a pathless
-    row is the safe direction (it can bind nothing)."""
-    if prior_path is None:
+def _restore_live_worktree_path(
+    repo,
+    worktree_name: str,
+    expected_path: Path,
+    branch_name: str,
+    detached: bool,
+    expected_head: Optional[str],
+    path_was_cleared: bool,
+) -> None:
+    """Best-effort compensation after a failed git worktree removal.
+
+    The pre-clear revokes a DB path before git is touched. On failure, restore
+    only a binding freshly corroborated by git porcelain: an attached member
+    is identified by its branch (and may have moved again), while a detached
+    member needs both the exact path and the HEAD captured before mutation.
+    Never restore the row's prior path: it may be stale and already reused by
+    an unrelated detached worktree. Any uncertainty or write failure leaves
+    the row pathless, which is the safe direction because it binds nothing.
+    """
+    if not path_was_cleared:
         return
     try:
-        _set_worktree_path(worktree_name, prior_path)
+        stanzas = _list_worktree_stanzas(repo)
+    except Exception:
+        return
+
+    live_path = None
+    for stanza in stanzas:
+        if stanza["is_main"] or stanza["bare"]:
+            continue
+        if detached:
+            if (
+                expected_head
+                and stanza["detached"]
+                and stanza["head"] == expected_head
+                and _paths_equal(Path(stanza["path"]), expected_path)
+            ):
+                live_path = stanza["path"]
+                break
+        elif not stanza["detached"] and stanza["branch"] == branch_name:
+            live_path = stanza["path"]
+            break
+
+    if live_path is None:
+        return
+    try:
+        _set_worktree_path(worktree_name, str(Path(live_path).absolute()))
     except Exception:
         pass
 
@@ -1350,9 +1388,10 @@ def _cleanup_shard_detailed(
     # the shard branch — the branch's merge proof says nothing about it. The
     # discard needs its own proof over the exact HEAD being discarded
     # (containment in the proof base) or the explicit override.
+    detached_head = None
     if resolution.get("detached"):
-        stanza = _stanza_for_path(repo, worktree_path)
-        detached_head = stanza["head"] if stanza else None
+        member_stanza = _stanza_for_path(repo, worktree_path)
+        detached_head = member_stanza["head"] if member_stanza else None
         head_contained = bool(
             detached_head
             and proof_base
@@ -1440,7 +1479,15 @@ def _cleanup_shard_detailed(
         try:
             repo.git.worktree("remove", "--force", str(worktree_path))
         except Exception as e:
-            _restore_worktree_path(worktree_name, prior_path)
+            _restore_live_worktree_path(
+                repo,
+                worktree_name,
+                worktree_path,
+                branch_name,
+                bool(resolution.get("detached")),
+                detached_head,
+                prior_path is not None,
+            )
             raise ShardError(f"Failed to prune stale worktree registration: {e}")
         result["worktree_pruned"] = True
     else:
@@ -1457,7 +1504,15 @@ def _cleanup_shard_detailed(
                 discard_uncommitted,
             )
             if late:
-                _restore_worktree_path(worktree_name, prior_path)
+                _restore_live_worktree_path(
+                    repo,
+                    worktree_name,
+                    worktree_path,
+                    branch_name,
+                    bool(resolution.get("detached")),
+                    detached_head,
+                    prior_path is not None,
+                )
                 listing = "\n".join(f"  {ln}" for ln in late[:20])
                 raise ShardError(
                     f"Refusing to force-remove '{worktree_name}': uncommitted "
@@ -1467,7 +1522,15 @@ def _cleanup_shard_detailed(
             try:
                 repo.git.worktree("remove", "--force", str(worktree_path))
             except Exception as e2:
-                _restore_worktree_path(worktree_name, prior_path)
+                _restore_live_worktree_path(
+                    repo,
+                    worktree_name,
+                    worktree_path,
+                    branch_name,
+                    bool(resolution.get("detached")),
+                    detached_head,
+                    prior_path is not None,
+                )
                 raise ShardError(f"Failed to remove worktree: {e2}")
         result["worktree_removed"] = True
 

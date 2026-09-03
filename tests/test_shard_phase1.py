@@ -2092,6 +2092,170 @@ class TestDbGitTransitionOrdering:
         row = _get_shard_metadata(info["worktree_name"])
         assert row["worktree_path"] == info["worktree_path"]
 
+    def test_removal_failure_restores_live_moved_path_not_reused_old_path(
+        self, repo: Path, tmp_path: Path, monkeypatch
+    ):
+        """Post-convergence reproduction: the DB still names P after the
+        member moves to Q, and unrelated detached work reuses P. Failed
+        cleanup must rebind the row to live Q, never stale P."""
+        info = spawn_shard("restmoved")
+        old_path = Path(info["worktree_path"])
+        moved_path = tmp_path / "moved-member"
+        _git(repo, "worktree", "move", str(old_path), str(moved_path))
+        _git(repo, "worktree", "add", "--detach", str(old_path), "HEAD")
+
+        import skein.shard as shard_module
+
+        real_get_repo = shard_module._get_repo
+
+        class _FailingRemoveGit:
+            def __init__(self, real):
+                self._real = real
+
+            def __getattr__(self, attr):
+                if attr == "worktree":
+                    def _worktree(*args, **kwargs):
+                        if args and args[0] == "remove":
+                            raise RuntimeError("simulated removal failure")
+                        return self._real.worktree(*args, **kwargs)
+
+                    return _worktree
+                return getattr(self._real, attr)
+
+        class _RepoProxy:
+            def __init__(self, real):
+                self._real = real
+                self.git = _FailingRemoveGit(real.git)
+
+            def __getattr__(self, attr):
+                return getattr(self._real, attr)
+
+        monkeypatch.setattr(
+            shard_module, "_get_repo", lambda: _RepoProxy(real_get_repo())
+        )
+
+        with pytest.raises(ShardError, match="Failed to remove worktree"):
+            cleanup_shard(info["worktree_name"])
+
+        row = _get_shard_metadata(info["worktree_name"])
+        assert row["worktree_path"] == str(moved_path)
+
+        # Once the real member detaches, only Q adopts the row. The reused P
+        # remains an unrelated detached worktree despite sharing its HEAD.
+        _git(moved_path, "checkout", "--detach")
+        status = get_shard_status(info["worktree_name"])
+        assert status is not None
+        assert status["worktree_path"] == str(moved_path)
+        extras = get_triage_extras()
+        assert str(old_path) in [item["path"] for item in extras["detached_unbound"]]
+
+    def test_detached_removal_failure_uses_path_and_head_not_head_alone(
+        self, repo: Path, tmp_path: Path, monkeypatch
+    ):
+        """A detached sibling may share the target's HEAD. Compensation
+        restores only the exact registered path captured before removal."""
+        info = spawn_shard("restdetached")
+        target_path = Path(info["worktree_path"])
+        _git(target_path, "checkout", "--detach")
+        target_head = _git(target_path, "rev-parse", "HEAD").strip()
+        sibling_path = tmp_path / "detached-sibling"
+        _git(repo, "worktree", "add", "--detach", str(sibling_path), target_head)
+
+        import skein.shard as shard_module
+
+        real_get_repo = shard_module._get_repo
+
+        class _FailingRemoveGit:
+            def __init__(self, real):
+                self._real = real
+
+            def __getattr__(self, attr):
+                if attr == "worktree":
+                    def _worktree(*args, **kwargs):
+                        if args and args[0] == "remove":
+                            raise RuntimeError("simulated removal failure")
+                        return self._real.worktree(*args, **kwargs)
+
+                    return _worktree
+                return getattr(self._real, attr)
+
+        class _RepoProxy:
+            def __init__(self, real):
+                self._real = real
+                self.git = _FailingRemoveGit(real.git)
+
+            def __getattr__(self, attr):
+                return getattr(self._real, attr)
+
+        monkeypatch.setattr(
+            shard_module, "_get_repo", lambda: _RepoProxy(real_get_repo())
+        )
+
+        with pytest.raises(ShardError, match="Failed to remove worktree"):
+            cleanup_shard(info["worktree_name"])
+
+        row = _get_shard_metadata(info["worktree_name"])
+        assert row["worktree_path"] == str(target_path)
+        status = get_shard_status(info["worktree_name"])
+        assert status is not None
+        assert status["worktree_path"] == str(target_path)
+        extras = get_triage_extras()
+        assert str(sibling_path) in [
+            item["path"] for item in extras["detached_unbound"]
+        ]
+
+    def test_removal_failure_without_live_registration_keeps_path_cleared(
+        self, repo: Path, monkeypatch
+    ):
+        """If git removes the registration but reports failure, no live
+        member corroborates a rollback and the old DB binding stays revoked."""
+        info = spawn_shard("restgone")
+        target_path = Path(info["worktree_path"])
+
+        import skein.shard as shard_module
+
+        real_get_repo = shard_module._get_repo
+
+        class _RemoveThenFailGit:
+            def __init__(self, real):
+                self._real = real
+                self._removed = False
+
+            def __getattr__(self, attr):
+                if attr == "worktree":
+                    def _worktree(*args, **kwargs):
+                        if args and args[0] == "remove":
+                            if not self._removed:
+                                self._real.worktree(
+                                    "remove", "--force", str(target_path)
+                                )
+                                self._removed = True
+                            raise RuntimeError("failure after removal")
+                        return self._real.worktree(*args, **kwargs)
+
+                    return _worktree
+                return getattr(self._real, attr)
+
+        class _RepoProxy:
+            def __init__(self, real):
+                self._real = real
+                self.git = _RemoveThenFailGit(real.git)
+
+            def __getattr__(self, attr):
+                return getattr(self._real, attr)
+
+        monkeypatch.setattr(
+            shard_module, "_get_repo", lambda: _RepoProxy(real_get_repo())
+        )
+
+        with pytest.raises(ShardError, match="Failed to remove worktree"):
+            cleanup_shard(info["worktree_name"])
+
+        assert not target_path.exists()
+        row = _get_shard_metadata(info["worktree_name"])
+        assert row is not None
+        assert row["worktree_path"] is None
+
 
 class TestChainPerLinkDiscardAuthority:
     """Round 2, defect 2: discard authority is per link and exact to the
