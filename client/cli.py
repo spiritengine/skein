@@ -7205,6 +7205,10 @@ def shard_cleanup(
                 link["worktree_name"]: list(link.get("dirty_files") or [])
                 for link in plan
             }
+            disclosed_fingerprints = {
+                link["worktree_name"]: link.get("dirty_fingerprint")
+                for link in plan
+            }
             disclosed_chain = [link["worktree_name"] for link in plan]
             result = shard_worktree.cleanup_graft_chain(
                 worktree_name,
@@ -7213,6 +7217,7 @@ def shard_cleanup(
                 delete_unmerged_branch=delete_unmerged,
                 base_branch=base_branch,
                 disclosed_dirty=disclosed_map,
+                disclosed_dirty_fingerprints=disclosed_fingerprints,
                 disclosed_chain=disclosed_chain,
             )
 
@@ -7262,6 +7267,7 @@ def shard_cleanup(
                 disclosed = getattr(e, "dirty_files", None)
                 if disclosed is None:
                     raise
+                disclosed_fingerprint = getattr(e, "dirty_fingerprint", None)
                 click.echo(str(e))
                 if assume_yes:
                     click.echo(
@@ -7276,6 +7282,7 @@ def shard_cleanup(
                     delete_unmerged_branch=delete_unmerged,
                     base_branch=base_branch,
                     authorized_dirty_files=disclosed,
+                    authorized_dirty_fingerprint=disclosed_fingerprint,
                 )
 
             if result.get("worktree_pruned"):

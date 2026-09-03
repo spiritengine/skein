@@ -2377,6 +2377,9 @@ class TestChainPerLinkDiscardAuthority:
 
         plan = get_chain_cleanup_plan(info["worktree_name"])
         disclosed = {l["worktree_name"]: l["dirty_files"] for l in plan}
+        fingerprints = {
+            link["worktree_name"]: link["dirty_fingerprint"] for link in plan
+        }
         assert disclosed[graft["graft_worktree_name"]]
         assert disclosed[info["worktree_name"]] == []
 
@@ -2385,7 +2388,10 @@ class TestChainPerLinkDiscardAuthority:
         late.write_text("undisclosed\n")
 
         result = cleanup_graft_chain(
-            info["worktree_name"], keep_branch=True, disclosed_dirty=disclosed
+            info["worktree_name"],
+            keep_branch=True,
+            disclosed_dirty=disclosed,
+            disclosed_dirty_fingerprints=fingerprints,
         )
         assert result["success"] is False
         assert result["removed"] == [graft["graft_worktree_name"]]
@@ -2401,12 +2407,18 @@ class TestChainPerLinkDiscardAuthority:
 
         plan = get_chain_cleanup_plan(info["worktree_name"])
         disclosed = {l["worktree_name"]: l["dirty_files"] for l in plan}
+        fingerprints = {
+            link["worktree_name"]: link["dirty_fingerprint"] for link in plan
+        }
 
         undisclosed_file = Path(graft["graft_worktree_path"]) / "surprise.txt"
         undisclosed_file.write_text("late\n")
 
         result = cleanup_graft_chain(
-            info["worktree_name"], keep_branch=True, disclosed_dirty=disclosed
+            info["worktree_name"],
+            keep_branch=True,
+            disclosed_dirty=disclosed,
+            disclosed_dirty_fingerprints=fingerprints,
         )
         assert result["success"] is False
         assert result["removed"] == []
@@ -2421,12 +2433,101 @@ class TestChainPerLinkDiscardAuthority:
 
         plan = get_chain_cleanup_plan(info["worktree_name"])
         disclosed = {l["worktree_name"]: l["dirty_files"] for l in plan}
+        fingerprints = {
+            link["worktree_name"]: link["dirty_fingerprint"] for link in plan
+        }
 
         result = cleanup_graft_chain(
-            info["worktree_name"], keep_branch=True, disclosed_dirty=disclosed
+            info["worktree_name"],
+            keep_branch=True,
+            disclosed_dirty=disclosed,
+            disclosed_dirty_fingerprints=fingerprints,
         )
         assert result["success"] is True
         assert len(result["removed"]) == 2
+
+    def test_cli_same_path_rewrite_after_chain_disclosure_refuses(
+        self, repo: Path, monkeypatch
+    ):
+        """A status line is not content authority: rewriting a disclosed
+        path after the plan must preserve the late bytes and the whole chain."""
+        info, graft = self._chain(repo)
+        disclosed_file = Path(graft["graft_worktree_path"]) / "same.txt"
+        disclosed_file.write_text("before disclosure\n")
+
+        import skein.shard as shard_module
+
+        real_plan = shard_module.get_chain_cleanup_plan
+
+        def _plan_then_rewrite(*args, **kwargs):
+            plan = real_plan(*args, **kwargs)
+            disclosed_file.write_text("after disclosure\n")
+            return plan
+
+        monkeypatch.setattr(
+            shard_module, "get_chain_cleanup_plan", _plan_then_rewrite
+        )
+
+        from client.cli import cli
+
+        runner = CliRunner()
+        with patch("client.cli.make_request", return_value={}):
+            result = runner.invoke(
+                cli,
+                [
+                    "shard",
+                    "cleanup",
+                    info["worktree_name"],
+                    "--chain",
+                    "--keep-branch",
+                    "--yes",
+                ],
+            )
+
+        assert result.exit_code != 0
+        assert "content or index state changed after disclosure" in result.output
+        assert disclosed_file.read_text() == "after disclosure\n"
+        assert Path(info["worktree_path"]).exists()
+        assert Path(graft["graft_worktree_path"]).exists()
+
+    def test_cli_same_path_rewrite_after_single_disclosure_refuses(
+        self, repo: Path, monkeypatch
+    ):
+        """The single-cleanup retry carries the same content fingerprint as
+        chain cleanup, so changing a listed path during confirmation refuses."""
+        info = spawn_shard("singlerewrite")
+        _commit_work(Path(info["worktree_path"]), "same.txt")
+        disclosed_file = Path(info["worktree_path"]) / "same.txt"
+        disclosed_file.write_text("before disclosure\n")
+        _git(Path(info["worktree_path"]), "add", "same.txt")
+
+        from client.cli import cli
+        import client.cli as cli_module
+
+        def _confirm(prompt, **kwargs):
+            if prompt.startswith("Discard these uncommitted changes?"):
+                disclosed_file.write_text("after disclosure\n")
+                _git(Path(info["worktree_path"]), "add", "same.txt")
+            return True
+
+        monkeypatch.setattr(cli_module.click, "confirm", _confirm)
+
+        runner = CliRunner()
+        with patch("client.cli.make_request", return_value={}):
+            result = runner.invoke(
+                cli,
+                [
+                    "shard",
+                    "cleanup",
+                    info["worktree_name"],
+                    "--keep-branch",
+                ],
+            )
+
+        assert result.exit_code != 0
+        assert "content or index state changed after disclosure" in result.output
+        assert disclosed_file.read_text() == "after disclosure\n"
+        assert Path(info["worktree_path"]).exists()
 
     def test_cli_late_dirt_in_other_link_fails_nonzero(self, repo: Path, monkeypatch):
         """CLI intersection: a disclosed dirty graft must not authorize late

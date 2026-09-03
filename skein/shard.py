@@ -9,6 +9,8 @@ Provides core functions for creating, cleaning up, and listing SHARDs.
 import os
 import re
 import json
+import hashlib
+import stat
 import sqlite3
 import subprocess
 from datetime import datetime, timezone
@@ -1129,6 +1131,85 @@ def _worktree_dirty_files(worktree_path: Path) -> List[str]:
         return []
 
 
+def _worktree_dirty_fingerprint(worktree_path: Path) -> str:
+    """Digest the exact tracked/index and untracked state cleanup may discard.
+
+    Porcelain lines identify paths and status categories for people, but they
+    do not change when bytes at an already-dirty path change. This digest is
+    the machine-side half of disclosure authority: it binds the index, tracked
+    working-tree diff, and every non-ignored untracked file's type, mode, and
+    content at confirmation time.
+
+    Fail closed. If the state cannot be read consistently, cleanup has no
+    exact discard authority and must not force-remove the worktree.
+    """
+
+    def git_bytes(*args: str) -> bytes:
+        result = subprocess.run(
+            ["git", "-C", str(worktree_path), *args],
+            check=False,
+            capture_output=True,
+        )
+        if result.returncode != 0:
+            error = result.stderr.decode(errors="replace").strip()
+            raise ShardError(
+                f"Cannot snapshot uncommitted state in {worktree_path}: "
+                f"git {' '.join(args)} failed: {error}"
+            )
+        return result.stdout
+
+    digest = hashlib.sha256()
+    for label, args in (
+        (b"status", ("status", "--porcelain=v1", "-z", "--untracked-files=all")),
+        (
+            b"index",
+            (
+                "diff",
+                "--cached",
+                "--binary",
+                "--no-ext-diff",
+                "--no-textconv",
+                "HEAD",
+                "--",
+            ),
+        ),
+        (
+            b"worktree",
+            ("diff", "--binary", "--no-ext-diff", "--no-textconv", "--"),
+        ),
+    ):
+        payload = git_bytes(*args)
+        digest.update(label + b"\0" + len(payload).to_bytes(8, "big") + payload)
+
+    untracked = git_bytes("ls-files", "--others", "--exclude-standard", "-z")
+    root = os.fsencode(str(worktree_path))
+    for relative in sorted(path for path in untracked.split(b"\0") if path):
+        full_path = os.path.join(root, relative)
+        try:
+            metadata = os.lstat(full_path)
+            digest.update(b"untracked\0" + relative + b"\0")
+            digest.update(stat.S_IFMT(metadata.st_mode).to_bytes(4, "big"))
+            digest.update(stat.S_IMODE(metadata.st_mode).to_bytes(4, "big"))
+            if stat.S_ISLNK(metadata.st_mode):
+                target = os.readlink(full_path)
+                if isinstance(target, str):
+                    target = os.fsencode(target)
+                digest.update(target)
+            elif stat.S_ISREG(metadata.st_mode):
+                with open(full_path, "rb") as handle:
+                    while chunk := handle.read(1024 * 1024):
+                        digest.update(chunk)
+            else:
+                digest.update(str(metadata.st_size).encode())
+        except OSError as e:
+            raise ShardError(
+                f"Cannot snapshot uncommitted state in {worktree_path}: "
+                f"{os.fsdecode(relative)} changed while being read: {e}"
+            ) from e
+
+    return digest.hexdigest()
+
+
 def _registered_worktree_paths(repo) -> List[Path]:
     """Paths of every linked worktree registration git currently lists."""
     return [Path(s["path"]) for s in _list_worktree_stanzas(repo) if not s["is_main"]]
@@ -1219,6 +1300,7 @@ def _cleanup_shard_detailed(
     base_branch: Optional[str] = None,
     discard_uncommitted: bool = False,
     authorized_dirty_files: Optional[List[str]] = None,
+    authorized_dirty_fingerprint: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Remove SHARD worktree; delete the branch only under explicit authority.
@@ -1254,6 +1336,10 @@ def _cleanup_shard_detailed(
             is exact to this set: any dirty file outside it — dirt that
             appeared after disclosure — refuses, and the recheck runs again
             immediately before any force removal.
+        authorized_dirty_fingerprint: Digest of the disclosed dirty state.
+            Required whenever authorized_dirty_files permits discarding a
+            nonempty state; catches same-path content or index changes whose
+            porcelain status line stays unchanged.
 
     Returns:
         Dict describing what happened: worktree_removed, worktree_pruned,
@@ -1424,9 +1510,19 @@ def _cleanup_shard_detailed(
         undisclosed = _undisclosed_dirty(
             dirty_files, authorized_dirty_files, discard_uncommitted
         )
-        if undisclosed:
-            listing = "\n".join(f"  {ln}" for ln in undisclosed[:20])
-            more = len(undisclosed) - 20
+        dirty_state_changed = bool(
+            dirty_files
+            and authorized_dirty_files is not None
+            and (
+                authorized_dirty_fingerprint is None
+                or _worktree_dirty_fingerprint(worktree_path)
+                != authorized_dirty_fingerprint
+            )
+        )
+        if undisclosed or dirty_state_changed:
+            listed = undisclosed or dirty_files
+            listing = "\n".join(f"  {ln}" for ln in listed[:20])
+            more = len(listed) - 20
             if more > 0:
                 listing += f"\n  ... and {more} more"
             beyond = (
@@ -1435,11 +1531,20 @@ def _cleanup_shard_detailed(
                 else ""
             )
             err = ShardError(
-                f"Worktree has uncommitted changes{beyond}:\n{listing}\n"
+                f"Worktree has uncommitted changes{beyond}"
+                + (
+                    " whose content or index state changed after disclosure"
+                    if dirty_state_changed
+                    else ""
+                )
+                + f":\n{listing}\n"
                 f"Cleanup would discard them. Confirm explicitly "
                 f"(interactively, or --yes at the CLI) to proceed."
             )
             err.dirty_files = dirty_files
+            err.dirty_fingerprint = (
+                _worktree_dirty_fingerprint(worktree_path) if dirty_files else None
+            )
             raise err
 
     result: Dict[str, Any] = {
@@ -1498,12 +1603,23 @@ def _cleanup_shard_detailed(
             # authority before forcing, so dirt that appeared between the
             # disclosure check and removal refuses instead of being wiped —
             # --force stays directory mechanics, never discard authority.
+            current_dirty = _worktree_dirty_files(worktree_path)
             late = _undisclosed_dirty(
-                _worktree_dirty_files(worktree_path),
+                current_dirty,
                 authorized_dirty_files,
                 discard_uncommitted,
             )
-            if late:
+            try:
+                dirty_state_changed = bool(
+                    current_dirty
+                    and authorized_dirty_files is not None
+                    and (
+                        authorized_dirty_fingerprint is None
+                        or _worktree_dirty_fingerprint(worktree_path)
+                        != authorized_dirty_fingerprint
+                    )
+                )
+            except ShardError:
                 _restore_live_worktree_path(
                     repo,
                     worktree_name,
@@ -1513,10 +1629,23 @@ def _cleanup_shard_detailed(
                     detached_head,
                     prior_path is not None,
                 )
-                listing = "\n".join(f"  {ln}" for ln in late[:20])
+                raise
+            if late or dirty_state_changed:
+                _restore_live_worktree_path(
+                    repo,
+                    worktree_name,
+                    worktree_path,
+                    branch_name,
+                    bool(resolution.get("detached")),
+                    detached_head,
+                    prior_path is not None,
+                )
+                listing = "\n".join(
+                    f"  {ln}" for ln in (late or current_dirty)[:20]
+                )
                 raise ShardError(
                     f"Refusing to force-remove '{worktree_name}': uncommitted "
-                    f"changes appeared after disclosure:\n{listing}\n"
+                    f"changes appeared or changed after disclosure:\n{listing}\n"
                     f"Nothing was removed. Re-run cleanup to re-disclose."
                 )
             try:
@@ -3620,8 +3749,13 @@ def get_chain_cleanup_plan(
             merged = _branch_merged_into(repo, branch_name, proof_base)
         member = members_by_name.get(name)
         dirty_files: List[str] = []
+        dirty_fingerprint: Optional[str] = None
         if member and os.path.isdir(member["worktree_path"]):
             dirty_files = _worktree_dirty_files(Path(member["worktree_path"]))
+            if dirty_files:
+                dirty_fingerprint = _worktree_dirty_fingerprint(
+                    Path(member["worktree_path"])
+                )
         plan.append(
             {
                 "worktree_name": name,
@@ -3630,6 +3764,7 @@ def get_chain_cleanup_plan(
                 "proof_base": proof_base,
                 "merged": merged,
                 "dirty_files": dirty_files,
+                "dirty_fingerprint": dirty_fingerprint,
             }
         )
     return plan
@@ -3644,6 +3779,7 @@ def cleanup_graft_chain(
     base_branch: Optional[str] = None,
     discard_uncommitted: bool = False,
     disclosed_dirty: Optional[Dict[str, List[str]]] = None,
+    disclosed_dirty_fingerprints: Optional[Dict[str, Optional[str]]] = None,
     disclosed_chain: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """
@@ -3684,6 +3820,7 @@ def cleanup_graft_chain(
         discard_uncommitted: Blanket per-link discard confirmation; ignored
             when disclosed_dirty is given
         disclosed_dirty: Exact disclosed dirty status lines per link name
+        disclosed_dirty_fingerprints: Exact dirty-state digest per link name
         disclosed_chain: Exact ordered link names disclosed before confirmation
 
     Returns:
@@ -3732,6 +3869,13 @@ def cleanup_graft_chain(
             )
         chain = frozen_chain
 
+    if disclosed_dirty is not None and disclosed_dirty_fingerprints is None:
+        raise ShardError(
+            "Cannot cleanup --chain: disclosed dirty paths lack their "
+            "content fingerprints; nothing was removed. Re-run cleanup to "
+            "re-disclose the chain."
+        )
+
     removed = []
     preserved_branches = []
     errors = []
@@ -3741,9 +3885,11 @@ def cleanup_graft_chain(
     reversed_chain = list(reversed(chain))
     for idx, wt_name in enumerate(reversed_chain):
         link_authorized: Optional[List[str]] = None
+        link_fingerprint: Optional[str] = None
         link_discard = discard_uncommitted
         if disclosed_dirty is not None:
             link_authorized = list(disclosed_dirty.get(wt_name, []))
+            link_fingerprint = disclosed_dirty_fingerprints.get(wt_name)
             link_discard = False
         try:
             link_result = _cleanup_shard_detailed(
@@ -3754,6 +3900,7 @@ def cleanup_graft_chain(
                 base_branch=base_branch,
                 discard_uncommitted=link_discard,
                 authorized_dirty_files=link_authorized,
+                authorized_dirty_fingerprint=link_fingerprint,
             )
             removed.append(wt_name)
             if link_result.get("branch_preserved"):
