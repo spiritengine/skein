@@ -1198,8 +1198,8 @@ def _cleanup_shard_detailed(
     branches.
 
     Args:
-        worktree_name: Shard name, or the exact path of a member's worktree
-            (resolved to its member — basenames are never extracted).
+        worktree_name: Shard name, or the exact absolute path of a member's
+            worktree (resolved to its member — basenames are never extracted).
         keep_branch: If True, keep git branch after removing worktree.
         caller_cwd: Optional path checked against self-deletion.
         project_root: Optional path to git repo. If not provided, auto-detects.
@@ -1766,10 +1766,11 @@ def get_shard_status(worktree_name: str) -> Optional[Dict[str, str]]:
 
     Args:
         worktree_name: Shard name (matched verbatim — a valid canonical name
-            may contain '/'), or the exact path of a member's worktree
-            (raw or symlink-resolved), which keeps full-path invocation
-            working even after a basename-changing move. Basenames are never
-            extracted: the directory name is not the identity.
+            may contain '/'), or the exact absolute path of a member's
+            worktree (raw or symlink-resolved), which keeps full-path
+            invocation working even after a basename-changing move. Basenames
+            are never extracted: the directory name is not the identity, and
+            non-absolute input is never a path — only a canonical name.
 
     Returns:
         SHARD info dict or None if not found
@@ -1778,9 +1779,11 @@ def get_shard_status(worktree_name: str) -> Optional[Dict[str, str]]:
     for shard in shards:
         if shard["worktree_name"] == worktree_name:
             return shard
-    for shard in shards:
-        if _paths_equal(Path(worktree_name), Path(shard["worktree_path"])):
-            return shard
+    # Only absolute input may enter the path arm (see resolve_shard).
+    if Path(worktree_name).is_absolute():
+        for shard in shards:
+            if _paths_equal(Path(worktree_name), Path(shard["worktree_path"])):
+                return shard
     return None
 
 
@@ -1798,9 +1801,11 @@ def resolve_shard(name: str) -> Dict[str, Any]:
     Pure: never writes, and works against a read-only DB and checkout.
     Name lookups are exact-match only, on the verbatim input — a valid
     canonical name may contain '/', so basenames are never extracted. The
-    one non-name input accepted is the exact path of a member's worktree
-    (raw or symlink-resolved), which resolves to that member and keeps
-    full-path invocation working after a basename-changing move.
+    one non-name input accepted is the exact absolute path of a member's
+    worktree (raw or symlink-resolved), which resolves to that member and
+    keeps full-path invocation working after a basename-changing move.
+    Non-absolute input is always a verbatim canonical name, never a
+    cwd-relative path.
 
     Returns:
         {name, path, source, exists, detached, branch, branch_exists,
@@ -1821,7 +1826,11 @@ def resolve_shard(name: str) -> Dict[str, Any]:
         if member["worktree_name"] == name:
             matched = member
             break
-    if matched is None:
+    if matched is None and Path(name).is_absolute():
+        # Only absolute input may enter the path arm. Relative syntax
+        # belongs to canonical names (which may contain '/'); resolving it
+        # against cwd would let a bare name capture a different member
+        # moved to <cwd>/<name>.
         for member in classification["members"]:
             if _paths_equal(Path(name), Path(member["worktree_path"])):
                 matched = member
@@ -3594,7 +3603,8 @@ def cleanup_graft_chain(
     exists) and compound the partial state the caller must report.
 
     Args:
-        worktree_name: Any worktree in the chain (name, or exact member path)
+        worktree_name: Any worktree in the chain (name, or exact absolute
+            member path)
         keep_branch: Keep branches after removing worktrees
         caller_cwd: Caller's cwd to check for self-deletion
         project_root: Optional project root override

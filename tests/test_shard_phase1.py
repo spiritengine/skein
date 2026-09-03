@@ -1712,6 +1712,76 @@ class TestNameInputNormalization:
         assert member is not None
         assert member["worktree_path"] == str(wt)
 
+    def _collide(self, repo: Path):
+        """A branch-only shard plus a different member moved to
+        <cwd>/<branch-only-name>: bare-name input must never resolve
+        through the cwd-relative path to the other member."""
+        hot = spawn_shard("hot")
+        _commit_work(Path(hot["worktree_path"]))
+        cleanup_shard(hot["worktree_name"], keep_branch=True,
+                      discard_uncommitted=True)
+
+        cool = spawn_shard("cool")
+        _commit_work(Path(cool["worktree_path"]))
+        collision = repo / hot["worktree_name"]
+        _git(repo, "worktree", "move", cool["worktree_path"], str(collision))
+        assert Path.cwd().resolve() == repo.resolve()
+        return hot, cool, collision
+
+    def test_branch_only_name_survives_cwd_collision_where(self, repo: Path):
+        """Round 3: a bare canonical name answers branch-only (where exits
+        nonzero) even when a different member sits at <cwd>/<name>."""
+        hot, cool, collision = self._collide(repo)
+
+        resolution = resolve_shard(hot["worktree_name"])
+        assert resolution["name"] == hot["worktree_name"]
+        assert resolution["registered"] is False
+        assert resolution["branch_exists"] is True
+        assert Path(resolution["path"]) != collision
+
+        assert get_shard_status(hot["worktree_name"]) is None
+
+        from client.cli import cli
+
+        runner = CliRunner()
+        result = runner.invoke(
+            cli, ["shard", "where", hot["worktree_name"], "--path-only"]
+        )
+        assert result.exit_code != 0
+        assert str(collision) not in result.output
+
+        # The moved member is still selectable, by its absolute path only
+        member = get_shard_status(str(collision))
+        assert member is not None
+        assert member["worktree_name"] == cool["worktree_name"]
+
+    def test_branch_only_name_survives_cwd_collision_cleanup(self, repo: Path):
+        """Round 3 reproduction: cleanup of the branch-only name refuses
+        instead of removing the colliding member's worktree."""
+        hot, cool, collision = self._collide(repo)
+
+        with pytest.raises(ShardError, match="branch-only"):
+            cleanup_shard(hot["worktree_name"], keep_branch=True,
+                          discard_uncommitted=True)
+        assert collision.exists()
+
+        from client.cli import cli
+
+        runner = CliRunner()
+        with patch("client.cli.make_request", return_value={}):
+            result = runner.invoke(
+                cli,
+                ["shard", "cleanup", hot["worktree_name"], "--keep-branch",
+                 "--yes"],
+            )
+        assert result.exit_code != 0
+        assert collision.exists()
+
+        # cool is intact and still resolvable at its moved absolute path
+        resolution = resolve_shard(str(collision))
+        assert resolution["name"] == cool["worktree_name"]
+        assert Path(resolution["path"]) == collision
+
 
 class TestExplicitRootCanonicalization:
     """S9: explicit project roots (env and API) canonicalize to the origin
