@@ -387,7 +387,10 @@ with `git worktree add <path> shard-<name>`.
 requires recorded parentage (the `-graft` name suffix is never treated as
 proof); authority is checked per link against each link's own base, and the
 plan is disclosed link by link before you confirm — one `--yes` cannot
-silently authorize deleting an unrelated link.
+silently authorize deleting an unrelated link. Discard authority is exact
+to each link's disclosed dirty files: uncommitted changes that appear
+after disclosure refuse that link, and the chain stops at the first
+refusal, reporting the partial state and exiting nonzero.
 
 ---
 

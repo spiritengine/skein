@@ -982,9 +982,9 @@ def _branch_exists(repo, branch_name: str) -> bool:
         return False
 
 
-def _branch_merged_into(repo, branch_name: str, base_branch: str) -> bool:
+def _commit_contained_in(repo, committish: str, base_branch: str) -> bool:
     """
-    Ancestry-only merge proof: is branch_name an ancestor of base_branch?
+    Ancestry-only containment proof: is committish an ancestor of base_branch?
 
     This is the ONLY merge proof cleanup accepts. Squash-merge and rebase
     integration do not leave the original commits in the base's ancestry, so
@@ -993,10 +993,85 @@ def _branch_merged_into(repo, branch_name: str, base_branch: str) -> bool:
     --delete-unmerged-branch override.
     """
     try:
-        repo.git.merge_base("--is-ancestor", branch_name, base_branch)
+        repo.git.merge_base("--is-ancestor", committish, base_branch)
         return True
     except Exception:
         return False
+
+
+def _branch_merged_into(repo, branch_name: str, base_branch: str) -> bool:
+    """Merge proof over a branch name (see _commit_contained_in)."""
+    return _commit_contained_in(repo, branch_name, base_branch)
+
+
+def _branch_oid(repo, branch_name: str) -> Optional[str]:
+    """Current commit OID of a local branch, or None if it does not exist."""
+    try:
+        return repo.git.rev_parse("--verify", f"refs/heads/{branch_name}").strip()
+    except Exception:
+        return None
+
+
+def _delete_branch_at_oid(repo, branch_name: str, expected_oid: str) -> None:
+    """Delete a branch iff its ref still points at expected_oid.
+
+    `git update-ref -d <ref> <expected>` takes the ref lock and refuses when
+    the ref has moved, so deletion authority (merge proof or the explicit
+    override, both settled against expected_oid) can never reach commits
+    that arrived on the ref after the proof. Unlike `git branch -D`,
+    update-ref does not refuse a checked-out branch, so that guard is
+    reinstated here before the deletion. Raises on any refusal.
+    """
+    for stanza in _list_worktree_stanzas(repo):
+        if stanza.get("branch") == branch_name:
+            raise ShardError(
+                f"branch {branch_name} is checked out at {stanza['path']}"
+            )
+    repo.git.update_ref("-d", f"refs/heads/{branch_name}", expected_oid)
+
+
+def _stanza_for_path(repo, worktree_path: Path) -> Optional[Dict[str, Any]]:
+    """The porcelain stanza of the linked worktree at worktree_path, if any."""
+    for stanza in _list_worktree_stanzas(repo):
+        if not stanza["is_main"] and _paths_equal(Path(stanza["path"]), worktree_path):
+            return stanza
+    return None
+
+
+def _undisclosed_dirty(
+    dirty_files: List[str],
+    authorized_dirty_files: Optional[List[str]],
+    discard_uncommitted: bool,
+) -> List[str]:
+    """Dirty status lines whose discard nothing has authorized.
+
+    authorized_dirty_files, when given, is the exact disclosed set the
+    caller confirmed: anything outside it is undisclosed regardless of
+    discard_uncommitted, so a confirmation never stretches to dirt that
+    appeared after disclosure. With no disclosed set, discard_uncommitted
+    is the caller's blanket programmatic authority over this one worktree.
+    """
+    if not dirty_files:
+        return []
+    if authorized_dirty_files is not None:
+        allowed = set(authorized_dirty_files)
+        return [ln for ln in dirty_files if ln not in allowed]
+    if discard_uncommitted:
+        return []
+    return list(dirty_files)
+
+
+def _restore_worktree_path(worktree_name: str, prior_path: Optional[str]) -> None:
+    """Best-effort compensation when a git mutation fails after the
+    pre-clear: put the recorded path back so a recoverable failure does not
+    strand a detached binding. Restore failure is swallowed — a pathless
+    row is the safe direction (it can bind nothing)."""
+    if prior_path is None:
+        return
+    try:
+        _set_worktree_path(worktree_name, prior_path)
+    except Exception:
+        pass
 
 
 def _worktree_dirty_files(worktree_path: Path) -> List[str]:
@@ -1030,8 +1105,39 @@ def _prune_registrations_preserving_metadata(repo) -> None:
     branch-only, so its path is cleared (row and lineage preserved —
     metadata follows the branch). Rows whose branch is also gone are stale
     rows: phase-5 gc material, never touched silently.
+
+    Two safety rules govern the global prune:
+    - A missing DETACHED worktree's registration is the only reachability
+      record of its HEAD commit, and this hygiene pass carries no authority
+      over that commit — if such a registration exists, the prune is
+      skipped entirely. Discarding it belongs to that shard's own cleanup,
+      which settles HEAD-containment authority and removes its registration
+      by targeted `git worktree remove --force`.
+    - Rows whose registration this prune is about to drop while their
+      branch survives have their recorded path cleared BEFORE the git
+      mutation: a DB failure then aborts with git untouched, and a git
+      failure leaves only a pathless row — never a dead path that could
+      bind unrelated detached work later. The after-check remains as a
+      backstop for registrations that vanish unpredictedly.
     """
-    before = _registered_worktree_paths(repo)
+    stanzas = [s for s in _list_worktree_stanzas(repo) if not s["is_main"]]
+    for stanza in stanzas:
+        if stanza["detached"] and not os.path.isdir(stanza["path"]):
+            return
+    doomed = [
+        Path(s["path"])
+        for s in stanzas
+        if not s["locked"] and (s["prunable"] or not os.path.isdir(s["path"]))
+    ]
+    for row in _load_all_rows():
+        row_path = row.get("worktree_path")
+        if not row_path:
+            continue
+        if not any(_paths_equal(Path(row_path), p) for p in doomed):
+            continue
+        if _branch_exists(repo, f"{SHARD_BRANCH_PREFIX}{row['worktree_name']}"):
+            _set_worktree_path(row["worktree_name"], None)
+    before = [Path(s["path"]) for s in stanzas]
     repo.git.worktree("prune")
     after = _registered_worktree_paths(repo)
     for row in _load_all_rows():
@@ -1074,6 +1180,7 @@ def _cleanup_shard_detailed(
     delete_unmerged_branch: bool = False,
     base_branch: Optional[str] = None,
     discard_uncommitted: bool = False,
+    authorized_dirty_files: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """
     Remove SHARD worktree; delete the branch only under explicit authority.
@@ -1101,9 +1208,14 @@ def _cleanup_shard_detailed(
             confirmation (--yes) never substitutes for it.
         base_branch: Explicit base for the merge proof when no DB row records
             one. Never guessed.
-        discard_uncommitted: Confirms that uncommitted changes in the worktree
-            may be discarded. The CLI sets this after prompting (or --yes);
-            without it a dirty worktree refuses.
+        discard_uncommitted: Blanket programmatic confirmation that this
+            worktree's uncommitted changes may be discarded. Ignored when
+            authorized_dirty_files is given.
+        authorized_dirty_files: The exact dirty status lines a disclosure
+            confirmed (the CLI passes the set it printed). Discard authority
+            is exact to this set: any dirty file outside it — dirt that
+            appeared after disclosure — refuses, and the recheck runs again
+            immediately before any force removal.
 
     Returns:
         Dict describing what happened: worktree_removed, worktree_pruned,
@@ -1187,12 +1299,16 @@ def _cleanup_shard_detailed(
         except OSError:
             pass
 
-    # Branch-deletion authority is settled BEFORE touching anything.
-    branch_present = _branch_exists(repo, branch_name)
+    # Branch-deletion authority is settled BEFORE touching anything, and it
+    # is settled against the exact OID the deletion will later require: a
+    # proof over the ref NAME would let the ref move between proof and
+    # deletion and the delete would then discard commits nothing proved.
+    branch_oid = _branch_oid(repo, branch_name)
+    branch_present = branch_oid is not None
     proof_base = _resolve_proof_base(worktree_name, base_branch)
     merged = False
     if branch_present and proof_base and _branch_exists(repo, proof_base):
-        merged = _branch_merged_into(repo, branch_name, proof_base)
+        merged = _commit_contained_in(repo, branch_oid, proof_base)
 
     want_delete = not keep_branch and branch_present
     authorized = merged or delete_unmerged_branch
@@ -1229,16 +1345,63 @@ def _cleanup_shard_detailed(
                 f"  - leave the shard alone"
             )
 
+    # Detached-worktree discard authority: removing (or pruning) a detached
+    # worktree discards its actual HEAD commit, which may have advanced past
+    # the shard branch — the branch's merge proof says nothing about it. The
+    # discard needs its own proof over the exact HEAD being discarded
+    # (containment in the proof base) or the explicit override.
+    if resolution.get("detached"):
+        stanza = _stanza_for_path(repo, worktree_path)
+        detached_head = stanza["head"] if stanza else None
+        head_contained = bool(
+            detached_head
+            and proof_base
+            and _branch_exists(repo, proof_base)
+            and _commit_contained_in(repo, detached_head, proof_base)
+        )
+        if not head_contained and not delete_unmerged_branch:
+            shown = detached_head[:12] if detached_head else "unknown"
+            base_shown = proof_base if proof_base else "any recorded base"
+            raise ShardError(
+                f"Cannot cleanup '{worktree_name}': its worktree is detached "
+                f"at commit {shown}, which is not provably contained in "
+                f"{base_shown}.\n"
+                f"Removing the worktree would discard that commit.\n"
+                f"Your options:\n"
+                f"  - finish or abort the rebase/bisect so the branch "
+                f"reattaches, then retry\n"
+                f"  - pass --base <branch> if the commit is merged elsewhere\n"
+                f"  - pass --delete-unmerged-branch to discard it anyway "
+                f"(you assume the loss)\n"
+                f"  - leave the shard alone"
+            )
+
     # Uncommitted-work confirmation (git-side check, before any removal).
+    # Discard authority is exact: with a disclosed set, any file outside it
+    # refuses — a confirmation never stretches to dirt that appeared after
+    # the disclosure it confirmed.
     if not missing:
         dirty_files = _worktree_dirty_files(worktree_path)
-        if dirty_files and not discard_uncommitted:
-            listing = "\n".join(f"  {ln}" for ln in dirty_files[:20])
-            raise ShardError(
-                f"Worktree has uncommitted changes:\n{listing}\n"
+        undisclosed = _undisclosed_dirty(
+            dirty_files, authorized_dirty_files, discard_uncommitted
+        )
+        if undisclosed:
+            listing = "\n".join(f"  {ln}" for ln in undisclosed[:20])
+            more = len(undisclosed) - 20
+            if more > 0:
+                listing += f"\n  ... and {more} more"
+            beyond = (
+                " beyond the disclosed set"
+                if authorized_dirty_files is not None
+                else ""
+            )
+            err = ShardError(
+                f"Worktree has uncommitted changes{beyond}:\n{listing}\n"
                 f"Cleanup would discard them. Confirm explicitly "
                 f"(interactively, or --yes at the CLI) to proceed."
             )
+            err.dirty_files = dirty_files
+            raise err
 
     result: Dict[str, Any] = {
         "worktree_removed": False,
@@ -1252,56 +1415,101 @@ def _cleanup_shard_detailed(
         "message": "",
     }
 
-    if missing:
-        # git worktree remove refuses a gone directory; prune the stale
-        # registration instead. Prune is registration mechanics only.
+    # Cross-store ordering: the row's recorded path is authority to bind
+    # detached work, so it is revoked BEFORE any git mutation. A DB failure
+    # here aborts with git untouched; any git failure after this point
+    # leaves at worst a pathless row (branch-only metadata, or a stale row
+    # triage surfaces) — never a dead path that could bind an unrelated
+    # worktree created at the same location later.
+    row = _get_shard_metadata(worktree_name)
+    prior_path = row.get("worktree_path") if row else None
+    if prior_path is not None:
         try:
-            _prune_registrations_preserving_metadata(repo)
+            _set_worktree_path(worktree_name, None)
         except Exception as e:
+            raise ShardError(
+                f"Cleanup aborted before touching git state: could not clear "
+                f"the recorded worktree path for '{worktree_name}': {e}"
+            )
+
+    if missing:
+        # The directory is gone; remove exactly this registration. --force
+        # here is registration mechanics for an absent directory and carries
+        # no branch authority. Targeted, unlike global prune, so no other
+        # worktree's registration — or detached HEAD — is touched.
+        try:
+            repo.git.worktree("remove", "--force", str(worktree_path))
+        except Exception as e:
+            _restore_worktree_path(worktree_name, prior_path)
             raise ShardError(f"Failed to prune stale worktree registration: {e}")
         result["worktree_pruned"] = True
     else:
         try:
             repo.git.worktree("remove", str(worktree_path))
         except Exception:
-            # Force removal is directory mechanics (dirty trees confirmed
-            # above); it carries no branch authority.
+            # Plain removal refuses dirty trees. Recheck against the same
+            # authority before forcing, so dirt that appeared between the
+            # disclosure check and removal refuses instead of being wiped —
+            # --force stays directory mechanics, never discard authority.
+            late = _undisclosed_dirty(
+                _worktree_dirty_files(worktree_path),
+                authorized_dirty_files,
+                discard_uncommitted,
+            )
+            if late:
+                _restore_worktree_path(worktree_name, prior_path)
+                listing = "\n".join(f"  {ln}" for ln in late[:20])
+                raise ShardError(
+                    f"Refusing to force-remove '{worktree_name}': uncommitted "
+                    f"changes appeared after disclosure:\n{listing}\n"
+                    f"Nothing was removed. Re-run cleanup to re-disclose."
+                )
             try:
                 repo.git.worktree("remove", "--force", str(worktree_path))
             except Exception as e2:
+                _restore_worktree_path(worktree_name, prior_path)
                 raise ShardError(f"Failed to remove worktree: {e2}")
         result["worktree_removed"] = True
 
     if want_delete and authorized:
         try:
-            repo.git.branch("-D", branch_name)
+            _delete_branch_at_oid(repo, branch_name, branch_oid)
         except Exception as e:
-            # The worktree is already gone but the branch survived the failed
-            # delete. Restore invariant 11 (the row follows the surviving
-            # branch, with only its dead path cleared) before surfacing the
-            # error, so the failure leaves branch-only state, not a row
-            # pointing at a removed directory.
-            if _get_shard_metadata(worktree_name) is not None:
-                _set_worktree_path(worktree_name, None)
+            # The worktree is gone but the branch survived — possibly
+            # because the ref moved past the OID the proof covered. Its row
+            # already lost its path in the pre-transition, so this failure
+            # state is exactly branch-only metadata (invariant 11), never a
+            # dead pointer.
             raise ShardError(
-                f"Removed worktree but failed to delete branch {branch_name}: {e}"
+                f"Removed worktree but failed to delete branch {branch_name}: "
+                f"{e}\n"
+                f"If the branch moved since the merge proof, re-run cleanup "
+                f"to prove its current tip (or pass --delete-unmerged-branch)."
             )
         result["branch_deleted"] = True
-        # The row is deleted only together with its branch (invariant 11).
-        if _get_shard_metadata(worktree_name) is not None:
-            _delete_shard_row(worktree_name)
-            result["row_deleted"] = True
         result["message"] = (
             f"Removed worktree and deleted branch {branch_name} "
             f"({'merge-proven' if merged else 'explicit override'})."
         )
+        # The row is deleted only together with its branch (invariant 11).
+        # Its path is already cleared, so a failure here leaves a harmless
+        # pathless stale row (triage-visible), which is reported, not raised.
+        if row is not None:
+            try:
+                _delete_shard_row(worktree_name)
+                result["row_deleted"] = True
+            except Exception as e:
+                result["message"] += (
+                    f"\nNote: the metadata row could not be deleted and "
+                    f"remains as a pathless stale row (see `skein shard "
+                    f"triage`): {e}"
+                )
     else:
-        # Branch survives: metadata follows the branch. Preserve the row,
-        # clearing only its recorded path.
+        # Branch survives: metadata follows the branch. Preserve the row;
+        # its recorded path was already cleared in the pre-transition.
         if branch_present:
             result["branch_preserved"] = True
-        if _get_shard_metadata(worktree_name) is not None:
-            _set_worktree_path(worktree_name, None)
+        if row is not None:
             result["path_cleared"] = True
         if preserve_branch:
             result["message"] = (
@@ -3321,6 +3529,11 @@ def get_chain_cleanup_plan(
     authority is exactly the authority applied.
     """
     repo = _get_repo()
+    # A member-path input canonicalizes before any row lookup (rows are
+    # keyed by name; the path is never the identity).
+    member = get_shard_status(worktree_name)
+    if member:
+        worktree_name = member["worktree_name"]
     root = get_graft_chain_root(worktree_name)
     chain = get_graft_chain(root)
     members_by_name = {m["worktree_name"]: m for m in list_shards()}
@@ -3357,6 +3570,7 @@ def cleanup_graft_chain(
     delete_unmerged_branch: bool = False,
     base_branch: Optional[str] = None,
     discard_uncommitted: bool = False,
+    disclosed_dirty: Optional[Dict[str, List[str]]] = None,
 ) -> Dict[str, Any]:
     """
     Clean up entire graft chain (original + all grafts).
@@ -3368,24 +3582,44 @@ def cleanup_graft_chain(
     against its own recorded base, and delete_unmerged_branch authorizes
     only what per-link disclosure (get_chain_cleanup_plan) surfaced.
 
+    Discard authority is likewise per link. With disclosed_dirty (the CLI
+    passes the exact per-link dirty sets it printed), each link may discard
+    only its own disclosed files — a link absent from the map authorizes
+    nothing, one link's disclosure never covers another, and dirt that
+    appeared after disclosure refuses. Without the map, the blanket
+    discard_uncommitted bool is the caller's own per-link authority.
+
+    The chain stops at the first failed link: continuing past a failure
+    would mutate links beyond it (e.g. delete a parent whose graft still
+    exists) and compound the partial state the caller must report.
+
     Args:
-        worktree_name: Any worktree in the chain
+        worktree_name: Any worktree in the chain (name, or exact member path)
         keep_branch: Keep branches after removing worktrees
         caller_cwd: Caller's cwd to check for self-deletion
         project_root: Optional project root override
         delete_unmerged_branch: Per-link authority to delete unmerged branches
         base_branch: Explicit proof base for links without a recorded one
-        discard_uncommitted: Confirms discarding uncommitted changes per link
+        discard_uncommitted: Blanket per-link discard confirmation; ignored
+            when disclosed_dirty is given
+        disclosed_dirty: Exact disclosed dirty status lines per link name
 
     Returns:
         Dict with:
             - success: bool
             - removed: list of removed worktree names
             - preserved_branches: links whose branch was preserved
-            - errors: list of error messages
+            - errors: list of error messages (first failure only)
+            - not_attempted: links skipped because an earlier link failed
     """
     if project_root:
         set_project_root(project_root)
+
+    # A member-path input canonicalizes before any row lookup (rows are
+    # keyed by name; the path is never the identity).
+    member = get_shard_status(worktree_name)
+    if member:
+        worktree_name = member["worktree_name"]
 
     if _get_shard_metadata(worktree_name) is None:
         raise ShardError(
@@ -3405,9 +3639,16 @@ def cleanup_graft_chain(
     removed = []
     preserved_branches = []
     errors = []
+    not_attempted: List[str] = []
 
     # Remove in reverse order (grafts first, then original)
-    for wt_name in reversed(chain):
+    reversed_chain = list(reversed(chain))
+    for idx, wt_name in enumerate(reversed_chain):
+        link_authorized: Optional[List[str]] = None
+        link_discard = discard_uncommitted
+        if disclosed_dirty is not None:
+            link_authorized = list(disclosed_dirty.get(wt_name, []))
+            link_discard = False
         try:
             link_result = _cleanup_shard_detailed(
                 wt_name,
@@ -3415,19 +3656,23 @@ def cleanup_graft_chain(
                 caller_cwd=caller_cwd,
                 delete_unmerged_branch=delete_unmerged_branch,
                 base_branch=base_branch,
-                discard_uncommitted=discard_uncommitted,
+                discard_uncommitted=link_discard,
+                authorized_dirty_files=link_authorized,
             )
             removed.append(wt_name)
             if link_result.get("branch_preserved"):
                 preserved_branches.append(link_result["branch_name"])
         except ShardError as e:
             errors.append(f"{wt_name}: {e}")
+            not_attempted = reversed_chain[idx + 1 :]
+            break
 
     return {
         "success": len(errors) == 0,
         "removed": removed,
         "preserved_branches": preserved_branches,
         "errors": errors,
+        "not_attempted": not_attempted,
         "chain_root": root,
     }
 

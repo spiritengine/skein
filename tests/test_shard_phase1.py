@@ -1490,9 +1490,11 @@ class TestPruneMetadataInvariant:
                 self._real = real
 
             def __getattr__(self, attr):
-                if attr == "branch":
+                # Branch deletion goes through the expected-OID primitive
+                # (git update-ref -d <ref> <oid>); fail exactly that.
+                if attr == "update_ref":
                     def _fail(*args, **kwargs):
-                        raise RuntimeError("simulated branch -D failure")
+                        raise RuntimeError("simulated branch delete failure")
 
                     return _fail
                 return getattr(self._real, attr)
@@ -1782,6 +1784,518 @@ class TestCleanupBoolContract:
         assert isinstance(result, dict)
         assert result["branch_deleted"] is True
         assert bool(result) is True
+
+
+class TestDetachedCleanupHeadAuthority:
+    """Round 2, defect 1: removal authority must cover the exact detached
+    HEAD being discarded — the shard branch's merge proof says nothing
+    about commits made while detached."""
+
+    def _detached_with_new_commit(self, name: str):
+        info = spawn_shard(name)
+        wt = Path(info["worktree_path"])
+        _git(wt, "checkout", "--detach")
+        (wt / "detached-work.txt").write_text("committed while detached\n")
+        _git(wt, "add", ".")
+        _git(wt, "commit", "-m", "detached commit")
+        head = _git(wt, "rev-parse", "HEAD").strip()
+        return info, wt, head
+
+    def test_divergent_detached_head_refuses(self, repo: Path):
+        """The reproduction: branch sits at merged master, HEAD advanced to
+        a new clean commit — the stale branch proof must not authorize
+        discarding the HEAD."""
+        info, wt, head = self._detached_with_new_commit("dethead")
+
+        with pytest.raises(ShardError, match="not provably contained"):
+            cleanup_shard(info["worktree_name"])
+
+        assert wt.exists()
+        assert info["branch_name"] in _git(repo, "branch")
+        assert _get_shard_metadata(info["worktree_name"]) is not None
+        # The detached commit is still reachable through the registration
+        assert _git(repo, "rev-parse", "--verify", f"{head}^{{commit}}")
+
+    def test_divergent_detached_override_discards(self, repo: Path):
+        info, wt, head = self._detached_with_new_commit("detoverride")
+
+        result = _cleanup_shard_detailed(
+            info["worktree_name"], delete_unmerged_branch=True
+        )
+        assert result["worktree_removed"] is True
+        assert result["branch_deleted"] is True
+        assert not wt.exists()
+
+    def test_merged_detached_head_cleans_without_override(self, repo: Path):
+        """A detached commit already contained in the base is proven work:
+        cleanup proceeds on containment, no override needed."""
+        info, wt, head = self._detached_with_new_commit("detmerged")
+        _git(repo, "merge", head)
+
+        result = _cleanup_shard_detailed(info["worktree_name"])
+        assert result["worktree_removed"] is True
+        assert result["branch_deleted"] is True
+        assert not wt.exists()
+
+    def test_missing_divergent_detached_refuses_prune(self, repo: Path):
+        """Sibling: pruning a missing detached registration discards the
+        HEAD's only reachability record — same authority applies."""
+        info, wt, head = self._detached_with_new_commit("detgone")
+        shutil.rmtree(wt)
+
+        with pytest.raises(ShardError, match="not provably contained"):
+            cleanup_shard(info["worktree_name"])
+
+        assert info["worktree_path"] in _git(repo, "worktree", "list", "--porcelain")
+
+    def test_collateral_prune_never_drops_detached_registration(self, repo: Path):
+        """Sibling: another shard's cleanup hygiene prune has no authority
+        over an unrelated missing detached worktree's HEAD."""
+        other = spawn_shard("collmiss")
+        _commit_work(Path(other["worktree_path"]))
+        shutil.rmtree(other["worktree_path"])
+
+        info, wt, head = self._detached_with_new_commit("detprotect")
+        shutil.rmtree(wt)
+
+        result = _cleanup_shard_detailed(other["worktree_name"])
+        assert result["worktree_pruned"] is True
+
+        # The unrelated detached registration (and with it the HEAD's
+        # reachability and the row's binding) survived the other cleanup.
+        assert info["worktree_path"] in _git(repo, "worktree", "list", "--porcelain")
+        row = _get_shard_metadata(info["worktree_name"])
+        assert row["worktree_path"] == info["worktree_path"]
+
+
+class TestBranchDeleteExactOid:
+    """Round 2, defect 3: merge proof authorizes the exact OID it proved;
+    deletion is the atomic expected-OID primitive and refuses a moved ref."""
+
+    def test_ref_moved_after_proof_refuses_deletion(self, repo: Path, monkeypatch):
+        _git(repo, "checkout", "-b", "sidefeed")
+        (repo / "side.txt").write_text("unmerged side work\n")
+        _git(repo, "add", ".")
+        _git(repo, "commit", "-m", "side work")
+        side_oid = _git(repo, "rev-parse", "sidefeed").strip()
+        _git(repo, "checkout", "master")
+
+        info = spawn_shard("refmove")
+        branch_ref = f"refs/heads/{info['branch_name']}"
+
+        import skein.shard as shard_module
+
+        real_get_repo = shard_module._get_repo
+
+        class _MovingRefGit:
+            def __init__(self, real):
+                self._real = real
+
+            def __getattr__(self, attr):
+                if attr == "worktree":
+                    def _worktree(*args, **kwargs):
+                        out = self._real.worktree(*args, **kwargs)
+                        if args and args[0] == "remove":
+                            # Injected ref movement: between the settled
+                            # proof and the deletion, the branch advances
+                            # to an unmerged commit.
+                            _git(repo, "update-ref", branch_ref, side_oid)
+                        return out
+
+                    return _worktree
+                return getattr(self._real, attr)
+
+        class _RepoProxy:
+            def __init__(self, real):
+                self._real = real
+                self.git = _MovingRefGit(real.git)
+
+            def __getattr__(self, attr):
+                return getattr(self._real, attr)
+
+        monkeypatch.setattr(
+            shard_module, "_get_repo", lambda: _RepoProxy(real_get_repo())
+        )
+
+        with pytest.raises(ShardError, match="failed to delete branch"):
+            cleanup_shard(info["worktree_name"])
+
+        # The moved ref survived at its new OID; metadata is branch-only.
+        assert _git(repo, "rev-parse", branch_ref).strip() == side_oid
+        row = _get_shard_metadata(info["worktree_name"])
+        assert row is not None
+        assert row["worktree_path"] is None
+        assert row["base_branch"] == "master"
+
+
+class TestDbGitTransitionOrdering:
+    """Round 2, defect 4: the recorded path is cleared before any git
+    mutation, so no failure state can leave a dead path that binds
+    unrelated detached work or lose surviving-branch lineage."""
+
+    def test_row_delete_failure_leaves_no_dangerous_path(
+        self, repo: Path, monkeypatch
+    ):
+        info = spawn_shard("rowfail")
+        old_path = info["worktree_path"]
+
+        import skein.shard as shard_module
+
+        def _fail(name):
+            raise RuntimeError("simulated row delete failure")
+
+        monkeypatch.setattr(shard_module, "_delete_shard_row", _fail)
+
+        result = _cleanup_shard_detailed(info["worktree_name"])
+        assert result["branch_deleted"] is True
+        assert result["row_deleted"] is False
+        assert "stale row" in result["message"]
+
+        row = _get_shard_metadata(info["worktree_name"])
+        assert row is not None
+        assert row["worktree_path"] is None
+
+        # The dangerous second act: unrelated detached work at the old path
+        # must not bind as this shard.
+        _git(repo, "worktree", "add", "--detach", old_path)
+        assert get_shard_status(info["worktree_name"]) is None
+        extras = get_triage_extras()
+        assert old_path in [d["path"] for d in extras["detached_unbound"]]
+
+    def test_path_clear_failure_aborts_before_git_mutation(
+        self, repo: Path, monkeypatch
+    ):
+        info = spawn_shard("clrfail")
+
+        import skein.shard as shard_module
+
+        def _fail(name, path):
+            raise RuntimeError("simulated path clear failure")
+
+        monkeypatch.setattr(shard_module, "_set_worktree_path", _fail)
+
+        with pytest.raises(ShardError, match="aborted before touching git"):
+            cleanup_shard(info["worktree_name"])
+
+        assert Path(info["worktree_path"]).exists()
+        assert info["branch_name"] in _git(repo, "branch")
+        row = _get_shard_metadata(info["worktree_name"])
+        assert row["worktree_path"] == info["worktree_path"]
+
+    def test_removal_failure_restores_recorded_path(self, repo: Path, monkeypatch):
+        info = spawn_shard("restbind")
+
+        import skein.shard as shard_module
+
+        real_get_repo = shard_module._get_repo
+
+        class _FailingRemoveGit:
+            def __init__(self, real):
+                self._real = real
+
+            def __getattr__(self, attr):
+                if attr == "worktree":
+                    def _worktree(*args, **kwargs):
+                        if args and args[0] == "remove":
+                            raise RuntimeError("simulated removal failure")
+                        return self._real.worktree(*args, **kwargs)
+
+                    return _worktree
+                return getattr(self._real, attr)
+
+        class _RepoProxy:
+            def __init__(self, real):
+                self._real = real
+                self.git = _FailingRemoveGit(real.git)
+
+            def __getattr__(self, attr):
+                return getattr(self._real, attr)
+
+        monkeypatch.setattr(
+            shard_module, "_get_repo", lambda: _RepoProxy(real_get_repo())
+        )
+
+        with pytest.raises(ShardError, match="Failed to remove worktree"):
+            cleanup_shard(info["worktree_name"])
+
+        # Compensation: the binding survives a recoverable git failure.
+        row = _get_shard_metadata(info["worktree_name"])
+        assert row["worktree_path"] == info["worktree_path"]
+
+
+class TestChainPerLinkDiscardAuthority:
+    """Round 2, defect 2: discard authority is per link and exact to the
+    disclosed set — one link's disclosure never covers another, late dirt
+    refuses, and a failed chain reports its partial state."""
+
+    def _chain(self, repo: Path):
+        info = spawn_shard("plink")
+        _commit_work(Path(info["worktree_path"]))
+        (repo / "advance.txt").write_text("advance\n")
+        _git(repo, "add", ".")
+        _git(repo, "commit", "-m", "advance master")
+        graft = graft_shard(info["worktree_name"])
+        return info, graft
+
+    def test_one_links_disclosure_never_authorizes_another(self, repo: Path):
+        info, graft = self._chain(repo)
+        (Path(graft["graft_worktree_path"]) / "disclosed.txt").write_text("d\n")
+
+        plan = get_chain_cleanup_plan(info["worktree_name"])
+        disclosed = {l["worktree_name"]: l["dirty_files"] for l in plan}
+        assert disclosed[graft["graft_worktree_name"]]
+        assert disclosed[info["worktree_name"]] == []
+
+        # Late dirt on the OTHER link, after its (empty) disclosure
+        late = Path(info["worktree_path"]) / "late.txt"
+        late.write_text("undisclosed\n")
+
+        result = cleanup_graft_chain(
+            info["worktree_name"], keep_branch=True, disclosed_dirty=disclosed
+        )
+        assert result["success"] is False
+        assert result["removed"] == [graft["graft_worktree_name"]]
+        assert result["errors"][0].startswith(info["worktree_name"])
+        assert "uncommitted changes" in result["errors"][0]
+        assert late.exists()
+        assert Path(info["worktree_path"]).exists()
+
+    def test_late_dirt_on_disclosed_link_refuses(self, repo: Path):
+        info, graft = self._chain(repo)
+        disclosed_file = Path(graft["graft_worktree_path"]) / "disclosed.txt"
+        disclosed_file.write_text("d\n")
+
+        plan = get_chain_cleanup_plan(info["worktree_name"])
+        disclosed = {l["worktree_name"]: l["dirty_files"] for l in plan}
+
+        undisclosed_file = Path(graft["graft_worktree_path"]) / "surprise.txt"
+        undisclosed_file.write_text("late\n")
+
+        result = cleanup_graft_chain(
+            info["worktree_name"], keep_branch=True, disclosed_dirty=disclosed
+        )
+        assert result["success"] is False
+        assert result["removed"] == []
+        assert result["not_attempted"] == [info["worktree_name"]]
+        assert disclosed_file.exists()
+        assert undisclosed_file.exists()
+        assert Path(info["worktree_path"]).exists()
+
+    def test_exact_disclosure_discards_and_proceeds(self, repo: Path):
+        info, graft = self._chain(repo)
+        (Path(graft["graft_worktree_path"]) / "disclosed.txt").write_text("d\n")
+
+        plan = get_chain_cleanup_plan(info["worktree_name"])
+        disclosed = {l["worktree_name"]: l["dirty_files"] for l in plan}
+
+        result = cleanup_graft_chain(
+            info["worktree_name"], keep_branch=True, disclosed_dirty=disclosed
+        )
+        assert result["success"] is True
+        assert len(result["removed"]) == 2
+
+    def test_cli_late_dirt_in_other_link_fails_nonzero(self, repo: Path, monkeypatch):
+        """CLI intersection: a disclosed dirty graft must not authorize late
+        dirt in the clean-at-disclosure root, even under --yes; the chain
+        stops and exits nonzero with the partial state reported."""
+        info, graft = self._chain(repo)
+        (Path(graft["graft_worktree_path"]) / "disclosed.txt").write_text("d\n")
+        late = Path(info["worktree_path"]) / "late.txt"
+
+        import skein.shard as shard_module
+
+        real_plan = shard_module.get_chain_cleanup_plan
+
+        def _plan_then_dirty(*args, **kwargs):
+            plan = real_plan(*args, **kwargs)
+            late.write_text("undisclosed\n")
+            return plan
+
+        monkeypatch.setattr(
+            shard_module, "get_chain_cleanup_plan", _plan_then_dirty
+        )
+
+        from client.cli import cli
+
+        runner = CliRunner()
+        with patch("client.cli.make_request", return_value={}):
+            result = runner.invoke(
+                cli,
+                [
+                    "shard",
+                    "cleanup",
+                    info["worktree_name"],
+                    "--chain",
+                    "--keep-branch",
+                    "--yes",
+                ],
+            )
+
+        assert result.exit_code != 0
+        assert "INCOMPLETE" in result.output
+        assert late.exists()
+        assert Path(info["worktree_path"]).exists()
+        assert not Path(graft["graft_worktree_path"]).exists()
+
+    def test_cli_clean_disclosure_late_dirt_fails_nonzero(
+        self, repo: Path, monkeypatch
+    ):
+        """CLI intersection: with everything clean at disclosure, late dirt
+        must refuse and fail the chain — not warn and exit zero."""
+        info, graft = self._chain(repo)
+        late = Path(graft["graft_worktree_path"]) / "late.txt"
+
+        import skein.shard as shard_module
+
+        real_plan = shard_module.get_chain_cleanup_plan
+
+        def _plan_then_dirty(*args, **kwargs):
+            plan = real_plan(*args, **kwargs)
+            late.write_text("undisclosed\n")
+            return plan
+
+        monkeypatch.setattr(
+            shard_module, "get_chain_cleanup_plan", _plan_then_dirty
+        )
+
+        from client.cli import cli
+
+        runner = CliRunner()
+        with patch("client.cli.make_request", return_value={}):
+            result = runner.invoke(
+                cli,
+                [
+                    "shard",
+                    "cleanup",
+                    info["worktree_name"],
+                    "--chain",
+                    "--keep-branch",
+                    "--yes",
+                ],
+            )
+
+        assert result.exit_code != 0
+        assert "INCOMPLETE" in result.output
+        assert "not attempted" in result.output
+        assert late.exists()
+        assert Path(info["worktree_path"]).exists()
+        assert Path(graft["graft_worktree_path"]).exists()
+
+    def test_cli_single_yes_surfaces_filenames(self, repo: Path):
+        """CLI intersection: single cleanup --yes discards only after the
+        dirty files are printed."""
+        info = spawn_shard("yesdirty")
+        (Path(info["worktree_path"]) / "SECRET_UNCOMMITTED.txt").write_text("s\n")
+
+        from client.cli import cli
+
+        runner = CliRunner()
+        with patch("client.cli.make_request", return_value={}):
+            result = runner.invoke(
+                cli,
+                ["shard", "cleanup", info["worktree_name"], "--yes"],
+                catch_exceptions=False,
+            )
+
+        assert result.exit_code == 0, result.output
+        assert "SECRET_UNCOMMITTED.txt" in result.output
+        assert not Path(info["worktree_path"]).exists()
+
+
+class TestPathInputMetadataCanonicalization:
+    """Round 2, defect 5: an exact member-path input canonicalizes before
+    every metadata lookup — chain parentage and base authority never key
+    the DB by a raw path."""
+
+    def _chain(self, repo: Path):
+        info = spawn_shard("pathchain")
+        _commit_work(Path(info["worktree_path"]))
+        (repo / "advance.txt").write_text("advance\n")
+        _git(repo, "add", ".")
+        _git(repo, "commit", "-m", "advance master")
+        graft = graft_shard(info["worktree_name"])
+        return info, graft
+
+    def test_chain_plan_accepts_moved_member_path(self, repo: Path, tmp_path: Path):
+        info, graft = self._chain(repo)
+        moved = tmp_path / "relocated-chain-root"
+        _git(repo, "worktree", "move", info["worktree_path"], str(moved))
+
+        plan = get_chain_cleanup_plan(str(moved))
+        names = [p["worktree_name"] for p in plan]
+        assert names == [info["worktree_name"], graft["graft_worktree_name"]]
+
+    def test_chain_cleanup_accepts_moved_member_path(
+        self, repo: Path, tmp_path: Path
+    ):
+        info, graft = self._chain(repo)
+        moved = tmp_path / "relocated-chain-root"
+        _git(repo, "worktree", "move", info["worktree_path"], str(moved))
+
+        result = cleanup_graft_chain(
+            str(moved), delete_unmerged_branch=True, discard_uncommitted=True
+        )
+        assert result["success"] is True
+        assert len(result["removed"]) == 2
+        assert not moved.exists()
+
+    def test_apply_path_input_uses_recorded_base(self, repo: Path, tmp_path: Path):
+        """The reproduction: apply with a moved full path fell back to the
+        detected default branch and applied base changes."""
+        _git(repo, "checkout", "-b", "feature")
+        (repo / "feature.txt").write_text("base branch work\n")
+        _git(repo, "add", ".")
+        _git(repo, "commit", "-m", "feature work")
+        _git(repo, "checkout", "master")
+
+        info = spawn_shard("applyprobe", base_branch="feature")
+        _commit_work(Path(info["worktree_path"]), "shardwork.txt")
+        moved = tmp_path / "apply-renamed"
+        _git(repo, "worktree", "move", info["worktree_path"], str(moved))
+
+        from client.cli import cli
+
+        runner = CliRunner()
+        with patch("client.cli.make_request", return_value={}):
+            result = runner.invoke(
+                cli,
+                ["shard", "apply", str(moved), "--no-confirm"],
+                catch_exceptions=False,
+            )
+
+        assert result.exit_code == 0, result.output
+        # Only the shard's own work applies — never the recorded base's
+        # divergence from the detected default branch.
+        assert (repo / "shardwork.txt").exists()
+        assert not (repo / "feature.txt").exists()
+
+    def test_diff_path_input_reports_recorded_base(self, repo: Path, tmp_path: Path):
+        """Sibling: shard diff --integration keys its base under the
+        canonical name for a path input."""
+        _git(repo, "checkout", "-b", "feature")
+        (repo / "feature.txt").write_text("base branch work\n")
+        _git(repo, "add", ".")
+        _git(repo, "commit", "-m", "feature work")
+        _git(repo, "checkout", "master")
+
+        info = spawn_shard("diffprobe", base_branch="feature")
+        _commit_work(Path(info["worktree_path"]), "shardwork.txt")
+        moved = tmp_path / "diff-renamed"
+        _git(repo, "worktree", "move", info["worktree_path"], str(moved))
+
+        from client.cli import cli
+
+        runner = CliRunner()
+        with patch("client.cli.make_request", return_value={}):
+            result = runner.invoke(
+                cli,
+                ["shard", "diff", str(moved), "--integration"],
+                catch_exceptions=False,
+            )
+
+        assert result.exit_code == 0, result.output
+        assert "relative to current feature" in result.output
+        assert "feature.txt" not in result.output
 
 
 if __name__ == "__main__":

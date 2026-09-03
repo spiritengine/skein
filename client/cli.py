@@ -7004,6 +7004,8 @@ def shard_diff(ctx, worktree_name, show_stat, integration):
 
         if not shard:
             raise click.ClickException(f"SHARD not found: {worktree_name}")
+        # Canonical name for row lookups (a member-path input resolves above)
+        worktree_name = shard["worktree_name"]
 
         from skein import shard as shard_module
 
@@ -7136,6 +7138,13 @@ def shard_cleanup(
     caller_cwd = explicit_caller_cwd if explicit_caller_cwd else os.getcwd()
 
     try:
+        # A member-path input canonicalizes once, up front: every metadata
+        # lookup below (chain plan, parentage, graft suggestions) is keyed
+        # by name, never by path.
+        _member = shard_worktree.get_shard_status(worktree_name)
+        if _member:
+            worktree_name = _member["worktree_name"]
+
         if chain:
             # Per-link disclosure BEFORE confirmation: one vague yes must not
             # silently authorize unrelated links or discard undisclosed
@@ -7187,16 +7196,21 @@ def shard_cleanup(
                     )
                 click.confirm(prompt, abort=True)
 
+            # Discard authority is the disclosure above, exactly: each link
+            # may discard only the files listed for it (--yes skips the
+            # prompt, never widens the authority). A link that turned dirty
+            # after disclosure — or grew undisclosed files — refuses.
+            disclosed_map = {
+                link["worktree_name"]: list(link.get("dirty_files") or [])
+                for link in plan
+            }
             result = shard_worktree.cleanup_graft_chain(
                 worktree_name,
                 keep_branch=keep_branch,
                 caller_cwd=caller_cwd,
                 delete_unmerged_branch=delete_unmerged,
                 base_branch=base_branch,
-                # Discard only what was disclosed and confirmed (or --yes,
-                # the confirmation skip): a link that turned dirty after
-                # disclosure refuses instead of being silently wiped.
-                discard_uncommitted=assume_yes or bool(dirty_links),
+                disclosed_dirty=disclosed_map,
             )
 
             if result["removed"]:
@@ -7210,16 +7224,29 @@ def shard_cleanup(
                     click.echo(f"  {br}")
 
             if result["errors"]:
-                click.echo("\nWarnings:")
+                # Partial state is reported explicitly and exits nonzero: a
+                # chain that stopped mid-way is a failure, not a warning.
+                total = len(result["removed"]) + len(result["errors"]) + len(
+                    result.get("not_attempted") or []
+                )
+                click.echo(
+                    f"\nChain cleanup INCOMPLETE: removed "
+                    f"{len(result['removed'])} of {total} link(s).",
+                    err=True,
+                )
                 for err in result["errors"]:
-                    click.echo(f"  ⚠ {err}", err=True)
+                    click.echo(f"  ✗ {err}", err=True)
+                for wt in result.get("not_attempted") or []:
+                    click.echo(f"  - not attempted: {wt}", err=True)
+                raise SystemExit(1)
         else:
             if not assume_yes:
                 click.confirm("Are you sure you want to cleanup this SHARD?", abort=True)
 
-            # Single worktree cleanup. --yes doubles as the dirty-tree
-            # confirmation skip; interactively, a dirty tree is surfaced and
-            # confirmed before retrying.
+            # Single worktree cleanup. A dirty tree always surfaces its
+            # files first — --yes skips the prompts but never the
+            # disclosure — and the retry's discard authority is exactly the
+            # disclosed set, so dirt appearing after disclosure refuses.
             try:
                 result = shard_worktree._cleanup_shard_detailed(
                     worktree_name,
@@ -7227,22 +7254,26 @@ def shard_cleanup(
                     caller_cwd=caller_cwd,
                     delete_unmerged_branch=delete_unmerged,
                     base_branch=base_branch,
-                    discard_uncommitted=assume_yes,
                 )
             except shard_worktree.ShardError as e:
-                if "uncommitted changes" in str(e) and not assume_yes:
-                    click.echo(str(e))
-                    click.confirm("Discard these uncommitted changes?", abort=True)
-                    result = shard_worktree._cleanup_shard_detailed(
-                        worktree_name,
-                        keep_branch=keep_branch,
-                        caller_cwd=caller_cwd,
-                        delete_unmerged_branch=delete_unmerged,
-                        base_branch=base_branch,
-                        discard_uncommitted=True,
+                disclosed = getattr(e, "dirty_files", None)
+                if disclosed is None:
+                    raise
+                click.echo(str(e))
+                if assume_yes:
+                    click.echo(
+                        "--yes given: discarding the files listed above."
                     )
                 else:
-                    raise
+                    click.confirm("Discard these uncommitted changes?", abort=True)
+                result = shard_worktree._cleanup_shard_detailed(
+                    worktree_name,
+                    keep_branch=keep_branch,
+                    caller_cwd=caller_cwd,
+                    delete_unmerged_branch=delete_unmerged,
+                    base_branch=base_branch,
+                    authorized_dirty_files=disclosed,
+                )
 
             if result.get("worktree_pruned"):
                 # Missing-directory path: narrative message covers it
@@ -7305,6 +7336,12 @@ def shard_graft(ctx, worktree_name):
 
     try:
         from skein import shard as shard_module
+
+        # Canonical name for row lookups (best-effort: graft_shard gives
+        # the authoritative not-found error for anything unresolvable)
+        _member = shard_worktree.get_shard_status(worktree_name)
+        if _member:
+            worktree_name = _member["worktree_name"]
 
         base_branch = shard_module._get_shard_base_branch(worktree_name)
         click.echo(f"Creating graft worktree from current {base_branch}...")
@@ -7436,6 +7473,8 @@ def shard_merge(ctx, worktree_name, explicit_caller_cwd, base_branch):
     shard_info = shard_worktree.get_shard_status(worktree_name)
     if not shard_info:
         raise click.ClickException(f"SHARD not found: {worktree_name}")
+    # Canonical name for row lookups (a member-path input resolves above)
+    worktree_name = shard_info["worktree_name"]
 
     try:
         metadata = shard_worktree.get_tender_metadata(worktree_name)
@@ -7908,6 +7947,9 @@ def shard_tender(ctx, worktree_name, site, reviewer, summary, status, confidence
     shard_info = shard_worktree.get_shard_status(worktree_name)
     if not shard_info:
         raise click.ClickException(f"SHARD not found: {worktree_name}")
+    # Canonical name for row lookups and folio metadata (a member-path
+    # input resolves above)
+    worktree_name = shard_info["worktree_name"]
 
     # Tender is a mutating lifecycle op: it creates or completes the row
     # (minimal, no invented lineage) and refreshes a moved path. Failures
@@ -8705,6 +8747,9 @@ def shard_inspect(ctx, worktree_name, output_json):
         shard_info = shard_worktree.get_shard_status(worktree_name)
         if not shard_info:
             raise click.ClickException(f"SHARD not found: {worktree_name}")
+        # Canonical name for row lookups and tender-folio matching (a
+        # member-path input resolves above)
+        worktree_name = shard_info["worktree_name"]
 
         git_info = shard_worktree.get_shard_git_info(worktree_name)
         drift_info = shard_worktree.get_shard_drift_info(worktree_name)
@@ -9061,6 +9106,10 @@ def shard_apply(ctx, worktree_name, no_confirm):
         shard_info = shard_worktree.get_shard_status(worktree_name)
         if not shard_info:
             raise click.ClickException(f"SHARD not found: {worktree_name}")
+        # Canonical name for row lookups (a member-path input resolves
+        # above): the recorded base governs the diff, never a fallback
+        # detected under a raw-path key.
+        worktree_name = shard_info["worktree_name"]
 
         from skein import shard as shard_module
 
@@ -9142,6 +9191,8 @@ def shard_test(ctx, worktree_name, rite_name, verbose):
         shard_info = shard_worktree.get_shard_status(worktree_name)
         if not shard_info:
             raise click.ClickException(f"SHARD not found: {worktree_name}")
+        # Canonical name for display (a member-path input resolves above)
+        worktree_name = shard_info["worktree_name"]
 
         worktree_path = Path(shard_info["worktree_path"])
         if not worktree_path.exists():

@@ -21,6 +21,11 @@ class _MockShardModule:
     def __init__(self):
         self.cleanup_calls = []
 
+    # The CLI canonicalizes path inputs best-effort before any row lookup;
+    # None here means "not a member path" and the input stays verbatim.
+    def get_shard_status(self, worktree_name):
+        return None
+
     # The CLI consumes the detailed dict; the public cleanup_shard keeps
     # its long-standing bool contract.
     def _cleanup_shard_detailed(
@@ -31,6 +36,7 @@ class _MockShardModule:
         delete_unmerged_branch=False,
         base_branch=None,
         discard_uncommitted=False,
+        authorized_dirty_files=None,
     ):
         self.cleanup_calls.append(
             {
@@ -40,6 +46,7 @@ class _MockShardModule:
                 "delete_unmerged_branch": delete_unmerged_branch,
                 "base_branch": base_branch,
                 "discard_uncommitted": discard_uncommitted,
+                "authorized_dirty_files": authorized_dirty_files,
             }
         )
         return {
@@ -318,6 +325,7 @@ def _make_inspect_shard_module():
     shard_module = MagicMock()
     shard_module.ShardError = _MockShardModule.ShardError
     shard_module.get_shard_status.return_value = {
+        "worktree_name": "demo-shard",
         "branch_name": "shard-demo-shard",
         "worktree_path": "/repo/worktrees/demo-shard",
     }
@@ -464,9 +472,12 @@ class TestShardCleanupCli:
                 "caller_cwd": str(Path.cwd()),
                 "delete_unmerged_branch": False,
                 "base_branch": None,
-                # --yes doubles as the dirty-tree confirmation skip; it is
-                # never branch-deletion authority
-                "discard_uncommitted": True,
+                # --yes never preloads discard authority: a dirty tree
+                # surfaces its files first and only the retry carries the
+                # exact disclosed set (and it is never branch-deletion
+                # authority either way).
+                "discard_uncommitted": False,
+                "authorized_dirty_files": None,
             }
         ]
 
