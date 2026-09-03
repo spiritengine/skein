@@ -500,6 +500,11 @@ class TestCleanupAuthority:
         assert result["branch_deleted"] is False
         assert result["path_cleared"] is True
         assert "branch --merged" in result["message"]
+        assert "revive it first" in result["message"]
+        assert (
+            f"skein shard cleanup {info['worktree_name']} "
+            "--delete-unmerged-branch"
+        ) in result["message"]
 
         row = _get_shard_metadata(info["worktree_name"])
         assert row is not None
@@ -2270,6 +2275,101 @@ class TestChainPerLinkDiscardAuthority:
         _git(repo, "commit", "-m", "advance master")
         graft = graft_shard(info["worktree_name"])
         return info, graft
+
+    def _advance_master(self, repo: Path, filename: str) -> None:
+        (repo / filename).write_text("advance again\n")
+        _git(repo, "add", ".")
+        _git(repo, "commit", "-m", f"advance master for {filename}")
+
+    def test_cli_refuses_late_clean_merged_graft_without_override(
+        self, repo: Path, monkeypatch
+    ):
+        """A clean link added after disclosure is never silently absorbed
+        into the execution set, even when merge proof would permit deletion."""
+        info, graft = self._chain(repo)
+        self._advance_master(repo, "late-clean-base.txt")
+
+        import skein.shard as shard_module
+
+        real_plan = shard_module.get_chain_cleanup_plan
+        late = {}
+
+        def _plan_then_extend(*args, **kwargs):
+            plan = real_plan(*args, **kwargs)
+            late.update(graft_shard(graft["graft_worktree_name"]))
+            _git(
+                repo,
+                "merge",
+                "--no-ff",
+                late["graft_branch_name"],
+                "-m",
+                "merge late clean graft",
+            )
+            return plan
+
+        monkeypatch.setattr(shard_module, "get_chain_cleanup_plan", _plan_then_extend)
+
+        from client.cli import cli
+
+        runner = CliRunner()
+        with patch("client.cli.make_request", return_value={}):
+            result = runner.invoke(
+                cli,
+                ["shard", "cleanup", info["worktree_name"], "--chain", "--yes"],
+            )
+
+        assert result.exit_code != 0
+        assert "chain membership changed after disclosure" in result.output
+        assert "nothing was removed" in result.output
+        assert Path(info["worktree_path"]).exists()
+        assert Path(graft["graft_worktree_path"]).exists()
+        assert Path(late["graft_worktree_path"]).exists()
+
+    def test_cli_refuses_late_committed_graft_with_delete_override(
+        self, repo: Path, monkeypatch
+    ):
+        """The explicit branch-loss override cannot widen confirmation to a
+        newly added link or delete the commit it contains."""
+        info, graft = self._chain(repo)
+        self._advance_master(repo, "late-commit-base.txt")
+
+        import skein.shard as shard_module
+
+        real_plan = shard_module.get_chain_cleanup_plan
+        late = {}
+        late_tip = []
+
+        def _plan_then_extend(*args, **kwargs):
+            plan = real_plan(*args, **kwargs)
+            late.update(graft_shard(graft["graft_worktree_name"]))
+            _commit_work(Path(late["graft_worktree_path"]), "late-secret.txt")
+            late_tip.append(_git(repo, "rev-parse", late["graft_branch_name"]).strip())
+            return plan
+
+        monkeypatch.setattr(shard_module, "get_chain_cleanup_plan", _plan_then_extend)
+
+        from client.cli import cli
+
+        runner = CliRunner()
+        with patch("client.cli.make_request", return_value={}):
+            result = runner.invoke(
+                cli,
+                [
+                    "shard",
+                    "cleanup",
+                    info["worktree_name"],
+                    "--chain",
+                    "--delete-unmerged-branch",
+                    "--yes",
+                ],
+            )
+
+        assert result.exit_code != 0
+        assert "chain membership changed after disclosure" in result.output
+        assert Path(info["worktree_path"]).exists()
+        assert Path(graft["graft_worktree_path"]).exists()
+        assert Path(late["graft_worktree_path"]).exists()
+        assert _git(repo, "rev-parse", late["graft_branch_name"]).strip() == late_tip[0]
 
     def test_one_links_disclosure_never_authorizes_another(self, repo: Path):
         info, graft = self._chain(repo)

@@ -579,53 +579,22 @@ class TestShardWhereCli:
         assert payload["exists"] is True
         assert payload["detached"] is False
 
-    def test_guess_source_exits_nonzero(self):
-        """WHY: A guessed path is never presented as fact - scripts must not
-        cd into a placement default that nothing verified."""
+    def test_branch_only_has_no_expected_success_bypass(self):
+        """The placement guess is reachable only for a branch-only shard;
+        no flag may turn that observational answer into successful lookup."""
         runner = CliRunner()
         shard_module = _make_where_shard_module(
-            source="guess", registered=False, exists=False, branch_exists=False
-        )
-
-        with patch("client.cli.get_shard_worktree_module", return_value=shard_module):
-            result = runner.invoke(
-                cli, ["shard", "where", "demo-shard-20260101-001"]
-            )
-
-        assert result.exit_code != 0
-        assert "guess" in result.output
-
-    def test_guess_path_only_failure_has_no_stdout(self):
-        """A failing command substitution must not receive an unverified
-        placement path, even though the command also exits nonzero."""
-        runner = CliRunner()
-        shard_module = _make_where_shard_module(
-            source="guess", registered=False, exists=False, branch_exists=False
-        )
-
-        with patch("client.cli.get_shard_worktree_module", return_value=shard_module):
-            result = runner.invoke(
-                cli,
-                ["shard", "where", "demo-shard-20260101-001", "--path-only"],
-            )
-
-        assert result.exit_code != 0
-        assert result.output == ""
-
-    def test_guess_source_with_expected_exits_zero(self):
-        runner = CliRunner()
-        shard_module = _make_where_shard_module(
-            source="guess", registered=False, exists=False, branch_exists=False
+            source="guess", registered=False, exists=False, branch_exists=True
         )
 
         with patch("client.cli.get_shard_worktree_module", return_value=shard_module):
             result = runner.invoke(
                 cli,
                 ["shard", "where", "demo-shard-20260101-001", "--expected"],
-                catch_exceptions=False,
             )
 
-        assert result.exit_code == 0, result.output
+        assert result.exit_code != 0
+        assert "No such option '--expected'" in result.output
 
     def test_branch_only_exits_nonzero_with_revive_hint(self):
         runner = CliRunner()

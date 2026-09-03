@@ -6764,21 +6764,16 @@ def shard_list(ctx, active, filter_agent, output_json):
 @click.argument("worktree_name")
 @click.option("--path-only", is_flag=True, help="Print just the worktree path (no hints)")
 @click.option("--json", "output_json", is_flag=True, help="Output as JSON")
-@click.option(
-    "--expected",
-    is_flag=True,
-    help="Exit 0 even when the path is only the computed placement guess",
-)
 @click.pass_context
-def shard_where(ctx, worktree_name, output_json, path_only, expected):
+def shard_where(ctx, worktree_name, output_json, path_only):
     """
     Print where a SHARD's worktree lives (bare resolved path on stdout).
 
     Resolution authority: git first (follows `git worktree move`
     automatically, at any basename), then the recorded DB path, then the
-    computed placement default — which is only a labeled GUESS and exits
-    non-zero unless --expected is passed. A branch-only shard (branch
-    survives, no worktree) exits non-zero with a revive hint.
+    computed placement default. That default exists only for a branch-only
+    shard (branch survives, no worktree), is labeled as a GUESS, and exits
+    non-zero with a revive hint.
 
     Examples:
         skein shard where my-feature-20260113-001
@@ -6801,7 +6796,7 @@ def shard_where(ctx, worktree_name, output_json, path_only, expected):
     # the dead path would send `cd "$(... --path-only)"` somewhere gone.
     branch_only = not resolution["registered"] and resolution["branch_exists"]
     guessed = resolution["source"] == "guess"
-    refused = branch_only or (guessed and not expected)
+    refused = branch_only or guessed
 
     if output_json:
         import json
@@ -7210,6 +7205,7 @@ def shard_cleanup(
                 link["worktree_name"]: list(link.get("dirty_files") or [])
                 for link in plan
             }
+            disclosed_chain = [link["worktree_name"] for link in plan]
             result = shard_worktree.cleanup_graft_chain(
                 worktree_name,
                 keep_branch=keep_branch,
@@ -7217,6 +7213,7 @@ def shard_cleanup(
                 delete_unmerged_branch=delete_unmerged,
                 base_branch=base_branch,
                 disclosed_dirty=disclosed_map,
+                disclosed_chain=disclosed_chain,
             )
 
             if result["removed"]:

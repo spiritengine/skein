@@ -128,10 +128,10 @@ skein shard where fix-bug-20260113-001 --json
 ```
 
 The bare resolved path goes to stdout; notes and warnings go to stderr. Exit
-codes are honest: a guessed path exits non-zero (pass `--expected` if a
-guess is what you wanted), a branch-only shard (branch survives, no
-worktree) exits non-zero with a revive hint, and an unknown name errors with
-near-miss suggestions rather than printing a fabricated path.
+codes are honest: the computed placement guess exists only for a branch-only
+shard (branch survives, no worktree), so it always exits non-zero with a
+revive hint. An unknown name errors with near-miss suggestions rather than
+printing a fabricated path.
 
 Shards at the historical `<project>/worktrees/<name>/` location and shards
 moved anywhere else are equally first-class: discovery reads git's own

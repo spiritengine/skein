@@ -1582,7 +1582,8 @@ def _cleanup_shard_detailed(
                 f"Check with: git branch --merged"
                 + (f" {proof_base}" if proof_base else "")
                 + f"\nRevive with: git worktree add <path> {branch_name}\n"
-                f"Or delete explicitly: skein shard cleanup {worktree_name} "
+                f"To delete through SKEIN, revive it first, then run: "
+                f"skein shard cleanup {worktree_name} "
                 f"--delete-unmerged-branch"
             )
         elif keep_branch and branch_present:
@@ -3643,6 +3644,7 @@ def cleanup_graft_chain(
     base_branch: Optional[str] = None,
     discard_uncommitted: bool = False,
     disclosed_dirty: Optional[Dict[str, List[str]]] = None,
+    disclosed_chain: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """
     Clean up entire graft chain (original + all grafts).
@@ -3661,6 +3663,12 @@ def cleanup_graft_chain(
     appeared after disclosure refuses. Without the map, the blanket
     discard_uncommitted bool is the caller's own per-link authority.
 
+    Chain membership authority is exact when disclosed_chain is supplied.
+    The current ordered lineage must still match the names shown before
+    confirmation; otherwise cleanup refuses before its first mutation. The
+    execution set is then the frozen disclosed list, never a newly expanded
+    lineage.
+
     The chain stops at the first failed link: continuing past a failure
     would mutate links beyond it (e.g. delete a parent whose graft still
     exists) and compound the partial state the caller must report.
@@ -3676,6 +3684,7 @@ def cleanup_graft_chain(
         discard_uncommitted: Blanket per-link discard confirmation; ignored
             when disclosed_dirty is given
         disclosed_dirty: Exact disclosed dirty status lines per link name
+        disclosed_chain: Exact ordered link names disclosed before confirmation
 
     Returns:
         Dict with:
@@ -3708,6 +3717,20 @@ def cleanup_graft_chain(
 
     if not chain:
         raise ShardError(f"No worktrees found in chain for: {worktree_name}")
+
+    if disclosed_chain is not None:
+        frozen_chain = list(disclosed_chain)
+        if chain != frozen_chain:
+            disclosed = ", ".join(frozen_chain) or "(none)"
+            current = ", ".join(chain) or "(none)"
+            raise ShardError(
+                "Cannot cleanup --chain: chain membership changed after "
+                "disclosure; nothing was removed.\n"
+                f"Disclosed: {disclosed}\n"
+                f"Current: {current}\n"
+                "Re-run cleanup to inspect and confirm the current chain."
+            )
+        chain = frozen_chain
 
     removed = []
     preserved_branches = []
