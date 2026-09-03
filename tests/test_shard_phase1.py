@@ -1748,7 +1748,7 @@ class TestNameInputNormalization:
             cli, ["shard", "where", hot["worktree_name"], "--path-only"]
         )
         assert result.exit_code != 0
-        assert str(collision) not in result.output
+        assert result.output == ""
 
         # The moved member is still selectable, by its absolute path only
         member = get_shard_status(str(collision))

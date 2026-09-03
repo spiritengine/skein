@@ -595,6 +595,23 @@ class TestShardWhereCli:
         assert result.exit_code != 0
         assert "guess" in result.output
 
+    def test_guess_path_only_failure_has_no_stdout(self):
+        """A failing command substitution must not receive an unverified
+        placement path, even though the command also exits nonzero."""
+        runner = CliRunner()
+        shard_module = _make_where_shard_module(
+            source="guess", registered=False, exists=False, branch_exists=False
+        )
+
+        with patch("client.cli.get_shard_worktree_module", return_value=shard_module):
+            result = runner.invoke(
+                cli,
+                ["shard", "where", "demo-shard-20260101-001", "--path-only"],
+            )
+
+        assert result.exit_code != 0
+        assert result.output == ""
+
     def test_guess_source_with_expected_exits_zero(self):
         runner = CliRunner()
         shard_module = _make_where_shard_module(
@@ -623,6 +640,40 @@ class TestShardWhereCli:
 
         assert result.exit_code != 0
         assert "git worktree add" in result.output
+
+    def test_branch_only_path_only_failure_has_no_stdout(self):
+        runner = CliRunner()
+        shard_module = _make_where_shard_module(
+            source="guess", registered=False, exists=False, branch_exists=True
+        )
+
+        with patch("client.cli.get_shard_worktree_module", return_value=shard_module):
+            result = runner.invoke(
+                cli,
+                ["shard", "where", "demo-shard-20260101-001", "--path-only"],
+            )
+
+        assert result.exit_code != 0
+        assert result.output == ""
+
+    def test_branch_only_json_retains_labeled_diagnostic(self):
+        import json
+
+        runner = CliRunner()
+        shard_module = _make_where_shard_module(
+            source="guess", registered=False, exists=False, branch_exists=True
+        )
+
+        with patch("client.cli.get_shard_worktree_module", return_value=shard_module):
+            result = runner.invoke(
+                cli,
+                ["shard", "where", "demo-shard-20260101-001", "--json"],
+            )
+
+        assert result.exit_code != 0
+        payload = json.loads(result.output)
+        assert payload["source"] == "guess"
+        assert payload["branch_exists"] is True
 
     def test_missing_worktree_is_flagged(self):
         runner = CliRunner()
@@ -662,6 +713,7 @@ class TestShardWhereCli:
                 ["shard", "where", "demo-shard-20260101-001", "--path-only"],
             )
         assert result.exit_code != 0
+        assert result.output == ""
 
     def test_db_source_without_surviving_branch_is_noted(self):
         """WHY: A recorded path git no longer lists, with no surviving

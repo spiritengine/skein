@@ -157,9 +157,9 @@ def shard_env(temp_git_repo: Path, monkeypatch):
     shard_module._PROJECT_ROOT = None
     shard_module._WORKTREES_DIR = None
 
-    # Worktrees now live under SKEIN_HOME rather than nested in the project
-    # (see _default_worktrees_dir) -- point SKEIN_HOME at an isolated temp
-    # dir so tests never touch the real ~/.skein.
+    # SKEIN_HOME is deliberately inert for placement. Give it a tempting
+    # alternate root so these fixtures expose any accidental reintroduction
+    # of ambient-environment placement.
     monkeypatch.setenv("SKEIN_HOME", str(temp_git_repo.parent / "skein_home_test"))
 
     # Set up the project root
@@ -377,7 +377,7 @@ class TestCleanupNeverAffectsMaster:
         cleanup_shard(worktree_path)  # Pass full path, not just name
 
         # Parent directories must remain
-        assert worktrees_dir.parent.exists(), "SKEIN_HOME worktrees/ dir should exist"
+        assert worktrees_dir.parent.exists(), "Project-local worktrees parent should exist"
         assert shard_env.exists(), "Repo should exist"
 
 

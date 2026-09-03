@@ -6801,6 +6801,7 @@ def shard_where(ctx, worktree_name, output_json, path_only, expected):
     # the dead path would send `cd "$(... --path-only)"` somewhere gone.
     branch_only = not resolution["registered"] and resolution["branch_exists"]
     guessed = resolution["source"] == "guess"
+    refused = branch_only or (guessed and not expected)
 
     if output_json:
         import json
@@ -6820,7 +6821,12 @@ def shard_where(ctx, worktree_name, output_json, path_only, expected):
             )
         )
     else:
-        click.echo(resolution["path"])
+        # --path-only is intended for command substitution. The exit status
+        # of a nested substitution does not stop the outer command, so a
+        # refused resolution must emit no path for the caller to consume.
+        # Human and JSON modes retain their labeled diagnostic output.
+        if not path_only or not refused:
+            click.echo(resolution["path"])
         if not path_only:
             if branch_only:
                 click.echo(
@@ -6848,7 +6854,7 @@ def shard_where(ctx, worktree_name, output_json, path_only, expected):
                     err=True,
                 )
 
-    if branch_only or (guessed and not expected):
+    if refused:
         raise SystemExit(1)
 
 
