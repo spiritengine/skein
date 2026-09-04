@@ -1137,8 +1137,9 @@ def _worktree_dirty_fingerprint(worktree_path: Path) -> str:
     Porcelain lines identify paths and status categories for people, but they
     do not change when bytes at an already-dirty path change. This digest is
     the machine-side half of disclosure authority: it binds the index, tracked
-    working-tree diff, and every non-ignored untracked file's type, mode, and
-    content at confirmation time.
+    working-tree diff, every non-ignored untracked file's type, mode, and
+    content, and the corresponding state of every populated tracked submodule
+    at confirmation time.
 
     Fail closed. If the state cannot be read consistently, cleanup has no
     exact discard authority and must not force-remove the worktree.
@@ -1228,6 +1229,49 @@ def _worktree_dirty_fingerprint(worktree_path: Path) -> str:
                 f"Cannot snapshot uncommitted state in {worktree_path}: "
                 f"{os.fsdecode(relative)} changed while being read: {e}"
             ) from e
+
+    # A parent diff says only that a gitlink is dirty; it does not bind the
+    # bytes changed inside that submodule. Recurse through each populated
+    # gitlink so a same-path rewrite below it changes the parent's authority
+    # fingerprint too. Unpopulated gitlinks are recorded explicitly, making a
+    # concurrent initialization visible without following arbitrary symlinks.
+    index_entries = git_bytes("ls-files", "--stage", "-z")
+    gitlinks: Dict[bytes, List[Tuple[bytes, bytes, bytes]]] = {}
+    for record in (entry for entry in index_entries.split(b"\0") if entry):
+        try:
+            metadata, relative = record.split(b"\t", 1)
+            mode, oid, stage_number = metadata.split()
+        except ValueError as e:
+            raise ShardError(
+                f"Cannot snapshot uncommitted state in {worktree_path}: "
+                "git ls-files returned a malformed index entry"
+            ) from e
+        if mode != b"160000":
+            continue
+
+        gitlinks.setdefault(relative, []).append((mode, oid, stage_number))
+
+    for relative in sorted(gitlinks):
+        full_path = os.path.join(root, relative)
+        git_marker = os.path.join(full_path, b".git")
+        populated = bool(
+            not os.path.islink(full_path)
+            and os.path.isdir(full_path)
+            and os.path.exists(git_marker)
+        )
+        entry = hashlib.sha256()
+        update_framed(entry, b"path", relative)
+        for mode, oid, stage_number in sorted(gitlinks[relative]):
+            index_entry = hashlib.sha256()
+            update_framed(index_entry, b"mode", mode)
+            update_framed(index_entry, b"oid", oid)
+            update_framed(index_entry, b"stage", stage_number)
+            update_framed(entry, b"index-entry", index_entry.digest())
+        update_framed(entry, b"populated", b"1" if populated else b"0")
+        if populated:
+            nested = _worktree_dirty_fingerprint(Path(os.fsdecode(full_path)))
+            update_framed(entry, b"nested-state-sha256", nested.encode("ascii"))
+        update_framed(digest, b"submodule-entry", entry.digest())
 
     return digest.hexdigest()
 

@@ -136,6 +136,47 @@ def _write_collision_state(first: Path, second: Path, state) -> None:
     second.write_bytes(state[1])
 
 
+def _add_local_submodule(repo: Path) -> None:
+    source = repo.parent / "submodule-source"
+    source.mkdir()
+    _git(source, "init")
+    _git(source, "config", "user.email", "test@example.com")
+    _git(source, "config", "user.name", "Test User")
+    (source / "s.txt").write_text("submodule base\n")
+    _git(source, "add", ".")
+    _git(source, "commit", "-m", "submodule base")
+    _git(
+        repo,
+        "-c",
+        "protocol.file.allow=always",
+        "submodule",
+        "add",
+        str(source),
+        "sub",
+    )
+    _git(repo, "commit", "-m", "add local submodule")
+
+
+def _populate_local_submodule(worktree: Path) -> Path:
+    result = subprocess.run(
+        [
+            "git",
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "update",
+            "--init",
+            "--recursive",
+        ],
+        cwd=worktree,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    return worktree / "sub" / "s.txt"
+
+
 def _skein_dir_snapshot(repo: Path) -> dict:
     """Byte-level snapshot of .skein (DB plus any sidecars)."""
     skein_dir = repo / ".skein"
@@ -2503,6 +2544,117 @@ class TestChainPerLinkDiscardAuthority:
 
         assert disclosed_status == changed_status
         assert before != after
+
+    def test_fingerprint_binds_dirty_submodule_contents(self, repo: Path):
+        """A same-path rewrite inside a dirty submodule changes authority
+        even though the parent worktree's porcelain status is unchanged."""
+        _add_local_submodule(repo)
+        info = spawn_shard("subfingerprint")
+        worktree = Path(info["worktree_path"])
+        nested_file = _populate_local_submodule(worktree)
+        nested_file.write_text("before disclosure\n")
+
+        disclosed_status = _git(worktree, "status", "--porcelain")
+        before = _worktree_dirty_fingerprint(worktree)
+        nested_file.write_text("after disclosure\n")
+        changed_status = _git(worktree, "status", "--porcelain")
+        after = _worktree_dirty_fingerprint(worktree)
+
+        assert "sub" in disclosed_status
+        assert disclosed_status == changed_status
+        assert before != after
+
+    def test_cli_submodule_rewrite_after_chain_disclosure_refuses(
+        self, repo: Path, monkeypatch
+    ):
+        """Chain cleanup preserves late bytes written inside a disclosed
+        dirty submodule and refuses to remove either worktree."""
+        _add_local_submodule(repo)
+        info = spawn_shard("submodulechain")
+        _commit_work(Path(info["worktree_path"]))
+        (repo / "advance.txt").write_text("advance\n")
+        # Add only the intended file: the test fixture places linked worktrees
+        # below the repository root, where `git add .` would stage them as
+        # unrelated gitlinks and confuse recursive submodule initialization.
+        _git(repo, "add", "advance.txt")
+        _git(repo, "commit", "-m", "advance master")
+        graft = graft_shard(info["worktree_name"])
+        graft_path = Path(graft["graft_worktree_path"])
+        nested_file = _populate_local_submodule(graft_path)
+        nested_file.write_text("before disclosure\n")
+
+        import skein.shard as shard_module
+
+        real_plan = shard_module.get_chain_cleanup_plan
+
+        def _plan_then_rewrite(*args, **kwargs):
+            plan = real_plan(*args, **kwargs)
+            nested_file.write_text("after disclosure\n")
+            return plan
+
+        monkeypatch.setattr(
+            shard_module, "get_chain_cleanup_plan", _plan_then_rewrite
+        )
+
+        from client.cli import cli
+
+        runner = CliRunner()
+        with patch("client.cli.make_request", return_value={}):
+            result = runner.invoke(
+                cli,
+                [
+                    "shard",
+                    "cleanup",
+                    info["worktree_name"],
+                    "--chain",
+                    "--keep-branch",
+                    "--yes",
+                ],
+            )
+
+        assert result.exit_code != 0
+        assert "content or index state changed after disclosure" in result.output
+        assert nested_file.read_text() == "after disclosure\n"
+        assert Path(info["worktree_path"]).exists()
+        assert graft_path.exists()
+
+    def test_cli_submodule_rewrite_after_single_disclosure_refuses(
+        self, repo: Path, monkeypatch
+    ):
+        """Single cleanup revalidates dirty submodule contents after the
+        user's discard confirmation and preserves a late rewrite."""
+        _add_local_submodule(repo)
+        info = spawn_shard("singlesubmodule")
+        worktree = Path(info["worktree_path"])
+        nested_file = _populate_local_submodule(worktree)
+        nested_file.write_text("before disclosure\n")
+
+        from client.cli import cli
+        import client.cli as cli_module
+
+        def _confirm(prompt, **kwargs):
+            if prompt.startswith("Discard these uncommitted changes?"):
+                nested_file.write_text("after disclosure\n")
+            return True
+
+        monkeypatch.setattr(cli_module.click, "confirm", _confirm)
+
+        runner = CliRunner()
+        with patch("client.cli.make_request", return_value={}):
+            result = runner.invoke(
+                cli,
+                [
+                    "shard",
+                    "cleanup",
+                    info["worktree_name"],
+                    "--keep-branch",
+                ],
+            )
+
+        assert result.exit_code != 0
+        assert "content or index state changed after disclosure" in result.output
+        assert nested_file.read_text() == "after disclosure\n"
+        assert worktree.exists()
 
     def test_cli_collision_rewrite_after_chain_disclosure_refuses(
         self, repo: Path, monkeypatch
