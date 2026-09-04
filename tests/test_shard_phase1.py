@@ -12,6 +12,7 @@ covered where marked: M1, O1, O3, O4, O5, O6, O8.
 
 import json
 import os
+import stat
 import shutil
 import subprocess
 from datetime import datetime, timezone
@@ -47,6 +48,7 @@ from skein.shard import (
     _get_next_sequence,
     _get_shard_metadata,
     _placement_path,
+    _worktree_dirty_fingerprint,
 )
 
 
@@ -95,6 +97,43 @@ def _commit_work(worktree: Path, filename: str = "work.txt") -> None:
     (worktree / filename).write_text("work\n")
     _git(worktree, "add", ".")
     _git(worktree, "commit", "-m", f"work on {filename}")
+
+
+def _dirty_fingerprint_collision_states(worktree: Path):
+    """Two states that collided under the old unframed untracked encoding."""
+    first = worktree / "a.txt"
+    second = worktree / "b.txt"
+    first.write_bytes(b"")
+    second.write_bytes(b"")
+
+    def old_header(path: Path) -> bytes:
+        metadata = os.lstat(path)
+        relative = os.fsencode(path.relative_to(worktree))
+        return (
+            b"untracked\0"
+            + relative
+            + b"\0"
+            + stat.S_IFMT(metadata.st_mode).to_bytes(4, "big")
+            + stat.S_IMODE(metadata.st_mode).to_bytes(4, "big")
+        )
+
+    first_header = old_header(first)
+    second_header = old_header(second)
+    disclosed = (b"hello", b"P" + second_header + b"Q")
+    changed = (b"hello" + second_header + b"P", b"Q")
+
+    # Pin the reproduction: these distinct file states fed identical bytes
+    # to the old aggregate SHA-256 stream.
+    assert (
+        first_header + disclosed[0] + second_header + disclosed[1]
+        == first_header + changed[0] + second_header + changed[1]
+    )
+    return first, second, disclosed, changed
+
+
+def _write_collision_state(first: Path, second: Path, state) -> None:
+    first.write_bytes(state[0])
+    second.write_bytes(state[1])
 
 
 def _skein_dir_snapshot(repo: Path) -> dict:
@@ -2445,6 +2484,113 @@ class TestChainPerLinkDiscardAuthority:
         )
         assert result["success"] is True
         assert len(result["removed"]) == 2
+
+    def test_fingerprint_frames_regular_file_boundaries(self, repo: Path):
+        """Two states that were byte-identical under the old aggregate
+        encoding must have distinct fingerprints after per-entry framing."""
+        info = spawn_shard("framecollision")
+        worktree = Path(info["worktree_path"])
+        first, second, disclosed, changed = _dirty_fingerprint_collision_states(
+            worktree
+        )
+        _write_collision_state(first, second, disclosed)
+        disclosed_status = _git(worktree, "status", "--porcelain")
+        before = _worktree_dirty_fingerprint(worktree)
+
+        _write_collision_state(first, second, changed)
+        changed_status = _git(worktree, "status", "--porcelain")
+        after = _worktree_dirty_fingerprint(worktree)
+
+        assert disclosed_status == changed_status
+        assert before != after
+
+    def test_cli_collision_rewrite_after_chain_disclosure_refuses(
+        self, repo: Path, monkeypatch
+    ):
+        """The former two-file collision cannot carry changed bytes through
+        chain confirmation under the disclosed fingerprint."""
+        info, graft = self._chain(repo)
+        graft_path = Path(graft["graft_worktree_path"])
+        first, second, disclosed, changed = _dirty_fingerprint_collision_states(
+            graft_path
+        )
+        _write_collision_state(first, second, disclosed)
+
+        import skein.shard as shard_module
+
+        real_plan = shard_module.get_chain_cleanup_plan
+
+        def _plan_then_collide(*args, **kwargs):
+            plan = real_plan(*args, **kwargs)
+            _write_collision_state(first, second, changed)
+            return plan
+
+        monkeypatch.setattr(
+            shard_module, "get_chain_cleanup_plan", _plan_then_collide
+        )
+
+        from client.cli import cli
+
+        runner = CliRunner()
+        with patch("client.cli.make_request", return_value={}):
+            result = runner.invoke(
+                cli,
+                [
+                    "shard",
+                    "cleanup",
+                    info["worktree_name"],
+                    "--chain",
+                    "--keep-branch",
+                    "--yes",
+                ],
+            )
+
+        assert result.exit_code != 0
+        assert "content or index state changed after disclosure" in result.output
+        assert first.read_bytes() == changed[0]
+        assert second.read_bytes() == changed[1]
+        assert Path(info["worktree_path"]).exists()
+        assert graft_path.exists()
+
+    def test_cli_collision_rewrite_after_single_disclosure_refuses(
+        self, repo: Path, monkeypatch
+    ):
+        """The single-cleanup confirmation path also refuses the exact
+        collision Fable reproduced and preserves both changed files."""
+        info = spawn_shard("singlecollision")
+        worktree = Path(info["worktree_path"])
+        first, second, disclosed, changed = _dirty_fingerprint_collision_states(
+            worktree
+        )
+        _write_collision_state(first, second, disclosed)
+
+        from client.cli import cli
+        import client.cli as cli_module
+
+        def _confirm(prompt, **kwargs):
+            if prompt.startswith("Discard these uncommitted changes?"):
+                _write_collision_state(first, second, changed)
+            return True
+
+        monkeypatch.setattr(cli_module.click, "confirm", _confirm)
+
+        runner = CliRunner()
+        with patch("client.cli.make_request", return_value={}):
+            result = runner.invoke(
+                cli,
+                [
+                    "shard",
+                    "cleanup",
+                    info["worktree_name"],
+                    "--keep-branch",
+                ],
+            )
+
+        assert result.exit_code != 0
+        assert "content or index state changed after disclosure" in result.output
+        assert first.read_bytes() == changed[0]
+        assert second.read_bytes() == changed[1]
+        assert worktree.exists()
 
     def test_cli_same_path_rewrite_after_chain_disclosure_refuses(
         self, repo: Path, monkeypatch

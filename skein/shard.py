@@ -1158,6 +1158,13 @@ def _worktree_dirty_fingerprint(worktree_path: Path) -> str:
             )
         return result.stdout
 
+    def update_framed(target, label: bytes, payload: bytes) -> None:
+        """Add one unambiguous typed field to a digest input stream."""
+        target.update(len(label).to_bytes(2, "big"))
+        target.update(label)
+        target.update(len(payload).to_bytes(8, "big"))
+        target.update(payload)
+
     digest = hashlib.sha256()
     for label, args in (
         (b"status", ("status", "--porcelain=v1", "-z", "--untracked-files=all")),
@@ -1179,7 +1186,7 @@ def _worktree_dirty_fingerprint(worktree_path: Path) -> str:
         ),
     ):
         payload = git_bytes(*args)
-        digest.update(label + b"\0" + len(payload).to_bytes(8, "big") + payload)
+        update_framed(digest, label, payload)
 
     untracked = git_bytes("ls-files", "--others", "--exclude-standard", "-z")
     root = os.fsencode(str(worktree_path))
@@ -1187,20 +1194,35 @@ def _worktree_dirty_fingerprint(worktree_path: Path) -> str:
         full_path = os.path.join(root, relative)
         try:
             metadata = os.lstat(full_path)
-            digest.update(b"untracked\0" + relative + b"\0")
-            digest.update(stat.S_IFMT(metadata.st_mode).to_bytes(4, "big"))
-            digest.update(stat.S_IMODE(metadata.st_mode).to_bytes(4, "big"))
+            entry = hashlib.sha256()
+            update_framed(entry, b"path", relative)
+            update_framed(
+                entry,
+                b"type",
+                stat.S_IFMT(metadata.st_mode).to_bytes(4, "big"),
+            )
+            update_framed(
+                entry,
+                b"mode",
+                stat.S_IMODE(metadata.st_mode).to_bytes(4, "big"),
+            )
             if stat.S_ISLNK(metadata.st_mode):
                 target = os.readlink(full_path)
                 if isinstance(target, str):
                     target = os.fsencode(target)
-                digest.update(target)
+                update_framed(entry, b"symlink-target", target)
             elif stat.S_ISREG(metadata.st_mode):
+                content = hashlib.sha256()
+                length = 0
                 with open(full_path, "rb") as handle:
                     while chunk := handle.read(1024 * 1024):
-                        digest.update(chunk)
+                        content.update(chunk)
+                        length += len(chunk)
+                update_framed(entry, b"content-length", length.to_bytes(8, "big"))
+                update_framed(entry, b"content-sha256", content.digest())
             else:
-                digest.update(str(metadata.st_size).encode())
+                update_framed(entry, b"size", str(metadata.st_size).encode())
+            update_framed(digest, b"untracked-entry", entry.digest())
         except OSError as e:
             raise ShardError(
                 f"Cannot snapshot uncommitted state in {worktree_path}: "
