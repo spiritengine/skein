@@ -1189,14 +1189,20 @@ def _worktree_dirty_fingerprint(worktree_path: Path) -> str:
         payload = git_bytes(*args)
         update_framed(digest, label, payload)
 
-    untracked = git_bytes("ls-files", "--others", "--exclude-standard", "-z")
     root = os.fsencode(str(worktree_path))
-    for relative in sorted(path for path in untracked.split(b"\0") if path):
-        full_path = os.path.join(root, relative)
+
+    def fingerprint_entry(relative: bytes, full_path: bytes) -> bytes:
+        """Fingerprint one untracked entry without following symlinks.
+
+        Git normally enumerates every untracked file, but deliberately
+        collapses an embedded repository to one directory entry. Recursing
+        here binds everything worktree removal would destroy, including the
+        embedded repository's own Git directory.
+        """
         try:
             metadata = os.lstat(full_path)
             entry = hashlib.sha256()
-            update_framed(entry, b"path", relative)
+            update_framed(entry, b"path", relative.rstrip(b"/"))
             update_framed(
                 entry,
                 b"type",
@@ -1221,14 +1227,53 @@ def _worktree_dirty_fingerprint(worktree_path: Path) -> str:
                         length += len(chunk)
                 update_framed(entry, b"content-length", length.to_bytes(8, "big"))
                 update_framed(entry, b"content-sha256", content.digest())
+            elif stat.S_ISDIR(metadata.st_mode):
+                with os.scandir(full_path) as children:
+                    names = sorted(child.name for child in children)
+                parent = relative.rstrip(b"/")
+                for name in names:
+                    child_relative = parent + b"/" + name
+                    update_framed(
+                        entry,
+                        b"directory-entry",
+                        fingerprint_entry(
+                            child_relative, os.path.join(full_path, name)
+                        ),
+                    )
             else:
                 update_framed(entry, b"size", str(metadata.st_size).encode())
-            update_framed(digest, b"untracked-entry", entry.digest())
+
+            after = os.lstat(full_path)
+            stable_fields = (
+                "st_dev",
+                "st_ino",
+                "st_mode",
+                "st_size",
+                "st_mtime_ns",
+                "st_ctime_ns",
+            )
+            if any(
+                getattr(metadata, field) != getattr(after, field)
+                for field in stable_fields
+            ):
+                raise ShardError(
+                    f"Cannot snapshot uncommitted state in {worktree_path}: "
+                    f"{os.fsdecode(relative)} changed while being read"
+                )
+            return entry.digest()
         except OSError as e:
             raise ShardError(
                 f"Cannot snapshot uncommitted state in {worktree_path}: "
                 f"{os.fsdecode(relative)} changed while being read: {e}"
             ) from e
+
+    untracked = git_bytes("ls-files", "--others", "--exclude-standard", "-z")
+    for relative in sorted(path for path in untracked.split(b"\0") if path):
+        update_framed(
+            digest,
+            b"untracked-entry",
+            fingerprint_entry(relative, os.path.join(root, relative)),
+        )
 
     # A parent diff says only that a gitlink is dirty; it does not bind the
     # bytes changed inside that submodule. Recurse through each populated
@@ -1274,6 +1319,132 @@ def _worktree_dirty_fingerprint(worktree_path: Path) -> str:
         update_framed(digest, b"submodule-entry", entry.digest())
 
     return digest.hexdigest()
+
+
+_CLEANUP_SNAPSHOT_LABELS = {
+    "registered": "worktree registration",
+    "worktree_path": "worktree path",
+    "path_exists": "worktree existence",
+    "path_is_dir": "worktree type",
+    "locked": "worktree lock",
+    "detached": "attachment state",
+    "worktree_head": "worktree HEAD",
+    "branch_oid": "branch tip",
+    "proof_base": "proof base",
+    "proof_base_oid": "proof-base tip",
+    "merged": "merge proof",
+    "dirty_files": "uncommitted paths",
+    "dirty_fingerprint": "uncommitted content",
+}
+
+
+def _capture_cleanup_snapshot(
+    repo,
+    worktree_name: str,
+    base_branch: Optional[str] = None,
+    resolution: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Capture every mutable fact a cleanup disclosure authorizes.
+
+    The snapshot is the common authority object for single and chain cleanup.
+    It binds identity/location, both commit tips used by deletion proof,
+    attachment state, and the exact uncommitted bytes removal may discard.
+    Execution compares the complete object before any mutation instead of
+    independently re-settling a subset of its facts.
+    """
+    if resolution is None:
+        resolution = resolve_shard(worktree_name)
+    worktree_name = resolution["name"]
+    if resolution.get("ambiguous"):
+        raise ShardError(
+            f"Cannot snapshot cleanup authority for '{worktree_name}': "
+            "multiple metadata rows claim its detached worktree"
+        )
+
+    worktree_path = Path(resolution["path"])
+    stanza = (
+        _stanza_for_path(repo, worktree_path)
+        if resolution.get("registered")
+        else None
+    )
+    registered = stanza is not None if resolution.get("registered") else False
+    if stanza is not None:
+        worktree_path = Path(stanza["path"])
+    path_exists = worktree_path.exists()
+    branch_name = resolution["branch"]
+    branch_oid = _branch_oid(repo, branch_name)
+    proof_base = _resolve_proof_base(worktree_name, base_branch)
+    proof_base_oid = _branch_oid(repo, proof_base) if proof_base else None
+    merged: Optional[bool] = None
+    if branch_oid and proof_base_oid:
+        merged = _commit_contained_in(repo, branch_oid, proof_base_oid)
+
+    dirty_files: List[str] = []
+    dirty_fingerprint: Optional[str] = None
+    if path_exists and worktree_path.is_dir():
+        dirty_files = _worktree_dirty_files(worktree_path)
+        if dirty_files:
+            dirty_fingerprint = _worktree_dirty_fingerprint(worktree_path)
+
+    return {
+        "version": 1,
+        "worktree_name": worktree_name,
+        "branch_name": branch_name,
+        "registered": registered,
+        "worktree_path": str(worktree_path.absolute()),
+        "path_exists": path_exists,
+        "path_is_dir": worktree_path.is_dir(),
+        "locked": bool(stanza.get("locked")) if stanza else False,
+        "detached": bool(stanza.get("detached")) if stanza else False,
+        "worktree_head": stanza.get("head") if stanza else None,
+        "branch_oid": branch_oid,
+        "proof_base": proof_base,
+        "proof_base_oid": proof_base_oid,
+        "merged": merged,
+        "dirty_files": dirty_files,
+        "dirty_fingerprint": dirty_fingerprint,
+    }
+
+
+def _cleanup_snapshot_changes(
+    disclosed: Dict[str, Any], current: Dict[str, Any]
+) -> List[str]:
+    """Human-readable fields that differ between two authority snapshots."""
+    keys = set(disclosed) | set(current)
+    return [
+        _CLEANUP_SNAPSHOT_LABELS.get(key, key.replace("_", " "))
+        for key in sorted(keys)
+        if disclosed.get(key) != current.get(key)
+    ]
+
+
+def _require_cleanup_snapshot(
+    worktree_name: str,
+    disclosed: Dict[str, Any],
+    current: Dict[str, Any],
+    *,
+    whole_chain: bool = False,
+) -> None:
+    """Refuse when any fact covered by cleanup disclosure has changed."""
+    changes = _cleanup_snapshot_changes(disclosed, current)
+    if not changes:
+        return
+    scope = (
+        "nothing was removed"
+        if whole_chain
+        else "nothing was removed for this link"
+    )
+    dirty_detail = (
+        " The content or index state changed after disclosure."
+        if "uncommitted content" in changes
+        else ""
+    )
+    raise ShardError(
+        f"Cannot cleanup '{worktree_name}': state changed after disclosure; "
+        f"{scope}.{dirty_detail}\n"
+        f"Changed: {', '.join(changes)}\n"
+        "Re-run cleanup to inspect and confirm the current state."
+    )
 
 
 def _registered_worktree_paths(repo) -> List[Path]:
@@ -1367,6 +1538,7 @@ def _cleanup_shard_detailed(
     discard_uncommitted: bool = False,
     authorized_dirty_files: Optional[List[str]] = None,
     authorized_dirty_fingerprint: Optional[str] = None,
+    authorized_snapshot: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """
     Remove SHARD worktree; delete the branch only under explicit authority.
@@ -1406,6 +1578,10 @@ def _cleanup_shard_detailed(
             Required whenever authorized_dirty_files permits discarding a
             nonempty state; catches same-path content or index changes whose
             porcelain status line stays unchanged.
+        authorized_snapshot: Complete per-link state captured at disclosure.
+            When supplied, every mutable cleanup fact must still match before
+            any mutation. This is the CLI authority path; the narrower dirty
+            arguments remain for compatible internal callers.
 
     Returns:
         Dict describing what happened: worktree_removed, worktree_pruned,
@@ -1440,7 +1616,21 @@ def _cleanup_shard_detailed(
             f"repair the rows before any destructive operation."
         )
 
-    if not resolution["registered"]:
+    current_snapshot = _capture_cleanup_snapshot(
+        repo,
+        worktree_name,
+        base_branch=base_branch,
+        resolution=resolution,
+    )
+    if authorized_snapshot is not None:
+        _require_cleanup_snapshot(
+            worktree_name, authorized_snapshot, current_snapshot
+        )
+        authorized_dirty_files = list(authorized_snapshot["dirty_files"])
+        authorized_dirty_fingerprint = authorized_snapshot["dirty_fingerprint"]
+        discard_uncommitted = False
+
+    if not current_snapshot["registered"]:
         # No git worktree entry for this name.
         if resolution["branch_exists"]:
             raise ShardError(
@@ -1457,7 +1647,7 @@ def _cleanup_shard_detailed(
             f"Nothing to clean up."
         )
 
-    if resolution.get("locked"):
+    if current_snapshot["locked"]:
         raise ShardError(
             f"Cannot cleanup '{worktree_name}': its worktree is locked "
             f"({resolution['path']}).\n"
@@ -1465,8 +1655,8 @@ def _cleanup_shard_detailed(
             f"{resolution['path']}"
         )
 
-    worktree_path = Path(resolution["path"])
-    missing = not worktree_path.exists()
+    worktree_path = Path(current_snapshot["worktree_path"])
+    missing = not current_snapshot["path_exists"]
 
     # Self-deletion guards (meaningful only while the directory exists)
     if not missing:
@@ -1493,12 +1683,10 @@ def _cleanup_shard_detailed(
     # is settled against the exact OID the deletion will later require: a
     # proof over the ref NAME would let the ref move between proof and
     # deletion and the delete would then discard commits nothing proved.
-    branch_oid = _branch_oid(repo, branch_name)
+    branch_oid = current_snapshot["branch_oid"]
     branch_present = branch_oid is not None
-    proof_base = _resolve_proof_base(worktree_name, base_branch)
-    merged = False
-    if branch_present and proof_base and _branch_exists(repo, proof_base):
-        merged = _commit_contained_in(repo, branch_oid, proof_base)
+    proof_base = current_snapshot["proof_base"]
+    merged = current_snapshot["merged"] is True
 
     want_delete = not keep_branch and branch_present
     authorized = merged or delete_unmerged_branch
@@ -1542,8 +1730,7 @@ def _cleanup_shard_detailed(
     # (containment in the proof base) or the explicit override.
     detached_head = None
     if resolution.get("detached"):
-        member_stanza = _stanza_for_path(repo, worktree_path)
-        detached_head = member_stanza["head"] if member_stanza else None
+        detached_head = current_snapshot["worktree_head"]
         head_contained = bool(
             detached_head
             and proof_base
@@ -1572,7 +1759,7 @@ def _cleanup_shard_detailed(
     # refuses — a confirmation never stretches to dirt that appeared after
     # the disclosure it confirmed.
     if not missing:
-        dirty_files = _worktree_dirty_files(worktree_path)
+        dirty_files = list(current_snapshot["dirty_files"])
         undisclosed = _undisclosed_dirty(
             dirty_files, authorized_dirty_files, discard_uncommitted
         )
@@ -1609,8 +1796,9 @@ def _cleanup_shard_detailed(
             )
             err.dirty_files = dirty_files
             err.dirty_fingerprint = (
-                _worktree_dirty_fingerprint(worktree_path) if dirty_files else None
+                current_snapshot["dirty_fingerprint"] if dirty_files else None
             )
+            err.cleanup_snapshot = current_snapshot
             raise err
 
     result: Dict[str, Any] = {
@@ -1669,7 +1857,33 @@ def _cleanup_shard_detailed(
             # authority before forcing, so dirt that appeared between the
             # disclosure check and removal refuses instead of being wiped —
             # --force stays directory mechanics, never discard authority.
-            current_dirty = _worktree_dirty_files(worktree_path)
+            if authorized_snapshot is not None:
+                try:
+                    latest_snapshot = _capture_cleanup_snapshot(
+                        repo,
+                        worktree_name,
+                        base_branch=base_branch,
+                        resolution=resolution,
+                    )
+                    _require_cleanup_snapshot(
+                        worktree_name,
+                        authorized_snapshot,
+                        latest_snapshot,
+                    )
+                except ShardError:
+                    _restore_live_worktree_path(
+                        repo,
+                        worktree_name,
+                        worktree_path,
+                        branch_name,
+                        bool(resolution.get("detached")),
+                        detached_head,
+                        prior_path is not None,
+                    )
+                    raise
+                current_dirty = list(latest_snapshot["dirty_files"])
+            else:
+                current_dirty = _worktree_dirty_files(worktree_path)
             late = _undisclosed_dirty(
                 current_dirty,
                 authorized_dirty_files,
@@ -3804,33 +4018,19 @@ def get_chain_cleanup_plan(
         worktree_name = member["worktree_name"]
     root = get_graft_chain_root(worktree_name)
     chain = get_graft_chain(root)
-    members_by_name = {m["worktree_name"]: m for m in list_shards()}
     plan = []
     for name in chain:
-        branch_name = f"{SHARD_BRANCH_PREFIX}{name}"
-        branch_present = _branch_exists(repo, branch_name)
-        proof_base = _resolve_proof_base(name, base_branch)
-        merged = None
-        if branch_present and proof_base and _branch_exists(repo, proof_base):
-            merged = _branch_merged_into(repo, branch_name, proof_base)
-        member = members_by_name.get(name)
-        dirty_files: List[str] = []
-        dirty_fingerprint: Optional[str] = None
-        if member and os.path.isdir(member["worktree_path"]):
-            dirty_files = _worktree_dirty_files(Path(member["worktree_path"]))
-            if dirty_files:
-                dirty_fingerprint = _worktree_dirty_fingerprint(
-                    Path(member["worktree_path"])
-                )
+        snapshot = _capture_cleanup_snapshot(repo, name, base_branch=base_branch)
         plan.append(
             {
                 "worktree_name": name,
-                "branch_name": branch_name,
-                "branch_exists": branch_present,
-                "proof_base": proof_base,
-                "merged": merged,
-                "dirty_files": dirty_files,
-                "dirty_fingerprint": dirty_fingerprint,
+                "branch_name": snapshot["branch_name"],
+                "branch_exists": snapshot["branch_oid"] is not None,
+                "proof_base": snapshot["proof_base"],
+                "merged": snapshot["merged"],
+                "dirty_files": list(snapshot["dirty_files"]),
+                "dirty_fingerprint": snapshot["dirty_fingerprint"],
+                "cleanup_snapshot": snapshot,
             }
         )
     return plan
@@ -3847,6 +4047,7 @@ def cleanup_graft_chain(
     disclosed_dirty: Optional[Dict[str, List[str]]] = None,
     disclosed_dirty_fingerprints: Optional[Dict[str, Optional[str]]] = None,
     disclosed_chain: Optional[List[str]] = None,
+    disclosed_snapshots: Optional[Dict[str, Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """
     Clean up entire graft chain (original + all grafts).
@@ -3871,6 +4072,12 @@ def cleanup_graft_chain(
     execution set is then the frozen disclosed list, never a newly expanded
     lineage.
 
+    When disclosed_snapshots is supplied, it is the single authority source
+    for every link. The whole chain is re-captured and compared before the
+    first mutation, then each link is checked again immediately before its
+    own mutation. Dirty paths/fingerprints are derived from the same object,
+    so branch proof and byte-discard authority cannot drift independently.
+
     The chain stops at the first failed link: continuing past a failure
     would mutate links beyond it (e.g. delete a parent whose graft still
     exists) and compound the partial state the caller must report.
@@ -3888,6 +4095,8 @@ def cleanup_graft_chain(
         disclosed_dirty: Exact disclosed dirty status lines per link name
         disclosed_dirty_fingerprints: Exact dirty-state digest per link name
         disclosed_chain: Exact ordered link names disclosed before confirmation
+        disclosed_snapshots: Complete per-link authority objects captured by
+            get_chain_cleanup_plan
 
     Returns:
         Dict with:
@@ -3942,6 +4151,27 @@ def cleanup_graft_chain(
             "re-disclose the chain."
         )
 
+    if disclosed_snapshots is not None:
+        disclosed_names = set(disclosed_snapshots)
+        current_names = set(chain)
+        if disclosed_names != current_names:
+            raise ShardError(
+                "Cannot cleanup --chain: disclosed snapshots do not exactly "
+                "cover the current chain; nothing was removed. Re-run cleanup "
+                "to re-disclose the chain."
+            )
+        repo = _get_repo()
+        for wt_name in chain:
+            current_snapshot = _capture_cleanup_snapshot(
+                repo, wt_name, base_branch=base_branch
+            )
+            _require_cleanup_snapshot(
+                wt_name,
+                disclosed_snapshots[wt_name],
+                current_snapshot,
+                whole_chain=True,
+            )
+
     removed = []
     preserved_branches = []
     errors = []
@@ -3952,8 +4182,14 @@ def cleanup_graft_chain(
     for idx, wt_name in enumerate(reversed_chain):
         link_authorized: Optional[List[str]] = None
         link_fingerprint: Optional[str] = None
+        link_snapshot: Optional[Dict[str, Any]] = None
         link_discard = discard_uncommitted
-        if disclosed_dirty is not None:
+        if disclosed_snapshots is not None:
+            link_snapshot = disclosed_snapshots[wt_name]
+            link_authorized = list(link_snapshot["dirty_files"])
+            link_fingerprint = link_snapshot["dirty_fingerprint"]
+            link_discard = False
+        elif disclosed_dirty is not None:
             link_authorized = list(disclosed_dirty.get(wt_name, []))
             link_fingerprint = disclosed_dirty_fingerprints.get(wt_name)
             link_discard = False
@@ -3967,6 +4203,7 @@ def cleanup_graft_chain(
                 discard_uncommitted=link_discard,
                 authorized_dirty_files=link_authorized,
                 authorized_dirty_fingerprint=link_fingerprint,
+                authorized_snapshot=link_snapshot,
             )
             removed.append(wt_name)
             if link_result.get("branch_preserved"):

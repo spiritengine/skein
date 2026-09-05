@@ -7197,16 +7197,12 @@ def shard_cleanup(
                     )
                 click.confirm(prompt, abort=True)
 
-            # Discard authority is the disclosure above, exactly: each link
-            # may discard only the files listed for it (--yes skips the
-            # prompt, never widens the authority). A link that turned dirty
-            # after disclosure — or grew undisclosed files — refuses.
-            disclosed_map = {
-                link["worktree_name"]: list(link.get("dirty_files") or [])
-                for link in plan
-            }
-            disclosed_fingerprints = {
-                link["worktree_name"]: link.get("dirty_fingerprint")
+            # Authority is the disclosure above, exactly. The per-link
+            # snapshot binds location, commit tips, proof base, attachment,
+            # and dirty bytes; --yes skips the prompt but never widens any of
+            # those facts.
+            disclosed_snapshots = {
+                link["worktree_name"]: link["cleanup_snapshot"]
                 for link in plan
             }
             disclosed_chain = [link["worktree_name"] for link in plan]
@@ -7216,9 +7212,8 @@ def shard_cleanup(
                 caller_cwd=caller_cwd,
                 delete_unmerged_branch=delete_unmerged,
                 base_branch=base_branch,
-                disclosed_dirty=disclosed_map,
-                disclosed_dirty_fingerprints=disclosed_fingerprints,
                 disclosed_chain=disclosed_chain,
+                disclosed_snapshots=disclosed_snapshots,
             )
 
             if result["removed"]:
@@ -7251,10 +7246,11 @@ def shard_cleanup(
             if not assume_yes:
                 click.confirm("Are you sure you want to cleanup this SHARD?", abort=True)
 
-            # Single worktree cleanup. A dirty tree always surfaces its
-            # files first — --yes skips the prompts but never the
-            # disclosure — and the retry's discard authority is exactly the
-            # disclosed set, so dirt appearing after disclosure refuses.
+            # Single worktree cleanup. A dirty tree always surfaces its files
+            # first — --yes skips the prompts but never the disclosure — and
+            # its retry carries the same complete authority snapshot as chain
+            # cleanup, so no commit, location, or dirty-state change can hide
+            # between disclosure and execution.
             try:
                 result = shard_worktree._cleanup_shard_detailed(
                     worktree_name,
@@ -7267,7 +7263,7 @@ def shard_cleanup(
                 disclosed = getattr(e, "dirty_files", None)
                 if disclosed is None:
                     raise
-                disclosed_fingerprint = getattr(e, "dirty_fingerprint", None)
+                disclosed_snapshot = getattr(e, "cleanup_snapshot", None)
                 click.echo(str(e))
                 if assume_yes:
                     click.echo(
@@ -7281,8 +7277,7 @@ def shard_cleanup(
                     caller_cwd=caller_cwd,
                     delete_unmerged_branch=delete_unmerged,
                     base_branch=base_branch,
-                    authorized_dirty_files=disclosed,
-                    authorized_dirty_fingerprint=disclosed_fingerprint,
+                    authorized_snapshot=disclosed_snapshot,
                 )
 
             if result.get("worktree_pruned"):

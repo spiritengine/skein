@@ -177,6 +177,19 @@ def _populate_local_submodule(worktree: Path) -> Path:
     return worktree / "sub" / "s.txt"
 
 
+def _create_untracked_embedded_repo(worktree: Path) -> Path:
+    embedded = worktree / "embedded"
+    embedded.mkdir()
+    _git(embedded, "init")
+    _git(embedded, "config", "user.email", "test@example.com")
+    _git(embedded, "config", "user.name", "Test User")
+    payload = embedded / "payload.txt"
+    payload.write_text("embedded base\n")
+    _git(embedded, "add", "payload.txt")
+    _git(embedded, "commit", "-m", "embedded base")
+    return payload
+
+
 def _skein_dir_snapshot(repo: Path) -> dict:
     """Byte-level snapshot of .skein (DB plus any sidecars)."""
     skein_dir = repo / ".skein"
@@ -2351,7 +2364,7 @@ class TestChainPerLinkDiscardAuthority:
         info = spawn_shard("plink")
         _commit_work(Path(info["worktree_path"]))
         (repo / "advance.txt").write_text("advance\n")
-        _git(repo, "add", ".")
+        _git(repo, "add", "advance.txt")
         _git(repo, "commit", "-m", "advance master")
         graft = graft_shard(info["worktree_name"])
         return info, graft
@@ -2656,6 +2669,277 @@ class TestChainPerLinkDiscardAuthority:
         assert nested_file.read_text() == "after disclosure\n"
         assert worktree.exists()
 
+    def test_fingerprint_binds_untracked_embedded_repository(self, repo: Path):
+        """Git collapses an embedded repository to one untracked directory,
+        but the fingerprint still binds every byte worktree removal deletes."""
+        info = spawn_shard("embeddedfingerprint")
+        worktree = Path(info["worktree_path"])
+        payload = _create_untracked_embedded_repo(worktree)
+
+        disclosed_status = _git(worktree, "status", "--porcelain")
+        before = _worktree_dirty_fingerprint(worktree)
+        payload.write_text("after disclosure\n")
+        changed_status = _git(worktree, "status", "--porcelain")
+        after = _worktree_dirty_fingerprint(worktree)
+
+        assert disclosed_status == "?? embedded/\n"
+        assert disclosed_status == changed_status
+        assert before != after
+
+    def test_cli_embedded_repo_rewrite_after_chain_disclosure_refuses(
+        self, repo: Path, monkeypatch
+    ):
+        info, graft = self._chain(repo)
+        graft_path = Path(graft["graft_worktree_path"])
+        payload = _create_untracked_embedded_repo(graft_path)
+
+        import skein.shard as shard_module
+
+        real_plan = shard_module.get_chain_cleanup_plan
+
+        def _plan_then_rewrite(*args, **kwargs):
+            plan = real_plan(*args, **kwargs)
+            payload.write_text("after disclosure\n")
+            return plan
+
+        monkeypatch.setattr(
+            shard_module, "get_chain_cleanup_plan", _plan_then_rewrite
+        )
+
+        from client.cli import cli
+
+        runner = CliRunner()
+        with patch("client.cli.make_request", return_value={}):
+            result = runner.invoke(
+                cli,
+                [
+                    "shard",
+                    "cleanup",
+                    info["worktree_name"],
+                    "--chain",
+                    "--keep-branch",
+                    "--yes",
+                ],
+            )
+
+        assert result.exit_code != 0
+        assert "state changed after disclosure" in result.output
+        assert payload.read_text() == "after disclosure\n"
+        assert Path(info["worktree_path"]).exists()
+        assert graft_path.exists()
+
+    def test_cli_embedded_repo_rewrite_after_single_disclosure_refuses(
+        self, repo: Path, monkeypatch
+    ):
+        info = spawn_shard("singleembedded")
+        worktree = Path(info["worktree_path"])
+        payload = _create_untracked_embedded_repo(worktree)
+
+        from client.cli import cli
+        import client.cli as cli_module
+
+        def _confirm(prompt, **kwargs):
+            if prompt.startswith("Discard these uncommitted changes?"):
+                payload.write_text("after disclosure\n")
+            return True
+
+        monkeypatch.setattr(cli_module.click, "confirm", _confirm)
+
+        runner = CliRunner()
+        with patch("client.cli.make_request", return_value={}):
+            result = runner.invoke(
+                cli,
+                ["shard", "cleanup", info["worktree_name"], "--keep-branch"],
+            )
+
+        assert result.exit_code != 0
+        assert "state changed after disclosure" in result.output
+        assert payload.read_text() == "after disclosure\n"
+        assert worktree.exists()
+
+    def test_cli_chain_refuses_changed_disclosed_branch_tip_before_mutation(
+        self, repo: Path, monkeypatch
+    ):
+        info, graft = self._chain(repo)
+        _git(repo, "merge", "--no-ff", graft["graft_branch_name"], "-m", "merge graft")
+
+        import skein.shard as shard_module
+
+        real_plan = shard_module.get_chain_cleanup_plan
+        late_tip = []
+
+        def _plan_then_commit(*args, **kwargs):
+            plan = real_plan(*args, **kwargs)
+            graft_plan = next(
+                link
+                for link in plan
+                if link["worktree_name"] == graft["graft_worktree_name"]
+            )
+            assert graft_plan["merged"] is True
+            graft_path = Path(graft["graft_worktree_path"])
+            _git(graft_path, "commit", "--allow-empty", "-m", "late commit")
+            late_tip.append(_git(graft_path, "rev-parse", "HEAD").strip())
+            return plan
+
+        monkeypatch.setattr(
+            shard_module, "get_chain_cleanup_plan", _plan_then_commit
+        )
+
+        from client.cli import cli
+
+        runner = CliRunner()
+        with patch("client.cli.make_request", return_value={}):
+            result = runner.invoke(
+                cli,
+                [
+                    "shard",
+                    "cleanup",
+                    info["worktree_name"],
+                    "--chain",
+                    "--delete-unmerged-branch",
+                    "--yes",
+                ],
+            )
+
+        assert result.exit_code != 0
+        assert "state changed after disclosure" in result.output
+        assert "branch tip" in result.output
+        assert Path(info["worktree_path"]).exists()
+        assert Path(graft["graft_worktree_path"]).exists()
+        assert (
+            _git(repo, "rev-parse", graft["graft_branch_name"]).strip()
+            == late_tip[0]
+        )
+
+    def test_cli_single_refuses_changed_branch_tip_with_same_dirty_state(
+        self, repo: Path, monkeypatch
+    ):
+        """An empty commit changes only the disclosed branch/worktree tip;
+        unchanged dirty paths and bytes cannot authorize deleting it."""
+        info = spawn_shard("singlebranchtip")
+        worktree = Path(info["worktree_path"])
+        dirty = worktree / "dirty.txt"
+        dirty.write_text("unchanged dirty bytes\n")
+        late_tip = []
+
+        from client.cli import cli
+        import client.cli as cli_module
+
+        def _confirm(prompt, **kwargs):
+            if prompt.startswith("Discard these uncommitted changes?"):
+                _git(worktree, "commit", "--allow-empty", "-m", "late commit")
+                late_tip.append(_git(worktree, "rev-parse", "HEAD").strip())
+            return True
+
+        monkeypatch.setattr(cli_module.click, "confirm", _confirm)
+
+        runner = CliRunner()
+        with patch("client.cli.make_request", return_value={}):
+            result = runner.invoke(
+                cli,
+                [
+                    "shard",
+                    "cleanup",
+                    info["worktree_name"],
+                    "--delete-unmerged-branch",
+                ],
+            )
+
+        assert result.exit_code != 0
+        assert "state changed after disclosure" in result.output
+        assert "branch tip" in result.output
+        assert dirty.read_text() == "unchanged dirty bytes\n"
+        assert worktree.exists()
+        assert _git(repo, "rev-parse", info["branch_name"]).strip() == late_tip[0]
+
+    def test_cli_chain_refuses_changed_proof_base_before_mutation(
+        self, repo: Path, monkeypatch
+    ):
+        """Merge authority binds both ancestry inputs, not only the shard
+        tip and the boolean result computed from an earlier base tip."""
+        info, graft = self._chain(repo)
+
+        import skein.shard as shard_module
+
+        real_plan = shard_module.get_chain_cleanup_plan
+
+        def _plan_then_advance_base(*args, **kwargs):
+            plan = real_plan(*args, **kwargs)
+            _git(repo, "commit", "--allow-empty", "-m", "advance proof base")
+            return plan
+
+        monkeypatch.setattr(
+            shard_module, "get_chain_cleanup_plan", _plan_then_advance_base
+        )
+
+        from client.cli import cli
+
+        runner = CliRunner()
+        with patch("client.cli.make_request", return_value={}):
+            result = runner.invoke(
+                cli,
+                [
+                    "shard",
+                    "cleanup",
+                    info["worktree_name"],
+                    "--chain",
+                    "--delete-unmerged-branch",
+                    "--yes",
+                ],
+            )
+
+        assert result.exit_code != 0
+        assert "state changed after disclosure" in result.output
+        assert "proof-base tip" in result.output
+        assert Path(info["worktree_path"]).exists()
+        assert Path(graft["graft_worktree_path"]).exists()
+
+    def test_cli_single_refuses_changed_detached_head_after_disclosure(
+        self, repo: Path, monkeypatch
+    ):
+        info = spawn_shard("singledetached")
+        worktree = Path(info["worktree_path"])
+        _git(worktree, "checkout", "--detach")
+        dirty = worktree / "detached.txt"
+        dirty.write_text("before disclosure\n")
+        late_head = []
+
+        from client.cli import cli
+        import client.cli as cli_module
+
+        def _confirm(prompt, **kwargs):
+            if prompt.startswith("Discard these uncommitted changes?"):
+                _git(
+                    worktree,
+                    "commit",
+                    "--allow-empty",
+                    "-m",
+                    "late detached commit",
+                )
+                late_head.append(_git(worktree, "rev-parse", "HEAD").strip())
+            return True
+
+        monkeypatch.setattr(cli_module.click, "confirm", _confirm)
+
+        runner = CliRunner()
+        with patch("client.cli.make_request", return_value={}):
+            result = runner.invoke(
+                cli,
+                [
+                    "shard",
+                    "cleanup",
+                    info["worktree_name"],
+                    "--delete-unmerged-branch",
+                ],
+            )
+
+        assert result.exit_code != 0
+        assert "state changed after disclosure" in result.output
+        assert "worktree HEAD" in result.output
+        assert dirty.read_text() == "before disclosure\n"
+        assert worktree.exists()
+        assert _git(worktree, "rev-parse", "HEAD").strip() == late_head[0]
+
     def test_cli_collision_rewrite_after_chain_disclosure_refuses(
         self, repo: Path, monkeypatch
     ):
@@ -2830,7 +3114,7 @@ class TestChainPerLinkDiscardAuthority:
     def test_cli_late_dirt_in_other_link_fails_nonzero(self, repo: Path, monkeypatch):
         """CLI intersection: a disclosed dirty graft must not authorize late
         dirt in the clean-at-disclosure root, even under --yes; the chain
-        stops and exits nonzero with the partial state reported."""
+        preflight refuses before removing either link."""
         info, graft = self._chain(repo)
         (Path(graft["graft_worktree_path"]) / "disclosed.txt").write_text("d\n")
         late = Path(info["worktree_path"]) / "late.txt"
@@ -2865,10 +3149,11 @@ class TestChainPerLinkDiscardAuthority:
             )
 
         assert result.exit_code != 0
-        assert "INCOMPLETE" in result.output
+        assert "state changed after disclosure" in result.output
+        assert "nothing was removed" in result.output
         assert late.exists()
         assert Path(info["worktree_path"]).exists()
-        assert not Path(graft["graft_worktree_path"]).exists()
+        assert Path(graft["graft_worktree_path"]).exists()
 
     def test_cli_clean_disclosure_late_dirt_fails_nonzero(
         self, repo: Path, monkeypatch
@@ -2908,8 +3193,8 @@ class TestChainPerLinkDiscardAuthority:
             )
 
         assert result.exit_code != 0
-        assert "INCOMPLETE" in result.output
-        assert "not attempted" in result.output
+        assert "state changed after disclosure" in result.output
+        assert "nothing was removed" in result.output
         assert late.exists()
         assert Path(info["worktree_path"]).exists()
         assert Path(graft["graft_worktree_path"]).exists()

@@ -38,6 +38,7 @@ class _MockShardModule:
         discard_uncommitted=False,
         authorized_dirty_files=None,
         authorized_dirty_fingerprint=None,
+        authorized_snapshot=None,
     ):
         self.cleanup_calls.append(
             {
@@ -49,6 +50,7 @@ class _MockShardModule:
                 "discard_uncommitted": discard_uncommitted,
                 "authorized_dirty_files": authorized_dirty_files,
                 "authorized_dirty_fingerprint": authorized_dirty_fingerprint,
+                "authorized_snapshot": authorized_snapshot,
             }
         )
         return {
@@ -481,6 +483,7 @@ class TestShardCleanupCli:
                 "discard_uncommitted": False,
                 "authorized_dirty_files": None,
                 "authorized_dirty_fingerprint": None,
+                "authorized_snapshot": None,
             }
         ]
 
