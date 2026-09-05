@@ -1014,22 +1014,56 @@ def _branch_oid(repo, branch_name: str) -> Optional[str]:
         return None
 
 
-def _delete_branch_at_oid(repo, branch_name: str, expected_oid: str) -> None:
-    """Delete a branch iff its ref still points at expected_oid.
+def _delete_branch_at_oid(
+    repo,
+    branch_name: str,
+    expected_oid: str,
+    *,
+    proof_base: Optional[str] = None,
+    expected_proof_base_oid: Optional[str] = None,
+) -> None:
+    """Delete a branch iff every ref used for its authority is unchanged.
 
-    `git update-ref -d <ref> <expected>` takes the ref lock and refuses when
-    the ref has moved, so deletion authority (merge proof or the explicit
-    override, both settled against expected_oid) can never reach commits
-    that arrived on the ref after the proof. Unlike `git branch -D`,
-    update-ref does not refuse a checked-out branch, so that guard is
-    reinstated here before the deletion. Raises on any refusal.
+    Explicit override authority needs only a compare-and-delete of the branch
+    tip. Merge authority depends on both the branch and proof-base tips, so a
+    single update-ref transaction verifies the latter while deleting the
+    former. Unlike `git branch -D`, update-ref does not refuse a checked-out
+    branch, so that guard is reinstated here before deletion. Raises on any
+    refusal.
     """
     for stanza in _list_worktree_stanzas(repo):
         if stanza.get("branch") == branch_name:
             raise ShardError(
                 f"branch {branch_name} is checked out at {stanza['path']}"
             )
-    repo.git.update_ref("-d", f"refs/heads/{branch_name}", expected_oid)
+    branch_ref = f"refs/heads/{branch_name}"
+    if (proof_base is None) != (expected_proof_base_oid is None):
+        raise ShardError(
+            "merge-proven branch deletion requires both the proof-base ref "
+            "and its expected OID"
+        )
+    if proof_base is None:
+        repo.git.update_ref("-d", branch_ref, expected_oid)
+        return
+
+    proof_base_ref = f"refs/heads/{proof_base}"
+    transaction = (
+        "start\n"
+        f"verify {proof_base_ref} {expected_proof_base_oid}\n"
+        f"delete {branch_ref} {expected_oid}\n"
+        "prepare\n"
+        "commit\n"
+    )
+    completed = subprocess.run(
+        ["git", "update-ref", "--stdin"],
+        cwd=repo.working_tree_dir,
+        input=transaction,
+        text=True,
+        capture_output=True,
+    )
+    if completed.returncode != 0:
+        detail = completed.stderr.strip() or completed.stdout.strip()
+        raise ShardError(detail or "git update-ref transaction refused")
 
 
 def _stanza_for_path(repo, worktree_path: Path) -> Optional[Dict[str, Any]]:
@@ -1336,6 +1370,88 @@ _CLEANUP_SNAPSHOT_LABELS = {
     "dirty_files": "uncommitted paths",
     "dirty_fingerprint": "uncommitted content",
 }
+_CLEANUP_SNAPSHOT_KEYS = frozenset(
+    {"version", "worktree_name", "branch_name"} | set(_CLEANUP_SNAPSHOT_LABELS)
+)
+
+
+def _validate_cleanup_snapshot(
+    worktree_name: str, snapshot: Dict[str, Any]
+) -> None:
+    """Reject malformed disclosure authority before any destructive step."""
+    if not isinstance(snapshot, dict):
+        raise ShardError(
+            f"Invalid cleanup disclosure snapshot for '{worktree_name}': "
+            "expected an object; nothing was removed."
+        )
+
+    keys = set(snapshot)
+    if keys != _CLEANUP_SNAPSHOT_KEYS:
+        missing = sorted(_CLEANUP_SNAPSHOT_KEYS - keys)
+        extra = sorted(keys - _CLEANUP_SNAPSHOT_KEYS)
+        details = []
+        if missing:
+            details.append(f"missing {', '.join(missing)}")
+        if extra:
+            details.append(f"unexpected {', '.join(extra)}")
+        raise ShardError(
+            f"Invalid cleanup disclosure snapshot for '{worktree_name}': "
+            f"{'; '.join(details)}; nothing was removed."
+        )
+
+    errors = []
+    if type(snapshot["version"]) is not int or snapshot["version"] != 1:
+        errors.append("version must be 1")
+    for key in ("worktree_name", "branch_name", "worktree_path"):
+        if not isinstance(snapshot[key], str) or not snapshot[key]:
+            errors.append(f"{key} must be a nonempty string")
+    if snapshot["worktree_name"] != worktree_name:
+        errors.append("worktree_name does not match its map key")
+    if snapshot["branch_name"] != f"{SHARD_BRANCH_PREFIX}{worktree_name}":
+        errors.append("branch_name does not match worktree_name")
+    if isinstance(snapshot["worktree_path"], str) and not Path(
+        snapshot["worktree_path"]
+    ).is_absolute():
+        errors.append("worktree_path must be absolute")
+
+    for key in (
+        "registered",
+        "path_exists",
+        "path_is_dir",
+        "locked",
+        "detached",
+    ):
+        if type(snapshot[key]) is not bool:
+            errors.append(f"{key} must be boolean")
+    for key in (
+        "worktree_head",
+        "branch_oid",
+        "proof_base",
+        "proof_base_oid",
+        "dirty_fingerprint",
+    ):
+        if snapshot[key] is not None and not isinstance(snapshot[key], str):
+            errors.append(f"{key} must be a string or null")
+    if snapshot["merged"] is not None and type(snapshot["merged"]) is not bool:
+        errors.append("merged must be boolean or null")
+    if not isinstance(snapshot["dirty_files"], list) or not all(
+        isinstance(line, str) for line in snapshot["dirty_files"]
+    ):
+        errors.append("dirty_files must be a list of strings")
+    if bool(snapshot["dirty_files"]) != bool(snapshot["dirty_fingerprint"]):
+        errors.append("dirty_files and dirty_fingerprint must be present together")
+    if snapshot["merged"] is True and not (
+        snapshot["branch_oid"] and snapshot["proof_base_oid"]
+    ):
+        errors.append("a true merge proof requires both commit OIDs")
+    if snapshot["path_is_dir"] and not snapshot["path_exists"]:
+        errors.append("a directory path must exist")
+
+    if errors:
+        raise ShardError(
+            f"Invalid cleanup disclosure snapshot for '{worktree_name}': "
+            f"{'; '.join(errors)}; nothing was removed."
+        )
 
 
 def _capture_cleanup_snapshot(
@@ -1344,13 +1460,13 @@ def _capture_cleanup_snapshot(
     base_branch: Optional[str] = None,
     resolution: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    """Capture every mutable fact a cleanup disclosure authorizes.
+    """Capture every disclosed fact that cleanup can revalidate.
 
     The snapshot is the common authority object for single and chain cleanup.
     It binds identity/location, both commit tips used by deletion proof,
     attachment state, and the exact uncommitted bytes removal may discard.
-    Execution compares the complete object before any mutation instead of
-    independently re-settling a subset of its facts.
+    Execution compares the complete object at its revalidation points, while
+    ref deletion separately uses Git's compare-and-swap transactions.
     """
     if resolution is None:
         resolution = resolve_shard(worktree_name)
@@ -1410,11 +1526,10 @@ def _cleanup_snapshot_changes(
     disclosed: Dict[str, Any], current: Dict[str, Any]
 ) -> List[str]:
     """Human-readable fields that differ between two authority snapshots."""
-    keys = set(disclosed) | set(current)
     return [
         _CLEANUP_SNAPSHOT_LABELS.get(key, key.replace("_", " "))
-        for key in sorted(keys)
-        if disclosed.get(key) != current.get(key)
+        for key in sorted(_CLEANUP_SNAPSHOT_KEYS)
+        if disclosed[key] != current[key]
     ]
 
 
@@ -1426,6 +1541,8 @@ def _require_cleanup_snapshot(
     whole_chain: bool = False,
 ) -> None:
     """Refuse when any fact covered by cleanup disclosure has changed."""
+    _validate_cleanup_snapshot(worktree_name, disclosed)
+    _validate_cleanup_snapshot(worktree_name, current)
     changes = _cleanup_snapshot_changes(disclosed, current)
     if not changes:
         return
@@ -1945,18 +2062,28 @@ def _cleanup_shard_detailed(
 
     if want_delete and authorized:
         try:
-            _delete_branch_at_oid(repo, branch_name, branch_oid)
+            _delete_branch_at_oid(
+                repo,
+                branch_name,
+                branch_oid,
+                proof_base=proof_base if merged else None,
+                expected_proof_base_oid=(
+                    current_snapshot["proof_base_oid"] if merged else None
+                ),
+            )
         except Exception as e:
             # The worktree is gone but the branch survived — possibly
-            # because the ref moved past the OID the proof covered. Its row
+            # because the branch or proof-base ref moved past the OIDs the
+            # authority covered. Its row
             # already lost its path in the pre-transition, so this failure
             # state is exactly branch-only metadata (invariant 11), never a
             # dead pointer.
             raise ShardError(
                 f"Removed worktree but failed to delete branch {branch_name}: "
                 f"{e}\n"
-                f"If the branch moved since the merge proof, re-run cleanup "
-                f"to prove its current tip (or pass --delete-unmerged-branch)."
+                f"If either ref moved since the merge proof, re-run cleanup "
+                f"to prove the current tips (or pass "
+                f"--delete-unmerged-branch)."
             )
         result["branch_deleted"] = True
         result["message"] = (
@@ -4074,9 +4201,10 @@ def cleanup_graft_chain(
 
     When disclosed_snapshots is supplied, it is the single authority source
     for every link. The whole chain is re-captured and compared before the
-    first mutation, then each link is checked again immediately before its
-    own mutation. Dirty paths/fingerprints are derived from the same object,
-    so branch proof and byte-discard authority cannot drift independently.
+    first mutation, then each link is checked again as its cleanup begins.
+    Dirty paths/fingerprints are derived from the same object. Git ref
+    transactions separately ensure that merge-proof tips cannot drift before
+    branch deletion.
 
     The chain stops at the first failed link: continuing past a failure
     would mutate links beyond it (e.g. delete a parent whose graft still

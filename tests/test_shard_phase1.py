@@ -2095,6 +2095,62 @@ class TestBranchDeleteExactOid:
         assert row["worktree_path"] is None
         assert row["base_branch"] == "master"
 
+    def test_proof_base_moved_during_removal_refuses_deletion(
+        self, repo: Path, monkeypatch
+    ):
+        """Merge proof and branch deletion are one ref transaction: a
+        proof-base force-move after worktree removal preserves the branch."""
+        info = spawn_shard("basemove")
+        branch_ref = f"refs/heads/{info['branch_name']}"
+        old_base = _git(repo, "rev-parse", "master").strip()
+        tree = _git(repo, "rev-parse", f"{old_base}^{{tree}}").strip()
+        unrelated_base = _git(
+            repo, "commit-tree", tree, "-m", "unrelated replacement base"
+        ).strip()
+
+        import skein.shard as shard_module
+
+        real_get_repo = shard_module._get_repo
+
+        class _MovingBaseGit:
+            def __init__(self, real):
+                self._real = real
+
+            def __getattr__(self, attr):
+                if attr == "worktree":
+                    def _worktree(*args, **kwargs):
+                        out = self._real.worktree(*args, **kwargs)
+                        if args and args[0] == "remove":
+                            self._real.update_ref(
+                                "refs/heads/master", unrelated_base, old_base
+                            )
+                        return out
+
+                    return _worktree
+                return getattr(self._real, attr)
+
+        class _RepoProxy:
+            def __init__(self, real):
+                self._real = real
+                self.git = _MovingBaseGit(real.git)
+
+            def __getattr__(self, attr):
+                return getattr(self._real, attr)
+
+        monkeypatch.setattr(
+            shard_module, "_get_repo", lambda: _RepoProxy(real_get_repo())
+        )
+
+        with pytest.raises(ShardError, match="failed to delete branch"):
+            cleanup_shard(info["worktree_name"])
+
+        assert not Path(info["worktree_path"]).exists()
+        assert _git(repo, "rev-parse", "master").strip() == unrelated_base
+        assert _git(repo, "rev-parse", branch_ref).strip() == old_base
+        row = _get_shard_metadata(info["worktree_name"])
+        assert row is not None
+        assert row["worktree_path"] is None
+
 
 class TestDbGitTransitionOrdering:
     """Round 2, defect 4: the recorded path is cleared before any git
@@ -2373,6 +2429,45 @@ class TestChainPerLinkDiscardAuthority:
         (repo / filename).write_text("advance again\n")
         _git(repo, "add", ".")
         _git(repo, "commit", "-m", f"advance master for {filename}")
+
+    @pytest.mark.parametrize(
+        "malformation",
+        ["missing-key", "wrong-version", "wrong-identity", "wrong-type"],
+    )
+    def test_malformed_cleanup_snapshot_refuses_before_chain_mutation(
+        self, repo: Path, malformation: str
+    ):
+        """Disclosure is an exact typed object, not a partial mapping whose
+        absent null field can survive preflight and fail after removal starts."""
+        info, graft = self._chain(repo)
+        plan = get_chain_cleanup_plan(info["worktree_name"])
+        chain = [link["worktree_name"] for link in plan]
+        snapshots = {
+            link["worktree_name"]: dict(link["cleanup_snapshot"])
+            for link in plan
+        }
+        malformed = snapshots[info["worktree_name"]]
+        if malformation == "missing-key":
+            malformed.pop("dirty_fingerprint")
+        elif malformation == "wrong-version":
+            malformed["version"] = 2
+        elif malformation == "wrong-identity":
+            malformed["worktree_name"] = "some-other-shard"
+        else:
+            malformed["dirty_files"] = "not-a-list"
+
+        with pytest.raises(ShardError, match="Invalid cleanup disclosure snapshot"):
+            cleanup_graft_chain(
+                info["worktree_name"],
+                keep_branch=True,
+                disclosed_chain=chain,
+                disclosed_snapshots=snapshots,
+            )
+
+        assert Path(info["worktree_path"]).exists()
+        assert Path(graft["graft_worktree_path"]).exists()
+        assert _git(repo, "rev-parse", info["branch_name"])
+        assert _git(repo, "rev-parse", graft["graft_branch_name"])
 
     def test_cli_refuses_late_clean_merged_graft_without_override(
         self, repo: Path, monkeypatch
