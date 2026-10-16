@@ -47,7 +47,6 @@ from skein.shard import (
     _get_db_path,
     _get_next_sequence,
     _get_shard_metadata,
-    _placement_path,
     _worktree_dirty_fingerprint,
 )
 
@@ -990,8 +989,8 @@ class TestContracts:
         assert result.exit_code == 0, result.output
 
         lines = result.output.splitlines()
-        branch_lines = [l for l in lines if l.startswith("  Branch: ")]
-        worktree_lines = [l for l in lines if l.startswith("  Worktree: ")]
+        branch_lines = [line for line in lines if line.startswith("  Branch: ")]
+        worktree_lines = [line for line in lines if line.startswith("  Worktree: ")]
         assert len(branch_lines) == 1
         assert len(worktree_lines) == 1
         branch = branch_lines[0][len("  Branch: ") :]
@@ -2564,7 +2563,7 @@ class TestChainPerLinkDiscardAuthority:
         (Path(graft["graft_worktree_path"]) / "disclosed.txt").write_text("d\n")
 
         plan = get_chain_cleanup_plan(info["worktree_name"])
-        disclosed = {l["worktree_name"]: l["dirty_files"] for l in plan}
+        disclosed = {link["worktree_name"]: link["dirty_files"] for link in plan}
         fingerprints = {
             link["worktree_name"]: link["dirty_fingerprint"] for link in plan
         }
@@ -2594,7 +2593,7 @@ class TestChainPerLinkDiscardAuthority:
         disclosed_file.write_text("d\n")
 
         plan = get_chain_cleanup_plan(info["worktree_name"])
-        disclosed = {l["worktree_name"]: l["dirty_files"] for l in plan}
+        disclosed = {link["worktree_name"]: link["dirty_files"] for link in plan}
         fingerprints = {
             link["worktree_name"]: link["dirty_fingerprint"] for link in plan
         }
@@ -2620,7 +2619,7 @@ class TestChainPerLinkDiscardAuthority:
         (Path(graft["graft_worktree_path"]) / "disclosed.txt").write_text("d\n")
 
         plan = get_chain_cleanup_plan(info["worktree_name"])
-        disclosed = {l["worktree_name"]: l["dirty_files"] for l in plan}
+        disclosed = {link["worktree_name"]: link["dirty_files"] for link in plan}
         fingerprints = {
             link["worktree_name"]: link["dirty_fingerprint"] for link in plan
         }

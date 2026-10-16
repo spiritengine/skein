@@ -7155,7 +7155,7 @@ def shard_cleanup(
             plan = shard_worktree.get_chain_cleanup_plan(
                 worktree_name, base_branch=base_branch
             )
-            dirty_links = [l for l in plan if l.get("dirty_files")]
+            dirty_links = [link for link in plan if link.get("dirty_files")]
             if plan:
                 click.echo(f"Chain cleanup plan for: {worktree_name}\n")
                 for link in plan:
