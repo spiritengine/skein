@@ -44,6 +44,22 @@
   hard errors at startup.
 - First-class named site publishing: `skein publish --site` declares a
   workbench site as a public station site with a stable anchor and slug claim.
+- `skein_next` — new content-hash station with a verified wire envelope, canonical serialization, and domain-separated profile signing
+- Agent-facing web read surface: folio lineage layer, self-orienting agent markdown, and "For your agent" handoff box
+- Stationfile-driven theming with `classic` and `ulm` themes shipped out of the box
+- Mesh access layer: `POST /resolve` batch endpoint, mesh fetch CLI, browse verbs, and a client-side MCP wrapper
+- Search L1: full-text and machine search endpoints plus `/.well-known/describe`
+- `skein_next` tests run in CI (slices 1–5)
+- Top-level `--project` flag on every CLI command (overrides cwd `.skein/` discovery)
+- `project:site` colon syntax on `skein post` (issue/brief/friction/notion/finding/summary) and `skein playbook create`
+- Documented `SKEIN_PROJECT` env var (already worked, was undocumented)
+- Cross-project precedence: colon-syntax > `--project` flag > `SKEIN_PROJECT` env > cwd `.skein/`
+- `playbook` and `tender` folio types
+- `skein edit` command for updating folio fields in place
+- Unified `skein find` command for folio discovery across types
+- `--confidence` and `--status` flags on `skein shard tender`
+- QM triage fields on `skein survey`
+- Request ID tracking on all API responses
 
 ### Changed
 - The CLI's URL resolution now bottoms out on the machine's service address
@@ -61,12 +77,12 @@
   values resolution had to ignore (an unparseable `SKEIN_PORT`, an unusable
   config file). An unparseable `SKEIN_PORT` never crashes CLI commands;
   `skein-server` itself still refuses to start on one unless `--port` is given.
+- `.crypto` dependency renamed to `.cryptography`
+- CI lint step now gates on `ruff check` (style errors) rather than `ruff format` (formatting)
 
-### Added
-- Top-level `--project` flag on every CLI command (overrides cwd `.skein/` discovery)
-- `project:site` colon syntax on `skein post` (issue/brief/friction/notion/finding/summary) and `skein playbook create`
-- Documented `SKEIN_PROJECT` env var (already worked, was undocumented)
-- Cross-project precedence: colon-syntax > `--project` flag > `SKEIN_PROJECT` env > cwd `.skein/`
+### Fixed
+- Canonical timestamp parsing now handles sub-6-digit fractional seconds identically on Python 3.10
+- `verify_envelope` hardened against malformed envelopes; `as_of` field flattened
 
 ## [0.2.0] - 2024-11-20
 
