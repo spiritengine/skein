@@ -5,7 +5,8 @@ SKEIN FastAPI routes.
 import logging
 import base64
 import re
-from datetime import datetime, timezone
+import time
+from datetime import datetime, timedelta, timezone
 from typing import List, Optional, Dict, Any, Union
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -61,6 +62,7 @@ from .utils import (
     enrich_folios_with_status,
     parse_relative_time,
     generate_agent_name,
+    format_relative_time,
 )
 
 logger = logging.getLogger(__name__)
@@ -461,9 +463,6 @@ async def get_roster_enriched(
     - Working site they're posting to
     - Folio count and last folio type
     """
-    from .utils import format_relative_time
-    from datetime import timedelta, timezone
-
     agents = store.get_agents(status=status)
     all_folios = store.get_folios()
 
@@ -652,27 +651,29 @@ async def get_sites_timestamps(
     return result
 
 
+def _raise_site_not_found(site_id: str, store: JSONStore) -> None:
+    """Raise a 404 whose detail lists the active sites (or how to create one)."""
+    all_sites = store.get_sites()
+    active_sites = [s for s in all_sites if s.status == "active"]
+    if active_sites:
+        site_ids = [s.site_id for s in active_sites[:50]]
+        suffix = f" (+{len(active_sites) - 50} more)" if len(active_sites) > 50 else ""
+        raise HTTPException(
+            status_code=404,
+            detail=f"Site '{site_id}' not found. Active sites: {', '.join(site_ids)}{suffix}. Run 'skein sites' for full list.",
+        )
+    raise HTTPException(
+        status_code=404,
+        detail=f"Site '{site_id}' not found. No active sites exist - create one with 'skein site create <id> \"description\"'",
+    )
+
+
 @router.get("/sites/{site_id}", response_model=Site)
 async def get_site(site_id: str, store: JSONStore = Depends(get_project_store)):
     """Get specific site."""
     site = store.get_site(site_id)
     if not site:
-        # Include available active sites in error message for better UX
-        all_sites = store.get_sites()
-        active_sites = [s for s in all_sites if s.status == "active"]
-        if active_sites:
-            site_ids = [s.site_id for s in active_sites[:50]]
-            suffix = (
-                f" (+{len(active_sites) - 50} more)" if len(active_sites) > 50 else ""
-            )
-            raise HTTPException(
-                status_code=404,
-                detail=f"Site '{site_id}' not found. Active sites: {', '.join(site_ids)}{suffix}. Run 'skein sites' for full list.",
-            )
-        raise HTTPException(
-            status_code=404,
-            detail=f"Site '{site_id}' not found. No active sites exist - create one with 'skein site create <id> \"description\"'",
-        )
+        _raise_site_not_found(site_id, store)
     return site
 
 
@@ -746,6 +747,20 @@ TITLE_EXAMPLES = {
     "summary": 'e.g., "Completed OAuth integration" or "Session retrospective: agent coordination"',
 }
 
+_DEFAULT_TITLE_EXAMPLE = 'e.g., "Clear description of what this folio is about"'
+
+HYPOTHESIS_VERDICTS = {
+    "confirmed",
+    "disconfirmed",
+    "inconclusive",
+    "deferred",
+    "blocked",
+}
+
+HYPOTHESIS_PRIORITIES = {"high", "medium", "low"}
+
+PRIORITY_ORDER = {"high": 0, "medium": 1, "low": 2}
+
 # Patterns for shard/worktree IDs:
 # - 65af2039-20251205-001 (8-char hex prefix)
 # - bucket-1210-20251210-001 (name-based)
@@ -780,9 +795,7 @@ def validate_folio_title(title: str, folio_type: str) -> str:
     """
     # Must have a title
     if not title or not title.strip():
-        example = TITLE_EXAMPLES.get(
-            folio_type, 'e.g., "Clear description of what this folio is about"'
-        )
+        example = TITLE_EXAMPLES.get(folio_type, _DEFAULT_TITLE_EXAMPLE)
         raise HTTPException(
             status_code=400,
             detail=f"{folio_type.capitalize()} needs a title that describes what it's about.\n\n{example}",
@@ -812,9 +825,7 @@ def validate_folio_title(title: str, folio_type: str) -> str:
 
     # Check for generic/lazy titles
     if title.lower() in GENERIC_TITLES:
-        example = TITLE_EXAMPLES.get(
-            folio_type, 'e.g., "Clear description of what this folio is about"'
-        )
+        example = TITLE_EXAMPLES.get(folio_type, _DEFAULT_TITLE_EXAMPLE)
         raise HTTPException(
             status_code=400,
             detail=f'"{title}" is too generic - what\'s this {folio_type} actually about?\n\n{example}',
@@ -822,9 +833,7 @@ def validate_folio_title(title: str, folio_type: str) -> str:
 
     # Check minimum length (avoid "ok", "done", etc.)
     if len(title) < 10:
-        example = TITLE_EXAMPLES.get(
-            folio_type, 'e.g., "Clear description of what this folio is about"'
-        )
+        example = TITLE_EXAMPLES.get(folio_type, _DEFAULT_TITLE_EXAMPLE)
         raise HTTPException(
             status_code=400,
             detail=f'"{title}" is too brief ({len(title)} chars) - give a bit more detail so others know what this covers.\n\n{example}',
@@ -860,22 +869,7 @@ async def post_to_site(
     # Verify site exists
     site = store.get_site(site_id)
     if not site:
-        # Include available active sites in error message for better UX
-        all_sites = store.get_sites()
-        active_sites = [s for s in all_sites if s.status == "active"]
-        if active_sites:
-            site_ids = [s.site_id for s in active_sites[:50]]
-            suffix = (
-                f" (+{len(active_sites) - 50} more)" if len(active_sites) > 50 else ""
-            )
-            raise HTTPException(
-                status_code=404,
-                detail=f"Site '{site_id}' not found. Active sites: {', '.join(site_ids)}{suffix}. Run 'skein sites' for full list.",
-            )
-        raise HTTPException(
-            status_code=404,
-            detail=f"Site '{site_id}' not found. No active sites exist - create one with 'skein site create <id> \"description\"'",
-        )
+        _raise_site_not_found(site_id, store)
 
     created_by = x_agent_id or "unknown"
     folio_id = generate_folio_id(folio_create.type)
@@ -1411,8 +1405,6 @@ async def unified_search(
         limit: Results per resource type (max 500)
         offset: Skip first N results
     """
-    import time
-
     start_time = time.time()
 
     # Parse resources
@@ -2006,19 +1998,6 @@ async def get_agent_yields(
 # ============================================================================
 # Hypothesis Endpoints
 # ============================================================================
-
-HYPOTHESIS_VERDICTS = {
-    "confirmed",
-    "disconfirmed",
-    "inconclusive",
-    "deferred",
-    "blocked",
-}
-
-HYPOTHESIS_PRIORITIES = {"high", "medium", "low"}
-
-PRIORITY_ORDER = {"high": 0, "medium": 1, "low": 2}
-
 
 class HypothesisVerdict(BaseModel):
     verdict: str
